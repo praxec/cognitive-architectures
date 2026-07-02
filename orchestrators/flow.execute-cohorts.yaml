@@ -1,0 +1,112 @@
+# orchestrators/flow.execute-cohorts.yaml
+#
+# Drive a cpm-planner plan to completion, one ready deliverable at a time:
+#
+#   acquiring   → plan.acquire_cohort (max_count 1) — atomically lease the next
+#                 READY deliverable (respecting prerequisites + file-disjoint
+#                 locks), or report `exhausted: true` when none are ready.
+#   cohort_gate → exhausted? → done : build the leased deliverable.
+#   building    → cap.implement.build-loop on the deliverable spec (builder →
+#                 cargo → QA reviewer → commit-slice).
+#   marking     → plan.mark_status complete (CAS; this driver holds the lock),
+#                 then LOOP back to acquiring for the next now-unblocked one.
+#
+# The loop terminates on the SCALAR `exhausted` flag (cpm-planner emits it
+# precisely so a state-machine driver needn't test array-emptiness, which the
+# guard-expr language can't express and which fails-fast on a missing path).
+#
+# The build SPEC for each deliverable rides in the plan graph's
+# `deliverable.metadata` (cpm-planner returns it on the FLAT cohort wire shape
+# `{deliverables:[{id, metadata, ...}], locks:[...], exhausted}`), so the driver
+# reads `$.output.deliverables.0.metadata` and hands it straight to the build
+# loop — no separate id→spec lookup needed.
+#
+# Acquire + build are sub-CAPABILITY calls (flow→cap, legal; flow→flow is not —
+# SPEC §3, V11). The acquire is wrapped in cap.coordinate.acquire-cohort so its
+# outputs are snippet-typed slots the slot table (V13) recognizes — a transition
+# `output:` block does NOT seed a slot usable by a later `use.inputs`, only
+# `inputs:` and a child's `use.outputs` do. Build is cap.implement.build-loop;
+# mark_status is a direct kind:mcp call (its map is not slot-table-checked).
+#
+# max_count is 1 (serial-per-driver): N parallel cohorts come from running N
+# instances of THIS flow with distinct caller_ids (cpm-planner's locks keep them
+# file-disjoint). flow.loom composes elicit→design→plan→execute-cohorts on top.
+#
+# Requires the `cpm-planner` connection (connections/cpm-planner.yaml),
+# cognitive/cap.coordinate.acquire-cohort, and cognitive/cap.implement.build-loop.
+
+workflows:
+  flow.execute-cohorts:
+    lifecycle: experimental
+    description: >
+      Drive a cpm-planner plan to completion: repeatedly acquire the next ready
+      deliverable, build it via cap.implement.build-loop, and mark it complete,
+      looping until the plan is exhausted. Terminates on the scalar `exhausted`
+      flag; the build spec rides in deliverable.metadata.
+    inputs:
+      plan_id:   { type: string, required: true }
+      repo_path: { type: string, required: true }
+      # This driver's lock-holder identity (distinct per parallel driver so
+      # cpm-planner keeps cohorts file-disjoint). Held across acquire → mark.
+      caller_id: { type: string, required: true }
+    initialState: acquiring
+    states:
+
+      # Lease the next ready deliverable (typed outputs via the cap so the slot
+      # table recognizes them for the build step's use.inputs).
+      acquiring:
+        goal: Acquire the next ready deliverable from cpm-planner (or detect exhaustion).
+        transitions:
+          acquire:
+            target: cohort_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.coordinate.acquire-cohort
+              use:
+                inputs:
+                  plan_id:   "$.workflow.input.plan_id"
+                  caller_id: "$.workflow.input.caller_id"
+                outputs:
+                  "$.context.cohort_exhausted":    exhausted
+                  "$.context.next_deliverable":    spec
+                  "$.context.next_deliverable_id": deliverable_id
+
+      # BRANCH on the scalar exhaustion flag (exhaustive over true|false).
+      cohort_gate:
+        transitions:
+          finish:
+            target: done
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.cohort_exhausted == true" }
+          build_next:
+            target: implementing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.cohort_exhausted == false" }
+
+      # Build + record the leased deliverable via the single-deliverable sub-flow
+      # (build-loop → plan.mark_status complete), then LOOP back to acquire the
+      # next now-unblocked deliverable. flow→flow nesting (V11 relaxed) — this
+      # replaces the previously-inlined build+mark, so the two flows share one
+      # definition of "execute a deliverable".
+      implementing:
+        goal: Build + record the leased deliverable, then loop.
+        transitions:
+          implement:
+            target: acquiring
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.implement.deliverable
+              use:
+                inputs:
+                  deliverable:    "$.context.next_deliverable"
+                  repo_path:      "$.workflow.input.repo_path"
+                  plan_id:        "$.workflow.input.plan_id"
+                  deliverable_id: "$.context.next_deliverable_id"
+                  caller_id:      "$.workflow.input.caller_id"
+
+      done:
+        terminal: true

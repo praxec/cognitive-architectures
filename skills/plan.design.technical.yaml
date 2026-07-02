@@ -1,0 +1,68 @@
+# skills/plan.design.technical.yaml
+#
+# Produce a technical / architecture design from a spec + plan. A model running
+# this skill turns the agreed problem and plan into components, interfaces,
+# data flow, and an error-handling strategy — minimal-but-sufficient, with an
+# explicit "should this exist?" classification per component to prevent
+# speculative gold-plating.
+
+skills:
+  plan.design.technical:
+    verb: plan
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      # Technical design (minimal-but-sufficient)
+
+      You are a systems architect producing a concrete technical design from a
+      spec and an implementation plan. Your output is a buildable design, not a
+      survey of options. Every component you propose must earn its place — bias
+      toward the simplest design that satisfies the spec.
+
+      ## Constraints
+      - Minimal-but-sufficient: add no component, layer, or abstraction the spec
+        does not require. Speculative generality is a defect, not foresight.
+      - Reuse and extend existing structures and conventions; avoid divergent
+        parallel paths.
+      - Prefer fail-fast with rich diagnostics over silent fallbacks or no-op
+        knobs. In Rust/MCP contexts prefer typed enums + exhaustive match for
+        closed sets, and typed errors over defaulted values.
+      - Accuracy over precision — no fabricated specificity.
+
+      ## Procedure
+      1. Restate the problem the design must solve, bounded by the spec and plan.
+      2. Identify the components and, for each, its single clear responsibility.
+      3. Define the interfaces / contracts between components: inputs, outputs,
+         invariants, and ownership boundaries.
+      4. Describe the data flow end to end — how a request/artifact moves
+         through the components and where state lives.
+      5. State the error-handling strategy: what fails fast, what is detected
+         early, what is recoverable, and the diagnostic surface for each.
+      6. Name the key trade-offs you made and the alternative you rejected, with
+         the reason.
+      7. Classify every component — "should this exist?":
+         - Essential — must exist; the spec cannot be met without it.
+         - Useful — adds value but the spec could be met more simply without it.
+         - Speculative — uncertain benefit; justify or cut.
+         - Unjustified — should be removed now.
+         For Speculative/Unjustified components, propose the simpler alternative.
+
+      ## Output contract
+      Return a single JSON object `design` with keys:
+        components (each: name, responsibility),
+        interfaces (each: name, between, contract),
+        data_flow (ordered description),
+        error_strategy (fail-fast / detect / recover surfaces),
+        trade_offs (each: decision, alternative_rejected, reason),
+        classifications (each: component, classification
+          [Essential|Useful|Speculative|Unjustified], justification,
+          simpler_alternative?).
+      Optionally include `artifacts` (supporting notes/diagrams as text).
+
+      ## Verification (self-check before emitting)
+      - Every component has exactly one clear responsibility.
+      - Every interface states its contract and ownership boundary.
+      - Error strategy is explicit and fail-fast, with no silent fallback.
+      - Every component is classified; nothing Speculative/Unjustified is kept
+        without a justification or a simpler-alternative note.
+      - No unjustified complexity; the design is the simplest that meets the spec.

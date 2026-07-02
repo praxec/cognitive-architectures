@@ -1,0 +1,86 @@
+version: "1.0.0"
+scripts:
+  run.scaffold.cargo-mcp:
+    verb: run
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Scaffold a greenfield Rust MCP-server repo: cargo binary crate,
+      # Apache-2.0 LICENSE, README, a CI workflow, .gitignore, and an
+      # initial git commit. Refuses if the target already holds a
+      # Cargo.toml (non-destructive).
+      #
+      # Inputs (positional first, env fallback — matches the library's
+      # script arg convention, e.g. search.codebase.ripgrep):
+      #   $1 / REPO_PATH   — target directory for the new repo
+      #   $2 / CRATE_NAME  — crate name
+      # Emits JSON on stdout: { scaffolded, repo_path, crate_name }.
+      set -euo pipefail
+      REPO_PATH="${1:-${REPO_PATH:?repo_path required (arg 1 or $REPO_PATH)}}"
+      CRATE_NAME="${2:-${CRATE_NAME:?crate_name required (arg 2 or $CRATE_NAME)}}"
+
+      # Idempotent: a target that already holds a Cargo.toml is treated as
+      # already-scaffolded — a non-failing no-op, not an error. The greenfield
+      # flow can then advance to the build. (Honest signal: scaffolded=false +
+      # already_present=true; we did NOT create anything.)
+      if [ -f "$REPO_PATH/Cargo.toml" ]; then
+        echo "{\"scaffolded\": false, \"already_present\": true, \"repo_path\": \"$REPO_PATH\", \"reason\": \"Cargo.toml already exists\"}"
+        exit 0
+      fi
+
+      mkdir -p "$REPO_PATH"
+      cd "$REPO_PATH"
+
+      # cargo init creates Cargo.toml, src/main.rs, .gitignore, and git init.
+      cargo init --bin --name "$CRATE_NAME" >&2
+
+      cat > README.md <<EOF
+      # $CRATE_NAME
+
+      An MCP server. Scaffolded by praxec \`cognitive/flow.greenfield-mcp\`.
+
+      ## Build
+      \`\`\`sh
+      cargo build
+      \`\`\`
+
+      ## License
+      [Apache-2.0](LICENSE).
+      EOF
+
+      cat > LICENSE <<EOF
+      Apache License 2.0
+
+      Copyright $(git config user.name 2>/dev/null || echo "the authors")
+
+      Licensed under the Apache License, Version 2.0 (the "License");
+      you may not use this file except in compliance with the License.
+      You may obtain a copy of the License at
+
+          http://www.apache.org/licenses/LICENSE-2.0
+
+      See http://www.apache.org/licenses/LICENSE-2.0 for the full text.
+      EOF
+
+      mkdir -p .github/workflows
+      cat > .github/workflows/ci.yml <<'EOF'
+      name: CI
+      on: [push, pull_request]
+      jobs:
+        test:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+            - run: cargo fmt --all -- --check
+            - run: cargo clippy --workspace --all-targets -- -D warnings
+            - run: cargo test --workspace
+      EOF
+
+      # cargo init already wrote a .gitignore (/target). Commit the skeleton.
+      git add -A >&2
+      git -c user.name="praxec" -c user.email="praxec@localhost" \
+        commit -m "chore: scaffold $CRATE_NAME (praxec greenfield-mcp)" >&2
+
+      echo "{\"scaffolded\": true, \"repo_path\": \"$REPO_PATH\", \"crate_name\": \"$CRATE_NAME\"}"

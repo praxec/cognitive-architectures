@@ -1,0 +1,43 @@
+# capabilities/cap.verify.stub-scan.yaml
+#
+# Deterministic cap: bind to the `verify.stub-scan` script to grep non-test
+# Rust under a repo for stub / unfinished-work markers (todo!/unimplemented!/
+# unreachable!/panic!/TODO/FIXME). The deterministic complement to the
+# `cap.review.completeness` judgment gate. Verb `verify` (the deterministic
+# script gate) -> V6 requires a `kind: script` executor, like
+# cap.verify.workspace-green. The script needs the repo dir, so the cap passes
+# it from $.workflow.input.repo_path as a positional arg (like
+# cap.run.scaffold-repo).
+
+workflows:
+  cap.verify.stub-scan:
+    verb: verify
+    lifecycle: experimental
+    description: >
+      Deterministic stub / dead-code scan: grep non-test Rust under the repo
+      for todo!/unimplemented!/unreachable!/panic!/TODO/FIXME; emit
+      passed (true iff zero hits) + the hit list.
+    snippet:
+      inputs:
+        repo_path: { type: string, required: true }
+      outputs:
+        passed: { type: boolean }
+        hits:   { type: array }
+    initialState: ready
+    states:
+      ready:
+        goal: Scan the repo for stub markers; emit passed + hits.
+        transitions:
+          run:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.stub-scan
+              args:
+                - "$.workflow.input.repo_path"
+            # Script executor wraps stdout; parsed JSON is at $.output.json.*
+            output:
+              passed: "$.output.json.passed"
+              hits:   "$.output.json.hits"
+      done: { terminal: true }

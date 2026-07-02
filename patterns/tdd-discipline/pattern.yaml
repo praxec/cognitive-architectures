@@ -1,0 +1,145 @@
+# Pattern: tdd-discipline
+#
+# RED → GREEN → REFACTOR with hard discipline gates:
+#   - red:    a NEW failing test must exist before implementation starts
+#   - green:  tests must pass AND test_count must increase (anti-trivialization)
+#   - refactor: tests stay green AND test_count must not decrease
+#
+# Stronger than free-form "tdd" prompt skills because the discipline
+# is structurally enforced by guards, not by model self-discipline.
+#
+# Adapted from cognitive-architectures/workflows/tdd.yaml; this is the
+# pattern-library composable form for use inside larger workflows.
+
+version: "1.0.0"
+
+workflows:
+  tdd_discipline:
+    description: >
+      RED → GREEN → REFACTOR with anti-trivialization gates. Tests
+      must increase from baseline before implementation is accepted;
+      refactor cannot drop test count.
+    tags: [tdd, discipline, testing, anti-cheating]
+    version: "2026-05-25"
+    initialState: idle
+    enable_human_ask: true
+    human_ask_cap: 3
+
+    inputSchema:
+      type: object
+      required: [test_cmd, count_cmd]
+      properties:
+        test_cmd:  { type: string, description: "shell command running the test suite (must emit JSON with passed:bool)" }
+        count_cmd: { type: string, description: "shell command emitting JSON with count:integer (test count)" }
+        feature:   { type: string, default: "next change" }
+
+    blackboard:
+      cyclesCompleted: { type: integer }
+      baselineCount:   { type: integer }
+      lastPassed:      { type: boolean }
+      lastCount:       { type: integer }
+    initialContext:
+      cyclesCompleted:   0
+      baselineCount:     0
+      lastPassed:        false
+      lastCount:         0
+
+    states:
+      idle:
+        goal: Capture the baseline test count and start the cycle.
+        transitions:
+          start_cycle:
+            target: red
+            actor: deterministic
+            executor:
+              kind: cli
+              connection: shell
+              args:
+                - "-c"
+                - "$.workflow.input.count_cmd"
+            output:
+              baselineCount: "$.output.json.count"
+
+      red:
+        goal: Write a failing test; confirm it fails.
+        transitions:
+          confirm_red:
+            target: green_pending
+            actor: deterministic
+            executor:
+              kind: cli
+              connection: shell
+              args:
+                - "-c"
+                - "$.workflow.input.test_cmd"
+              treatNonZeroAsFailure: false
+            output:
+              lastPassed: "$.output.json.passed"
+              lastCount:  "$.output.json.count"
+
+      green_pending:
+        goal: Make the failing test pass.
+        transitions:
+          confirm_green:
+            target: green
+            actor: deterministic
+            # Discipline gate: tests pass AND test count increased.
+            # Catches "deleted the failing test" and "stubbed the
+            # assertion" antitrivialization patterns.
+            guards:
+              - { kind: expr, expr: "$.context.lastPassed == true" }
+              - { kind: expr, expr: "$.context.lastCount > $.context.baselineCount" }
+            executor:
+              kind: cli
+              connection: shell
+              args:
+                - "-c"
+                - "$.workflow.input.test_cmd"
+              treatNonZeroAsFailure: false
+            output:
+              lastPassed: "$.output.json.passed"
+              lastCount:  "$.output.json.count"
+
+      green:
+        goal: "Decide: refactor, start next cycle, or finish."
+        transitions:
+          start_refactor:
+            target: refactoring
+            executor: { kind: noop }
+          start_new_cycle:
+            target: red
+            # SPEC §29.6 — cap consecutive cycles to prevent runaway
+            # cycling without progress.
+            max_fires_per_visit: 20
+            executor: { kind: noop }
+            output:
+              cyclesCompleted: { add: ["$.context.cyclesCompleted", 1] }
+              baselineCount:   "$.context.lastCount"
+          finish:
+            target: done
+            guards:
+              - { kind: expr, expr: "$.context.cyclesCompleted >= 1" }
+            executor: { kind: noop }
+
+      refactoring:
+        goal: Refactor without changing behavior; tests stay green; count does not drop.
+        transitions:
+          confirm_refactor:
+            target: green
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.lastPassed == true" }
+              - { kind: expr, expr: "$.context.lastCount >= $.context.baselineCount" }
+            executor:
+              kind: cli
+              connection: shell
+              args:
+                - "-c"
+                - "$.workflow.input.test_cmd"
+              treatNonZeroAsFailure: false
+            output:
+              lastPassed: "$.output.json.passed"
+              lastCount:  "$.output.json.count"
+
+      done:
+        terminal: true

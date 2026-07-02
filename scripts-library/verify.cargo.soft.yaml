@@ -1,0 +1,38 @@
+# scripts-library/verify.cargo.soft.yaml
+#
+# SOFT cargo test for a build LOOP: unlike verify.workspace.green /
+# test.cargo.workspace (which exit non-zero on failure → abort the executor),
+# this ALWAYS exits 0 and reports `{passed, summary}` on stdout, so a build-loop
+# gate can BRANCH on the result and loop back to the coding step on failure
+# instead of failing the whole flow. The `summary` (tail of the build log) feeds
+# back to the agent so the next iteration can fix the error. Cargo runs in the
+# leaf's `workingDirectory` (point it at the built repo).
+version: "1.0.0"
+scripts:
+  verify.cargo.soft:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: a failing cargo must NOT abort — report as data.
+      # Run fmt + clippy + test SEPARATELY (NOT &&) so a single fmt failure does
+      # not HIDE the clippy/test issues — the agent then fixes ALL issues in one
+      # pass (fewer iterations → fewer model escalations → less $$ on the ceiling
+      # model). clippy is scoped to --lib --bins (the documented exit bar;
+      # --all-targets pulls in untracked/WIP tests whose lints fail a clean gate).
+      fmt_out=$(cargo fmt --all -- --check 2>&1);                        fmt_rc=$?
+      clippy_out=$(cargo clippy --workspace --lib --bins -- -D warnings 2>&1); clippy_rc=$?
+      test_out=$(cargo test --workspace 2>&1);                          test_rc=$?
+      log="$fmt_out
+      $clippy_out
+      $test_out"
+      if [ "$fmt_rc" -eq 0 ] && [ "$clippy_rc" -eq 0 ] && [ "$test_rc" -eq 0 ]; then
+        passed=true; else passed=false; fi
+      # ALL diagnostic lines (every error + warning + failed test + panic), not a
+      # tail — so the agent addresses the COMPLETE set, not just the last 2KB.
+      issues=$(printf '%s\n' "$log" \
+        | grep -nE 'error(\[|:)|^[[:space:]]*warning:|panicked|test result: FAILED|\.\.\. FAILED|cannot find|mismatched types|unresolved import' \
+        | head -300 | jq -Rs . 2>/dev/null || printf '""')
+      summary=$(printf '%s' "$log" | tail -c 2000 | jq -Rs . 2>/dev/null || printf '""')
+      printf '{"passed": %s, "issues": %s, "summary": %s}\n' "$passed" "$issues" "$summary"

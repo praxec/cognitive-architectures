@@ -1,0 +1,56 @@
+# skills/review.fmeca.enumerate.yaml
+#
+# Enumeration-only FMECA skill. The LLM does the FUZZY half (find failure
+# modes, causes, effects; pick OBSERVATIONS from the fixed catalog); the
+# deterministic fmeca-mcp `analyze` tool does the CALCULABLE half (criticality,
+# residual, readiness, response_class). The model NEVER supplies a score or a
+# verdict — that is the whole point (separation of concerns: llm:reasoning +
+# tools:deterministic). This skill replaces the old generative FMECA prompt.
+
+skills:
+  review.fmeca.enumerate:
+    verb: review
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      # FMECA enumeration (you enumerate; the tool scores)
+
+      You are the FUZZY half of a deterministic FMECA. Read the `subject`
+      (a plan, a design, or a system/diff descriptor) and ENUMERATE its
+      failure modes. For a codebase audit the subject carries a `digest`
+      (file tree + line counts + risk markers like unwrap/panic/TODO, gathered
+      deterministically) — enumerate failure modes from that digest; you do NOT
+      have file access, so the digest is your evidence. You MUST NOT assign or estimate any numeric/qualitative
+      score, criticality, or verdict — the fmeca-mcp `analyze` tool computes
+      those deterministically from your observations. Supplying a score
+      yourself is the exact failure this design exists to prevent.
+
+      ## Per failure mode, produce
+      - `id`            — stable kebab id, unique in this analysis.
+      - `component`     — `{ id }` the entity it affects (reuse ids consistently).
+      - `description`, `cause`, `effect` — concise prose.
+      - `domain`        — one of: ux | runtime | architecture | delivery.
+      - `scope`         — optional: localized | cross_cutting | structural.
+      - `severity_observations`    — a list of OBSERVATION IDS chosen from the
+        provided scoring catalog (`$.context.fmeca_catalog`), severity axis.
+        Pick the observations that are TRUE of this failure mode; do not pick a
+        level — pick what you observe. The code maps observations → severity.
+      - `probability_observations` — likewise from the probability axis.
+      - `mitigations` — optional list, each `{ id, kind, description,
+        residual_severity, residual_probability }` where `kind` is
+        prevention | detection | fail_fast (PREFER prevention, then detection,
+        then fail_fast — a fail_fast-only mitigation is flagged weak by the tool).
+
+      ## Discipline
+      - Only use observation ids present in `$.context.fmeca_catalog`. An unknown
+        id is rejected by the tool (`INVALID_OBSERVATION`).
+      - Cover the four domains (ux / runtime / architecture / delivery) as the
+        subject warrants. Hunt the agentic-shortcut failure modes (fallbacks /
+        papering-over instead of fail-fast) explicitly.
+      - If you cannot observe enough to characterize a mode, say so via a
+        missing cause/effect rather than inventing a score.
+
+      ## Output
+      Submit `failure_modes`: the array described above. Nothing else — no
+      criticality, no readiness, no verdict. The flow then calls `analyze`,
+      and the gate branches on the tool's COMPUTED readiness.

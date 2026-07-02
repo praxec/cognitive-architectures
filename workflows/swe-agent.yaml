@@ -1,0 +1,187 @@
+# workflows/swe-agent.yaml
+#
+# Reference SWE-agent workflow. Six states (planning → retrieving → editing
+# → verifying → critiquing → human review), each backed by a delegated
+# sub-agent and a guidance skill fragment.
+#
+# This file declares ONLY the workflow. The matching skills (referenced
+# by subject in `skills:` lists below) and connections (referenced by name
+# in executor `connection:` fields) are composed in by the gateway config
+# that `include:`s this file. See examples/full-swe-pipeline.yaml.
+#
+# Connections expected in scope:
+#   - codebase_graph    (MCP — SCIP-backed code graph)
+#   - verifier_harness  (MCP — runs lint/test/build/sast)
+#   - constrained_edit  (CLI — emits the 8 allowed edit ops)
+#
+# Skills expected in scope:
+#   - plan.specify.change-request
+#   - diagnose.codebase.search
+#   - implement.edit.constrained
+#   - review.code.adversarial
+#   - review.code.final-approval
+
+version: "1.0.0"
+
+workflows:
+  swe_agent:
+    description: >
+      Six-state SWE agent (plan → retrieve → edit → verify → critique →
+      human review) with delegate roles per state. The gateway enforces
+      the state machine; sub-agents do the cognitive work.
+    tags: [swe, coding, governed, reference]
+    version: "2026-05-25"
+    initialState: intake
+    # SPEC §29.3 (v0.4): auto-inject an `ask_human` self-loop transition
+    # into every non-terminal state. Sub-agents that hit ambiguity can
+    # route through the gateway for an out-of-band human clarification
+    # without needing per-state authoring of the ask path.
+    enable_human_ask: true
+    human_ask_cap: 3
+    skills:
+      - plan.specify.change-request
+      - review.code.adversarial
+    blackboard:
+      normalizedProblem:    { type: string }
+      acceptanceCriteria:   { type: array }
+      risk:                 { type: string }
+      evidencePack:         { type: object }
+      candidatePatch:       { type: object }
+      verifierPassed:       { type: boolean }
+      critique:             { type: object }
+      retryCount:           { type: integer }
+    initialContext:
+      retryCount: 0
+
+    states:
+      intake:
+        goal: Receive the change request
+        transitions:
+          start_planning:
+            target: planning
+            executor: { kind: noop }
+
+      planning:
+        delegate: planning-agent
+        goal: Normalise the change request into a typed problem
+        skills:
+          - plan.specify.change-request
+        transitions:
+          plan_ready:
+            target: retrieving
+            inputSchema:
+              type: object
+              required: [normalizedProblem, risk]
+              properties:
+                normalizedProblem:  { type: string }
+                acceptanceCriteria: { type: array }
+                risk:               { type: string }
+            executor: { kind: noop }
+            output:
+              normalizedProblem:  "$.arguments.normalizedProblem"
+              acceptanceCriteria: "$.arguments.acceptanceCriteria"
+              risk:               "$.arguments.risk"
+
+      retrieving:
+        delegate: retrieval-agent
+        goal: Assemble a precise evidence pack
+        skills:
+          - diagnose.codebase.search
+        transitions:
+          evidence_ready:
+            target: editing
+            executor:
+              kind: mcp
+              connection: codebase_graph
+              tool: assemble_evidence_pack
+            output:
+              evidencePack: "$.output"
+
+      editing:
+        delegate: editing-agent
+        goal: Produce constrained edit operations
+        skills:
+          - implement.edit.constrained
+        transitions:
+          edits_produced:
+            target: verifying
+            executor:
+              kind: cli
+              connection: constrained_edit
+            output:
+              candidatePatch: "$.output.patch"
+
+      verifying:
+        goal: Run the workspace's verification gauntlet (format + lint + test)
+        transitions:
+          run_verifier:
+            target: critiquing
+            actor: deterministic
+            # SPEC §22 — invoke the curated `verify.workspace.green` script
+            # from the library. The script body is content-pinned by hash on
+            # this workflow's snapshot; editing it after `workflow.start`
+            # cannot mutate what an in-flight instance sees.
+            executor:
+              kind: script
+              subject: verify.workspace.green
+            output:
+              # The script executor's output JSON carries `success: bool`
+              # alongside the auto-parsed `json` field from stdout. Mapping
+              # either works; we use the executor-level `success` because
+              # it's stable across all scripts (the stdout JSON shape is
+              # script-specific).
+              verifierPassed: "$.output.success"
+
+      critiquing:
+        delegate: critique-agent
+        goal: Adversarial review of the patch
+        skills:
+          - review.code.adversarial
+        transitions:
+          accept_low_risk:
+            target: completed
+            guards:
+              - { kind: expr, expr: "$.context.verifierPassed == true" }
+              - { kind: expr, expr: "$.context.risk != 'high'" }
+              - { kind: expr, expr: "$.context.risk != 'critical'" }
+            executor: { kind: noop }
+          accept_high_risk:
+            target: human_review
+            guards:
+              - { kind: expr, expr: "$.context.verifierPassed == true" }
+              - { kind: expr, expr: "$.context.risk == 'high'" }
+            executor: { kind: noop }
+          retry:
+            target: retrieving
+            guards:
+              - { kind: expr, expr: "$.context.verifierPassed == false" }
+              - { kind: expr, expr: "$.context.retryCount < 3" }
+            # SPEC §29.6 (v0.4): defense-in-depth alongside the retryCount
+            # guard. Bounds re-fires per critiquing-state visit even if
+            # the guard logic above is later tightened or weakened.
+            max_fires_per_visit: 3
+            executor: { kind: noop }
+            output:
+              retryCount: { add: ["$.context.retryCount", 1] }
+          escalate:
+            target: human_review
+            guards:
+              - { kind: expr, expr: "$.context.verifierPassed == false" }
+              - { kind: expr, expr: "$.context.retryCount >= 3" }
+            executor: { kind: noop }
+
+      human_review:
+        goal: Final human sign-off
+        actor: human
+        skills:
+          - review.code.final-approval
+        transitions:
+          approve:
+            target: completed
+            executor: { kind: human }
+          reject:
+            target: planning
+            executor: { kind: human }
+
+      completed:
+        terminal: true

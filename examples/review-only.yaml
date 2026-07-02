@@ -1,0 +1,25 @@
+# examples/review-only.yaml
+#
+# Minimal PR-review gateway. Drop-in for a team that already has
+# CI/deploy and just wants adversarial review on every PR before a
+# human approves.
+#
+# Start with:
+#   praxec serve --config examples/review-only.yaml
+#
+# Requires a GitHub MCP server reachable at `github-mcp-server`
+# (the connection's `command`). Export GITHUB_TOKEN before starting.
+
+version: "1.0.0"
+
+include:
+  # Workflow
+  - ../workflows/pr-review.yaml
+  # Connection
+  - ../connections/github-mcp.yaml
+  # Skills
+  - ../skills/review.code.adversarial.yaml
+  - ../skills/review.code.final-approval.yaml
+
+audit:
+  sink: stdout

@@ -1,0 +1,116 @@
+# Pattern: diagnose-and-explain
+#
+# Parallel hypothesis generation + evidence aggregation +
+# explanation synthesis. Inspired by the diagnose pattern
+# (see mattpocock/skills): fan out N hypothesis-explorer
+# sub-workflows in parallel, aggregate their evidence,
+# then synthesize an explanation.
+
+version: "1.0.0"
+
+workflows:
+  diagnose_and_explain:
+      description: >
+          Parallel hypothesis exploration → evidence aggregation →
+          explanation synthesis. Each hypothesis runs as an isolated
+          sub-workflow with its own audit trail; the synthesis step
+          consumes all branches' findings via [*] array projection.
+      tags: [diagnose, parallel, evidence, synthesis]
+      version: "2026-05-25"
+      initialState: scoping
+      enable_human_ask: true
+      human_ask_cap: 2
+
+      inputSchema:
+          type: object
+          required: [bug_report]
+          properties:
+              bug_report:
+                  type: object
+                  required: [title, symptoms]
+                  properties:
+                      title: { type: string }
+                      symptoms: { type: string }
+                      context: { type: object }
+              hypotheses:
+                  type: array
+                  items: { type: string }
+                  description: "named hypotheses to explore in parallel (e.g. [race_condition, memory_leak, off_by_one])"
+                  default:
+                      [
+                          "race_condition",
+                          "input_validation",
+                          "state_corruption",
+                      ]
+
+      blackboard:
+          bug_report: { type: object }
+          hypotheses: { type: array }
+          branch_results: { type: array }
+          findings: { type: array } # per-hypothesis findings
+          explanation: { type: string } # final synthesis
+
+      states:
+          scoping:
+              goal: Receive the bug report + hypothesis seed list.
+              transitions:
+                  start:
+                      target: exploring
+                      executor: { kind: noop }
+                      output:
+                          bug_report: "$.workflow.input.bug_report"
+                          hypotheses: "$.workflow.input.hypotheses"
+
+          exploring:
+              goal: Fan out one hypothesis-explorer per hypothesis.
+              transitions:
+                  run_explorers:
+                      target: synthesizing
+                      actor: deterministic
+                      executor:
+                          kind: parallel
+                          branches:
+                              for_each: "$.context.hypotheses"
+                              where: "$.value != ''"
+                              do:
+                                  kind: workflow
+                                  definitionId: explore_hypothesis # operator supplies; produces {hypothesis, evidence, finding}
+                                  input:
+                                      hypothesis: "$.branch.value"
+                                      bug_report: "$.context.bug_report"
+                                      branch_index: "$.branch.index"
+                          join:
+                              # Aggregator: at least one hypothesis must produce
+                              # findings; otherwise we have no diagnosis. Operators
+                              # wanting stricter "all hypotheses must terminate
+                              # cleanly" swap to join: all.
+                              aggregator:
+                                  kind: expression
+                                  expr: "$.ok_count >= 1"
+                          max_concurrency: 4
+                          on_branch_failure: continue
+                          total_timeout_ms: 600000
+                      output:
+                          branch_results: "$.output.branches"
+                          findings: "$.output.branches[*].output.finding"
+
+          synthesizing:
+              delegate: synthesizer-agent
+              goal: >
+                  Read all hypothesis findings; synthesize a single explanation
+                  that ranks hypotheses by evidence support and proposes a
+                  most-likely root cause.
+              transitions:
+                  submit_explanation:
+                      target: done
+                      inputSchema:
+                          type: object
+                          required: [explanation]
+                          properties:
+                              explanation: { type: string, minLength: 50 }
+                      executor: { kind: noop }
+                      output:
+                          explanation: "$.arguments.explanation"
+
+          done:
+              terminal: true

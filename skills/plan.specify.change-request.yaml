@@ -1,0 +1,33 @@
+# skills/plan.specify.change-request.yaml
+#
+# Verb-mirror root: `plan` (also a domain root). Subject:
+# `plan.specify.change-request` — durable artifact (a normalized problem
+# statement). Lifted verbatim from praxec examples/swe-agent.yaml.
+skills:
+  plan.specify.change-request:
+    verb: plan
+    lifecycle: stable
+    source: cognitive-architectures
+    body: |
+      # Normalising a change request
+      Convert the raw issue into a typed problem statement. Required fields:
+      `normalizedProblem`, `acceptanceCriteria`, `risk` (low|medium|high|critical),
+      `blastRadius` (touchesAuth, touchesSchema, crossRepo, estimatedFiles).
+      Read evidence; do not propose code.
+
+      # Deliverables DAG (schedulable work breakdown)
+      ALSO emit a top-level `deliverables` array — the schedulable core of the
+      plan, consumed downstream by the CPM planner (`plan.submit`). Each
+      deliverable is an object:
+        - `id`            (string, unique)
+        - `owned_files`   (array of repo-relative paths this deliverable creates
+                           or owns) — **MUST be DISJOINT across deliverables**;
+                           no two deliverables may list the same file.
+        - `prerequisites` (array of other deliverable `id`s that must complete
+                           first) — must reference real ids; the graph is a DAG
+                           (no cycles).
+        - `estimated_effort_hours` (number, optional)
+      Decompose by what can proceed in parallel: split work so independent
+      file-sets are separate deliverables, and serialize only true
+      dependencies via `prerequisites`. Foundational types/data-model come
+      first; tests and the integration/server layer depend on them.

@@ -1,0 +1,54 @@
+# skills/refactor.triz.yaml
+#
+# The inventive-resolution lens for the FMECA convergence loop
+# (flow.harden.fmeca-converge). TRIZ (Altshuller): a residual failure mode often
+# hides a CONTRADICTION — the obvious fix for risk A worsens risk B (or hurts the
+# JTBD). TRIZ resolves the contradiction instead of trading one failure for
+# another, which is what keeps the loop CONVERGING (no new risks surface) rather
+# than oscillating. Used by cap.refactor.mitigate-risks alongside refactor.poka-yoke.
+
+skills:
+  refactor.triz:
+    verb: refactor
+    lifecycle: stable
+    source: cognitive-architectures
+    body: |
+      # TRIZ: resolve the contradiction, don't trade one failure for another
+
+      A naive mitigation trades failure modes: add a confirmation dialog (fixes
+      misclicks) and you slow every action (new friction); add motion to draw
+      the eye (fixes "missed it") and you create motion-as-authority. The FMECA
+      loop will not converge if each round introduces what the last round
+      removed. TRIZ exists to break that.
+
+      ## Name the contradiction first
+
+      State it as: "to improve **X** the obvious move worsens **Y**." X is the
+      failure mode you must fix; Y is the property you must not sacrifice (often
+      a withstood requirement or a stated non-goal). If you can't name Y, you're
+      about to trade blindly.
+
+      ## Resolution principles (the high-yield subset)
+
+      - **Separation in time** — let the conflicting states exist at different
+        moments: reveal depth on demand (progressive disclosure) instead of
+        always-on; show motion once on transition, then a persistent static
+        state.
+      - **Separation in space / on condition** — the strong control only where/
+        when it's needed: gate the risky affordance behind its precondition;
+        full fidelity on the detail view, summary elsewhere.
+      - **Prior action / preliminary cushion** — establish the safe state before
+        it's needed: render the partial/empty/error state by default, fill in as
+        data arrives, so failure is just "the default, not yet replaced".
+      - **Self-service / feedback** — let the system reveal its own state (an
+        error boundary that shows what failed) rather than depending on the user
+        to notice.
+      - **The other way round** — invert: instead of flagging thin evidence,
+        make depth-of-evidence the primary surface so thinness is visible by its
+        absence.
+
+      ## Output discipline
+
+      For each contradiction: name X and Y, the principle you applied, and why
+      the result does NOT reintroduce Y or any non-goal. This is the check the
+      next FMECA round will make — do its work now.

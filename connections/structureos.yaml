@@ -1,0 +1,19 @@
+# connections/structureos.yaml
+#
+# REFERENCE connection (operators copy into their gateway config).
+# MCP connection to StructureOS — code structural analysis (god files,
+# cyclomatic complexity, dependency cycles, file-size outliers). Used
+# for pre-edit hygiene checks and refactor candidate detection.
+#
+# The installed server is `structureos-mcp` (no args); the workspace
+# root is provided via the STRUCTUREOS_WORKSPACE_ROOT env var.
+
+connections:
+  structureos:
+    kind: mcp
+    command: structureos-mcp
+    env:
+      STRUCTUREOS_WORKSPACE_ROOT: .
+    description: >
+      Code structural analysis: god files, cyclomatic complexity,
+      dependency cycles. Backs `refactor.*` and `diagnose.*` skills.

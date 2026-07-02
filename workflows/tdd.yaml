@@ -1,0 +1,145 @@
+# workflows/tdd.yaml
+#
+# Red → green → refactor with two simple discipline guards:
+#   - to go red→green, tests must now pass AND count must have strictly
+#     increased since the cycle started (cheap anti-trivialisation).
+#   - to refactor, tests must stay green and count must not drop.
+#
+# This is a smaller-shape variant of praxec's full anti-cheating
+# tdd example; for the full-power version (session baselines, count
+# rollback detection, structured cheating terminal state) see the main
+# praxec repo's examples/tdd/.
+#
+# Connections expected in scope:
+#   - shell   (CLI — runs the user's test command)
+
+version: "1.0.0"
+
+workflows:
+  tdd:
+    description: >
+      Red-green-refactor enforcement. The runner is the source of truth;
+      the workflow only advances when the runner's structured output
+      satisfies the guard.
+    tags: [tdd, discipline, testing]
+    version: "2026-05-25"
+    # SPEC §29.3 (v0.4): the implementing agent can ask for human
+    # clarification on test intent or refactor direction without
+    # breaking discipline.
+    enable_human_ask: true
+    human_ask_cap: 2
+
+    inputSchema:
+      type: object
+      required: [test_cmd]
+      properties:
+        test_cmd:    { type: string, description: "Shell command that runs the test suite." }
+        count_cmd:   { type: string, description: "Shell command that prints the integer test count." }
+        feature:     { type: string, default: "next change" }
+
+    initialState: idle
+    initialContext:
+      cyclesCompleted:   0
+      baselineCount:     0
+      lastPassed:        false
+      lastCount:         0
+
+    blackboard:
+      cyclesCompleted: { type: integer }
+      baselineCount:   { type: integer }
+      lastPassed:      { type: boolean }
+      lastCount:       { type: integer }
+
+    states:
+      idle:
+        goal: Capture the baseline test count and start a cycle
+        transitions:
+          start_cycle:
+            target: red
+            actor: deterministic
+            executor:
+              kind: cli
+              connection: shell
+              args:
+                - "-c"
+                - "$.workflow.input.count_cmd"
+            output:
+              baselineCount: "$.output.json.count"
+
+      red:
+        goal: Write a failing test; confirm it fails
+        transitions:
+          confirm_red:
+            target: green_pending
+            actor: deterministic
+            executor:
+              kind: cli
+              connection: shell
+              args:
+                - "-c"
+                - "$.workflow.input.test_cmd"
+              treatNonZeroAsFailure: false
+            output:
+              lastPassed: "$.output.json.passed"
+              lastCount:  "$.output.json.count"
+
+      green_pending:
+        goal: Make the failing test pass
+        transitions:
+          confirm_green:
+            target: green
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.lastPassed == true" }
+              - { kind: expr, expr: "$.context.lastCount > $.context.baselineCount" }
+            executor:
+              kind: cli
+              connection: shell
+              args:
+                - "-c"
+                - "$.workflow.input.test_cmd"
+              treatNonZeroAsFailure: false
+            output:
+              lastPassed: "$.output.json.passed"
+              lastCount:  "$.output.json.count"
+
+      green:
+        goal: "Decide: refactor, start a new cycle, or finish"
+        transitions:
+          start_refactor:
+            target: refactoring
+            executor: { kind: noop }
+          start_new_cycle:
+            target: red
+            executor: { kind: noop }
+            output:
+              cyclesCompleted: { add: ["$.context.cyclesCompleted", 1] }
+              baselineCount:   "$.context.lastCount"
+          finish:
+            target: done
+            guards:
+              - { kind: expr, expr: "$.context.cyclesCompleted >= 1" }
+            executor: { kind: noop }
+
+      refactoring:
+        goal: Refactor without changing behavior; tests stay green, count does not drop
+        transitions:
+          confirm_refactor:
+            target: green
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.lastPassed == true" }
+              - { kind: expr, expr: "$.context.lastCount >= $.context.baselineCount" }
+            executor:
+              kind: cli
+              connection: shell
+              args:
+                - "-c"
+                - "$.workflow.input.test_cmd"
+              treatNonZeroAsFailure: false
+            output:
+              lastPassed: "$.output.json.passed"
+              lastCount:  "$.output.json.count"
+
+      done:
+        terminal: true

@@ -1,0 +1,76 @@
+# skills/implement.tdd.discipline.yaml
+#
+# TDD as a hard discipline. The cap that uses this skill runs a
+# red-green-refactor self-loop with a `lastCount > baselineCount` guard
+# that catches the "deleted the failing test" anti-pattern by
+# construction. The skill body is what the implementing agent reads
+# at each loop iteration.
+
+skills:
+  implement.tdd.discipline:
+    verb: implement
+    lifecycle: stable
+    source: cognitive-architectures
+    body: |
+      # TDD red-green-refactor discipline
+
+      You are inside a TDD loop. The orchestrator already declared
+      the scope; you may only touch files inside `scope_paths`.
+
+      ## The discipline (per iteration)
+
+      1. **RED** — Write or update EXACTLY ONE test for the next slice,
+         carrying ONE atomic declarative behavioral assertion (see
+         below). In a compiled language (Rust), also write the MINIMAL
+         signatures/stubs the test needs to COMPILE — e.g. a fn whose
+         body is `unimplemented!()` — and nothing more. The test must
+         then COMPILE and FAIL. A test that passes immediately is a
+         tautology; a test that won't compile is not yet red. Do NOT
+         write the behavior here.
+      2. **GREEN** — Write the MINIMUM code that makes the failing
+         test pass. Resist refactoring during green; keep the diff
+         laser-focused on the one assertion. The new test must pass,
+         no previously-passing test may fail, and fmt + clippy must be
+         clean.
+      3. **REFACTOR** — With green tests, improve structure without
+         changing behavior. Re-run after every change. Stop when no
+         further improvement is obvious; do NOT refactor toward
+         speculative requirements.
+
+      ## One atomic assertion per test (HARD)
+
+      Each `#[test]` makes EXACTLY ONE declarative behavioral
+      assertion — a single `assert!` / `assert_eq!` / `assert_ne!` /
+      `assert_matches!`. Arrange and Act freely (setup, calls, `?`,
+      `.unwrap()` on preconditions), but ASSERT once: the test name
+      states the behavior, the one assertion pins it. If you need to
+      check N things, write N tests. Multiple assertions in one test
+      is rejected by the loop (`not_atomic`) — split it.
+
+      ## Hard rules (the loop ENFORCES these — they are not honor-system)
+
+      - **Test-first is observed.** The loop runs your test BEFORE you
+         implement and routes on a deterministic verdict; you cannot
+         reach the GREEN step without a compiling, failing new test
+         (`red_ok`).
+      - **One assertion per test** — enforced by a static scan
+         (`atomic_passed`); ≠1 assertion ⇒ `not_atomic`, back to RED.
+      - **Test count is monotonic** — RED must ADD a test
+         (`no_growth` blocks otherwise); GREEN may not DELETE one
+         (`tests_deleted` blocks). Deleting/weakening a failing test
+         to converge is rejected by construction.
+      - **Scope discipline** — out-of-scope writes are rejected by
+         the underlying edit tool. Don't try to work around it; if
+         the fix requires out-of-scope changes, escalate to
+         `cap.gate.human-signoff` for a scope expansion.
+      - **No speculative tests** — write tests for behavior the
+         current plan slice requires. "We'll need this later" tests
+         drift from intent.
+
+      ## Termination
+
+      The loop terminates when the implementation result satisfies
+      the plan AND all tests pass. Convergence within `max_iterations`
+      is required; otherwise the cap terminates with
+      `error_kind: tdd_no_convergence` and the orchestrator routes
+      to `cap.gate.human-signoff` for a scope review.

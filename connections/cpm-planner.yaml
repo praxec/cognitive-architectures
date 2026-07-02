@@ -1,0 +1,19 @@
+# connections/cpm-planner.yaml
+#
+# REFERENCE connection (operators copy into their gateway config; the
+# manifest deliberately leaves connections/ out of its layout).
+# MCP connection to cpm-planner — Critical Path Method planning. Submit
+# a task graph; get the critical path, slack, bottlenecks, plus
+# lock-aware cohort scheduling for parallel execution.
+#
+# Install: `cargo install cpm-planner` (binary `cpm-planner`, MCP/stdio).
+# Tools: plan.submit, plan.acquire_cohort, plan.heartbeat,
+#        plan.mark_status, plan.status, plan.force_release.
+
+connections:
+  cpm-planner:
+    kind: mcp
+    command: cpm-planner
+    description: >
+      Critical Path Method planner. Backs `cap.coordinate.cpm-plan`:
+      submit a task graph, receive critical path + cohort schedule.

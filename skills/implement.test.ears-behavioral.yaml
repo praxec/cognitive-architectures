@@ -1,0 +1,72 @@
+# skills/implement.test.ears-behavioral.yaml
+#
+# SHARED sub-skill: the test SHAPE used by both the EARS build path and the
+# defect-fix path. Defines the Arrange-Act-Assert structure with exactly one
+# ACT, the `VIOLATION [EARS_ID]` assertion-message convention, and boundary +
+# negative coverage discipline. No cap of its own — it is composed by other
+# caps (e.g. the tdd-loop / failing-test-first paths) as guidance the
+# implementing agent reads while writing each test. Hardened: no fabricated
+# specificity, minimal, Rust/MCP-aware.
+
+skills:
+  implement.test.ears-behavioral:
+    verb: implement
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      # EARS behavioral test shape (AAA, single-ACT, VIOLATION-tagged)
+
+      You are writing executable tests from EARS behavioral statements. Each test
+      is a theorem: a failing test is proof of a specific defect. This skill
+      defines the SHAPE every such test must take, in the target
+      language/framework of the codebase. It does not decide WHICH tests exist
+      (the plan / EARS set does) — it governs HOW each one is written.
+
+      ## Test structure (Arrange-Act-Assert)
+      - ARRANGE: all setup — preconditions, fixtures, mock/double configuration.
+        No assertions here.
+      - ACT: exactly ONE operation under test. This single trigger is what the
+        test is about. If you need two ACTs, you have two tests — split them.
+      - ASSERT: all verification, after the ACT. Each assertion checks one
+        logical claim and carries a violation message:
+        `VIOLATION [EARS_ID]: <what defect a failure proves>`.
+
+      ## Coverage discipline
+      - One EARS statement maps to one or more tests; every test traces back to
+        exactly one EARS id.
+      - Negatives: every feature has at least 2 `SHALL NOT` tests proving the
+        adjacent / security / safety behavior does NOT happen.
+      - Boundaries: write a test at each meaningful boundary for a parameter
+        (generic — empty / min / min±1 / max / max±1 / zero / negative — and any
+        domain-specific boundary). Enumerate the real ones; do not pad to a
+        count.
+      - Feature flags: every `WHERE [flag]` behavior has its inverse tested.
+      - Preconditions: for each documented precondition, a test proving graceful
+        handling when it is NOT met.
+      - Mocks: attest each external dependency (real behavior, fidelity risk),
+        or state `None` with justification. Flag always-succeeds /
+        instant-response / static-data / ignores-auth doubles.
+
+      ## Hard rules
+      - No conditional logic inside a test — an `if/else` in a test is two tests.
+      - No tautologies — a test that cannot fail proves nothing; if it passes the
+        instant it is written against absent behavior, it is mis-shaped.
+      - Use idiomatic patterns and assertion libraries of the target framework.
+        In Rust, prefer `#[test]` with `assert!`/`assert_eq!` carrying the
+        `VIOLATION [EARS_ID]` message, `#[should_panic(expected = ...)]` (or a
+        `Result`/error-variant assertion) for unwanted-condition statements, and
+        exhaustive matching over the error enum rather than string matching.
+
+      ## Output contract
+      This is composed guidance, not a standalone gate — it emits no transition
+      arguments of its own. The cap that composes it owns the verdict/result.
+      Produce tests that obey the shape above so the composing cap can rely on
+      single-ACT, `VIOLATION`-tagged, traceable tests.
+
+      ## Verification (self-check per test)
+      - Exactly one ACT; all setup before it, all assertions after.
+      - Every assertion carries `VIOLATION [EARS_ID]: ...`.
+      - The test traces to exactly one EARS id; no conditional logic; not a
+        tautology.
+      - Negative, boundary, inverse-flag, and precondition-violation coverage is
+        present where the EARS set requires it, with no padding.

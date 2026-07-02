@@ -1,0 +1,46 @@
+version: "1.0.0"
+scripts:
+  install.opensrc:
+    verb: install
+    lifecycle: stable
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Idempotent install of opensrc (https://opensrc.sh), the CLI that
+      # fetches package source from cargo / npm / pypi / etc. Used by
+      # inspect.crate.source and any workflow that needs to read a Rust
+      # dep's source without committing it.
+      #
+      # Skips reinstall if opensrc is already on PATH. Requires Node 18+
+      # and npm. Emits a JSON summary on stdout; human-readable progress
+      # on stderr so workflow $.output.json stays clean.
+      set -euo pipefail
+
+      if existing="$(command -v opensrc 2>/dev/null)"; then
+        version="$(opensrc --version 2>/dev/null | head -n1 | tr -d '\r')"
+        echo "opensrc already installed at $existing (${version:-unknown})" >&2
+        echo "{\"installed\": false, \"path\": \"$existing\", \"version\": \"${version:-unknown}\", \"subject\": \"$PRAXEC_SCRIPT_SUBJECT\"}"
+        exit 0
+      fi
+
+      if ! command -v node >/dev/null 2>&1; then
+        echo "node not found on PATH — install Node 18+ before running this script" >&2
+        exit 1
+      fi
+      node_major=$(node --version | sed -E 's/^v([0-9]+).*/\1/')
+      if [ "${node_major:-0}" -lt 18 ]; then
+        echo "node $(node --version) is too old — opensrc requires Node 18+" >&2
+        exit 1
+      fi
+
+      if ! command -v npm >/dev/null 2>&1; then
+        echo "npm not found on PATH — install npm before running this script" >&2
+        exit 1
+      fi
+
+      echo "installing opensrc via npm install -g opensrc" >&2
+      npm install -g opensrc >&2
+
+      installed_path="$(command -v opensrc)"
+      version="$(opensrc --version 2>/dev/null | head -n1 | tr -d '\r')"
+      echo "{\"installed\": true, \"path\": \"$installed_path\", \"version\": \"${version:-unknown}\", \"subject\": \"$PRAXEC_SCRIPT_SUBJECT\"}"

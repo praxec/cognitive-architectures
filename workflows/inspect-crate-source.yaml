@@ -1,0 +1,53 @@
+# workflows/inspect-crate-source.yaml
+#
+# Typed gateway surface over opensrc (https://opensrc.sh) for the common
+# verb "resolve a Rust crate to a local source path." Wraps the
+# inspect.crate.source curated script so any consumer — sub-agent,
+# downstream workflow, or human at the TUI — can fetch dep source via
+# the same governed link surface as everything else.
+#
+# Why this exists: when praxec-tui (or any agent under it) needs to
+# read an upstream crate's source to confirm an API shape or quote a
+# contribution doc, it shouldn't shell out directly. Going through this
+# workflow gets the action recorded as a transition with body hash,
+# inherits the script-executor's per-invocation temp-file isolation,
+# and keeps "fetch crate source" as one stable verb the gateway exposes
+# even if the underlying tool (opensrc, cargo-src, custom mirror) ever
+# changes.
+#
+# Prerequisite: opensrc must be on PATH. Run install.opensrc once (or
+# bake it into a setup workflow) before invoking this.
+#
+# The composing gateway must declare the referenced script (see
+# scripts-library/inspect.crate.source.yaml) and include this workflow.
+
+version: "1.0.0"
+
+workflows:
+  inspect_crate_source:
+    version: "2026-05-28"
+    initialState: fetching
+    blackboard:
+      crate:   { type: string }
+      path:    { type: string }
+      version: { type: string }
+    states:
+      fetching:
+        goal: Resolve the named crate to a local source directory via opensrc
+        transitions:
+          fetch:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.crate.source
+              # Crate name flows in via workflow.start input: { crate: "aether-tui" }
+              # The script reads it as $1. Output JSON is exposed at
+              # $.output.json by the script executor (SPEC §22).
+              args: ["$.input.crate"]
+            output:
+              crate:   "$.output.json.crate"
+              path:    "$.output.json.path"
+              version: "$.output.json.version"
+      done:
+        terminal: true

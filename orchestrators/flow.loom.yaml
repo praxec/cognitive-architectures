@@ -1,0 +1,129 @@
+# orchestrators/flow.loom.yaml
+#
+# The loom: turn a brief into shipped, recorded work — intent → structure →
+# schedule → build — in ONE mission (nested flows, V11 relaxed):
+#
+#   deriving      → flow.derisk            (brief → vetted design: elicit→design→FMECA)
+#   building_graph→ cap.plan.build-graph   (brief → deliverable graph + acceptance)
+#   scheduling    → cap.coordinate.cpm-plan(graph → cpm plan_id / schedule)
+#   executing     → flow.execute-cohorts   (drive the plan to completion:
+#                                           acquire → build → mark, looped)
+#
+# Nested-flow composition replaces the earlier two-mission split: flow.loom now
+# calls flow.derisk and flow.execute-cohorts directly (sub-workflows), typing
+# their results from their top-level `outputs:` blocks. Recursion is bounded by
+# the runtime `max_depth` cap.
+#
+# NOTE: the `deriving` (elicit) step is an interactive operator boundary — a
+# headless drive PARKS there for human answers. The execution half
+# (flow.execute-cohorts) is fully headless and can be driven standalone against
+# a pre-submitted plan_id.
+#
+# Requires (cognitive/*): flow.derisk, cap.plan.build-graph,
+# cap.coordinate.cpm-plan, flow.execute-cohorts (+ their deps).
+
+workflows:
+  flow.loom:
+    lifecycle: experimental
+    description: >
+      The loom: brief → derisked design → deliverable graph → cpm schedule →
+      driven-to-completion build, in one mission via nested flows.
+    inputs:
+      brief:     { type: string, required: true }
+      repo_path: { type: string, required: true }
+    initialState: deriving
+    states:
+
+      # Intent → structure, vetted: the reusable derisk sub-flow.
+      deriving:
+        goal: Derisk the brief into a vetted design (elicit → design → FMECA).
+        transitions:
+          derisk:
+            target: building_graph
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.derisk
+              use:
+                inputs:
+                  brief: "$.workflow.input.brief"
+                outputs:
+                  "$.context.design":      design
+                  "$.context.design_risk": design_risk
+
+      # Structure → work: the brief becomes a deliverable graph + acceptance.
+      building_graph:
+        goal: Build the deliverable graph + acceptance criteria.
+        transitions:
+          build_graph:
+            target: plan_qa
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.plan.build-graph
+              use:
+                inputs:
+                  brief: "$.workflow.input.brief"
+                outputs:
+                  "$.context.graph":      graph
+                  "$.context.acceptance": acceptance_criteria
+
+      # PLAN-QA: harden the deliverable graph via the FMECA CONVERGENCE loop
+      # before committing to a schedule, so the plan_id is computed over a vetted
+      # graph (and plan_id integrity is preserved — we harden the graph, not the
+      # schedule). Nests flow.harden.fmeca-converge (subject_kind=plan); the
+      # HARDENED graph replaces $.context.graph.
+      plan_qa:
+        goal: Harden the deliverable graph until residual FMECA risk is Low.
+        transitions:
+          harden:
+            target: scheduling
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.harden.fmeca-converge
+              use:
+                inputs:
+                  subject:         "$.context.graph"
+                  subject_kind:    "plan"
+                  matrix_strategy: "qualitative3x3"
+                outputs:
+                  "$.context.graph":      artifact
+                  "$.context.plan_ready": fmeca_ready
+                  "$.context.plan_risk":  risk_ranking
+
+      # Schedule: submit the graph to cpm-planner; capture the plan_id/schedule.
+      scheduling:
+        goal: Submit the graph to cpm-planner; capture the schedule + plan_id.
+        transitions:
+          schedule:
+            target: executing
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.coordinate.cpm-plan
+              use:
+                inputs:
+                  tasks: "$.context.graph"
+                outputs:
+                  "$.context.schedule": schedule
+
+      # Build: drive the plan to completion (acquire → build → mark, looped).
+      # caller_id is a literal (bypasses the slot table) — a single loom driver.
+      executing:
+        goal: Drive the cpm plan to completion via the cohort executor.
+        transitions:
+          execute:
+            target: done
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.execute-cohorts
+              use:
+                inputs:
+                  plan_id:   "$.context.schedule.plan_id"
+                  repo_path: "$.workflow.input.repo_path"
+                  caller_id: "loom-driver"
+
+      done:
+        terminal: true

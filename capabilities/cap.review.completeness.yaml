@@ -1,0 +1,51 @@
+# capabilities/cap.review.completeness.yaml
+#
+# Code-completeness critic gate (judgment half of P_CHECK_COMPLETE). Cognitive
+# cap: the agent driving the gateway sees the `review.completeness.critic` skill
+# and audits the built code for orphans / dead code / DRY / fragmented impls /
+# interface gaps — Rust/MCP-aware, anti-agentic-shortcut — emitting a typed
+# verdict + capped, evidence-verbatim findings + a health_score so a flow can
+# branch. Optional `diff_against` enables diff-mode for small changes.
+
+workflows:
+  cap.review.completeness:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Audit built code for completeness (orphans, dead code, DRY, fragmented
+      impls, interface gaps; hunt silent fallbacks that should fail-fast);
+      emit a typed verdict + verbatim-evidence findings + health_score.
+    snippet:
+      inputs:
+        repo_path:    { type: string, required: true }
+        diff_against: { type: string }
+      outputs:
+        verdict:      { type: string, enum: [approved, needs-revision, rejected] }
+        findings:     { type: array }
+        health_score: { type: integer }
+    skills: [review.completeness.critic]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Audit the code at repo_path for stubs, orphans, dead code, DRY
+          violations, fragmented implementations, and interface gaps; quote
+          verbatim evidence; emit capped findings, a health_score, and a
+          typed verdict. If diff_against is set, run in diff mode.
+        transitions:
+          submit_review:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [verdict, findings]
+              properties:
+                verdict:      { type: string, enum: [approved, needs-revision, rejected] }
+                findings:     { type: array, default: [] }
+                health_score: { type: integer }
+            executor: { kind: noop }
+            output:
+              verdict:      "$.arguments.verdict"
+              findings:     "$.arguments.findings"
+              health_score: "$.arguments.health_score"
+      done: { terminal: true }

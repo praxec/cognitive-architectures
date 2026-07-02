@@ -1,0 +1,20 @@
+# connections/verifier-harness.yaml
+#
+# MCP connection to a verifier harness: runs lint, type-check, unit
+# tests, integration tests, SAST, and policy checks against a candidate
+# patch and returns a structured pass/fail per gate.
+#
+# The reference implementation lives outside this repo; any MCP server
+# that exposes `run_harness({patch, gates: [...]})` with the shape
+# `{passed: bool, gateResults: {name: {passed, output}}}` satisfies
+# the contract.
+
+connections:
+  verifier_harness:
+    kind: mcp
+    transport:
+      kind: streamable_http
+      url: "http://localhost:7200/mcp"
+    description: >
+      Deterministic verifier harness (lint, type, test, sast, policy).
+      Returns structured pass/fail per gate.

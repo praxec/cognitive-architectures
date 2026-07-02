@@ -1,0 +1,51 @@
+# capabilities/cap.refactor.mitigate-risks.yaml
+#
+# The MITIGATE step of the FMECA convergence loop (flow.harden.fmeca-converge):
+# take an artifact plus the residual failure modes the FMECA scored, and return
+# a REVISED artifact that designs those failure modes out — using poka-yoke
+# (make the failure impossible) and TRIZ (resolve the contradiction so no new
+# failure mode is introduced). Verb `refactor`: it transforms an existing
+# artifact while preserving its purpose. The next loop pass re-runs the full
+# FMECA on the output, so this cap's job is to converge risk, not to argue it
+# away.
+
+workflows:
+  cap.refactor.mitigate-risks:
+    verb: refactor
+    lifecycle: experimental
+    description: >
+      Revise an artifact to mitigate the residual FMECA failure modes via
+      poka-yoke + TRIZ, preserving its purpose and introducing no new risk.
+      Returns the revised artifact for re-scoring.
+    snippet:
+      inputs:
+        artifact:     { type: object, required: true }
+        risk_ranking: { type: array }
+        blockers:     { type: array }
+        subject_kind: { type: string }
+      outputs:
+        artifact: { type: object }
+    skills: [refactor.poka-yoke, refactor.triz]
+    initialState: mitigating
+    states:
+      mitigating:
+        goal: >
+          Revise the artifact so the FMECA's residual failure modes are designed
+          out. Apply poka-yoke first (eliminate / prevent / detect-at-source),
+          then TRIZ for any contradiction (a fix for one mode that would worsen
+          another or violate a non-goal). Preserve the artifact's purpose and
+          shape; change only what removes risk. Output the SAME artifact
+          structure you received, revised. Submit it as the `artifact` argument.
+        transitions:
+          submit_mitigated:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [artifact]
+              properties:
+                artifact: { type: object }
+            executor: { kind: noop }
+            output:
+              artifact: "$.arguments.artifact"
+      done: { terminal: true }

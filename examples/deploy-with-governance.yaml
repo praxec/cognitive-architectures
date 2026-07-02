@@ -1,0 +1,39 @@
+# examples/deploy-with-governance.yaml
+#
+# Production deploy pipeline with explicit safety governance: human
+# acknowledgment of the 10-point checklist before any deploy, an
+# automated post-deploy health check, and a one-button rollback if
+# health drops.
+#
+# Start with:
+#   praxec serve --config examples/deploy-with-governance.yaml
+#
+# Requires:
+#   - a verifier-harness MCP server reachable per connections/verifier-harness.yaml
+#   - a `bash` interpreter for the shell connection
+#   - `deploy` and `rollback` scripts on PATH that emit JSON on stdout
+
+version: "1.0.0"
+
+include:
+  # Workflow
+  - ../workflows/deploy-pipeline.yaml
+  # Connections
+  - ../connections/verifier-harness.yaml
+  # Skill — the safety checklist is the centrepiece
+  - ../skills/deploy.safety.checklist.yaml
+
+# Inline a shell CLI connection for the deploy/rollback scripts;
+# operators replace with their own deploy executor (e.g. terraform,
+# argocd, kubectl, fly deploy).
+connections:
+  shell:
+    kind: cli
+    command: bash
+    description: >
+      Local shell for invoking deploy / rollback scripts. Replace
+      with a more controlled executor (terraform, argocd, etc.) in
+      production.
+
+audit:
+  sink: stdout

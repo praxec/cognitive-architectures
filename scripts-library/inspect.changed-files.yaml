@@ -1,0 +1,35 @@
+version: "1.0.0"
+scripts:
+  inspect.changed-files:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    # DETERMINISTIC changed-files detector for the build-loop's per-slice commit.
+    # Replaces trusting the LLM's optional `files_written` (sometimes null → commit
+    # no-op). Computes the slice's file set from git: tracked modifications +
+    # untracked non-ignored files (gitignored target/ excluded by git). Code
+    # decides what changed; the LLM is not the source of truth. Body = unit-tested
+    # changed-files.sh (5/5 green).
+    body: |
+      #!/usr/bin/env bash
+      # Args: $1 REPO_PATH [REPO_PATH env fallback]
+      # Emits JSON: { files: "<space-separated repo-relative paths>", count }
+      REPO="${1:-${REPO_PATH:-.}}"
+      cd "$REPO" 2>/dev/null || { printf '{"files":"","count":0}\n'; exit 0; }
+      if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        printf '{"files":"","count":0}\n'; exit 0
+      fi
+      # --porcelain respects .gitignore. Strip the 3-char status prefix; for a
+      # rename (R  old -> new) take new; skip deletions.
+      paths="$(git status --porcelain --untracked-files=all 2>/dev/null | while IFS= read -r line; do
+        xy="${line:0:2}"; rest="${line:3}"
+        case "$xy" in *D*) continue ;; esac
+        case "$rest" in
+          *" -> "*) printf '%s\n' "${rest##* -> }" ;;
+          *)        printf '%s\n' "$rest" ;;
+        esac
+      done)"
+      files="$(printf '%s\n' "$paths" | sed '/^$/d' | tr '\n' ' ' | sed 's/ *$//')"
+      count="$(printf '%s\n' "$paths" | sed '/^$/d' | grep -c '' || true)"
+      [ -z "$count" ] && count=0
+      printf '{"files":%s,"count":%d}\n' "$(printf '%s' "$files" | jq -Rs .)" "$count"

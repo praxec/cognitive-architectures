@@ -1,0 +1,37 @@
+# scripts-library/git.branch-ensure.yaml
+#
+# Branch-first safety: ensure work happens on a feature branch, never directly on
+# the default branch. If already on BRANCH, no-op. If on main/master (or any
+# other branch and CREATE=true), create/switch to BRANCH off the current HEAD.
+# Refuses to clobber an existing branch with uncommitted changes. Exit 0; result
+# as JSON so a flow can branch on it.
+# Inputs (env):
+#   BRANCH  — the feature branch name (required)
+#   WORKDIR — optional repo dir
+#   BASE    — optional base ref to branch from (default: current HEAD)
+version: "1.0.0"
+scripts:
+  run.git.branch-ensure:
+    verb: run
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      [ -n "${WORKDIR:-}" ] && cd "$WORKDIR" 2>/dev/null
+      jstr() { printf '%s' "${1:-}" | jq -Rs . 2>/dev/null || printf '""'; }
+      emit() { printf '{"on_branch": %s, "created": %s, "branch": %s, "error": %s}\n' "$1" "$2" "$3" "$4"; exit 0; }
+      want="${BRANCH:-}"
+      if [ -z "${want// /}" ]; then emit false false null "$(jstr 'empty BRANCH')"; fi
+      if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then emit false false null "$(jstr 'not a git work tree')"; fi
+      cur="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+      if [ "$cur" = "$want" ]; then emit true false "$(jstr "$want")" null; fi
+      # switch to existing branch, or create it off BASE/HEAD
+      if git show-ref --verify --quiet "refs/heads/$want"; then
+        git checkout "$want" >/dev/null 2>&1 && emit true false "$(jstr "$want")" null \
+          || emit false false "$(jstr "$want")" "$(jstr "checkout of existing '$want' failed")"
+      else
+        base="${BASE:-HEAD}"
+        git checkout -b "$want" "$base" >/dev/null 2>&1 && emit true true "$(jstr "$want")" null \
+          || emit false false "$(jstr "$want")" "$(jstr "could not create '$want' from '$base'")"
+      fi

@@ -1,0 +1,51 @@
+# capabilities/cap.plan.elicit-spec.yaml
+#
+# Discovery cap: interview the operator to turn a vague brief into a
+# structured SPEC. Cognitive cap (verb `plan`, the closed CapVerb set
+# has no `elicit`) — the agent driving the gateway sees the
+# `plan.elicit.structured-interview` skill and submits the spec plus a
+# readiness signal as transition arguments.
+#
+# v0: readiness is guidance-enforced (the skill instructs the agent to
+# set `ready: true` only when the spec is complete). The DETERMINISTIC
+# readiness gate is the job of the elicitation this cap is used to
+# build — once that ships, swap the agent leaf for an mcp leaf that
+# computes readiness. (Tracked: greenfield-mcp dogfood.)
+
+workflows:
+  cap.plan.elicit-spec:
+    verb: plan
+    lifecycle: experimental
+    description: >
+      Interview the operator to produce a structured spec from a brief:
+      purpose / constraints / success-criteria / scope / non-goals, plus
+      a readiness signal and any open questions.
+    snippet:
+      inputs:
+        brief: { type: string, required: true }
+      outputs:
+        spec:           { type: object }
+        ready:          { type: boolean }
+        open_questions: { type: array }
+    skills: [plan.elicit.structured-interview]
+    initialState: interviewing
+    states:
+      interviewing:
+        goal: Interview the operator; converge on a complete spec; declare readiness honestly.
+        transitions:
+          submit_spec:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [spec, ready]
+              properties:
+                spec:           { type: object }
+                ready:          { type: boolean }
+                open_questions: { type: array, default: [] }
+            executor: { kind: noop }
+            output:
+              spec:           "$.arguments.spec"
+              ready:          "$.arguments.ready"
+              open_questions: "$.arguments.open_questions"
+      done: { terminal: true }

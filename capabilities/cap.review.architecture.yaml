@@ -1,0 +1,57 @@
+# capabilities/cap.review.architecture.yaml
+#
+# Architecture-validity gate. Cognitive cap: the agent driving the gateway runs
+# the review.architecture.validity skill over a design, classifies every
+# component (Essential/Useful/Speculative/Unjustified) with an evidence level,
+# treats simplification/removal as a first-class mitigation, and submits a
+# typed verdict + component table. Deep failure-mode work is routed to
+# cap.review.fmeca by the flow.
+
+workflows:
+  cap.review.architecture:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Architecture-validity review (Phase 1): classify every component
+      Essential / Useful / Speculative / Unjustified with an evidence level
+      (Proven / Adapted / Speculative), ask "should this exist at all?" before
+      mitigating, and treat simplification/removal as a first-class outcome.
+      Emits a typed verdict + component_table so a flow can branch; deep
+      failure-mode analysis is routed to cap.review.fmeca.
+    snippet:
+      inputs:
+        design:      { type: object, required: true }
+        diff_against: { type: string, default: "" }
+        context:     { type: string, default: "" }
+      outputs:
+        verdict:         { type: string, enum: [approved, needs-revision, rejected] }
+        findings:        { type: array }
+        component_table: { type: array }
+    skills: [review.architecture.validity]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Classify every component (Essential/Useful/Speculative/Unjustified)
+          with an evidence level; consider simplification/removal first; emit a
+          component_table, a revised_design, findings, and a typed verdict
+          (approved iff no Unjustified component remains).
+        transitions:
+          submit_review:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [verdict]
+              properties:
+                verdict:         { type: string, enum: [approved, needs-revision, rejected] }
+                findings:        { type: array, default: [] }
+                component_table: { type: array, default: [] }
+                revised_design:  { type: object, default: {} }
+            executor: { kind: noop }
+            output:
+              verdict:         "$.arguments.verdict"
+              findings:        "$.arguments.findings"
+              component_table: "$.arguments.component_table"
+              revised_design:  "$.arguments.revised_design"
+      done: { terminal: true }

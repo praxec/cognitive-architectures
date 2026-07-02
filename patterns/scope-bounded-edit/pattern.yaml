@@ -1,0 +1,89 @@
+# Pattern: scope-bounded-edit
+#
+# Agent edits constrained to a declared file glob; HARD-rejected if
+# the agent's changed_files list contains anything outside scope.
+# Uses SPEC §28 path_allowlist slot constraint as the enforcement
+# mechanism — violation rejects the transition with
+# SLOT_CONSTRAINT_VIOLATED before the edit commits.
+#
+# Workflow contract:
+#   Input:  {task: string, allowed_paths: [glob], denied_paths?: [glob]}
+#   Output: $.context.changed_files (validated against allowlist)
+
+version: "1.0.0"
+
+workflows:
+  scope_bounded_edit:
+    description: >
+      Edit-with-scope-enforcement: agent submits a changed_files list;
+      runtime validates against the path_allowlist constraint at the
+      transition boundary. Out-of-scope paths reject with
+      SLOT_CONSTRAINT_VIOLATED naming the offending file.
+    tags: [edit, scope, safety, slot-constraint]
+    version: "2026-05-25"
+    initialState: scoping
+    enable_human_ask: true
+    human_ask_cap: 2
+
+    inputSchema:
+      type: object
+      required: [task, allowed_paths]
+      properties:
+        task:           { type: string, minLength: 5 }
+        allowed_paths:  { type: array, items: { type: string, minLength: 1 }, minItems: 1 }
+        denied_paths:   { type: array, items: { type: string } }
+
+    blackboard:
+      task:           { type: string }
+      allowed_paths:  { type: array }
+      denied_paths:   { type: array }
+      changed_files:
+        type: array
+        items: { type: string }
+        # SPEC §28 — write-time constraint. The allowed/deny globs are
+        # hardcoded here as a starting point; operators using this
+        # pattern fork it and set their org's scope rules.
+        constraint:
+          path_allowlist:
+            allow:
+              - "src/**"
+              - "tests/**"
+            deny:
+              - "src/legacy/**"
+              - "src/vendored/**"
+
+    states:
+      scoping:
+        goal: Receive the task + declared scope.
+        transitions:
+          start:
+            target: editing
+            executor: { kind: noop }
+            output:
+              task:          "$.workflow.input.task"
+              allowed_paths: "$.workflow.input.allowed_paths"
+              denied_paths:  "$.workflow.input.denied_paths"
+
+      editing:
+        delegate: editing-agent
+        goal: >
+          Make the edit. Write changed_files as the FULL list of paths
+          your edit touches. The runtime will reject this transition if
+          ANY file is outside the path_allowlist on the slot.
+        transitions:
+          submit_edit:
+            target: done
+            inputSchema:
+              type: object
+              required: [changed_files]
+              properties:
+                changed_files:
+                  type: array
+                  items: { type: string }
+                  minItems: 1
+            executor: { kind: noop }
+            output:
+              changed_files: "$.arguments.changed_files"
+
+      done:
+        terminal: true

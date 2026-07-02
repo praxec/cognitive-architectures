@@ -1,0 +1,44 @@
+# capabilities/cap.plan.ux-design.yaml
+#
+# PhD-level UX design + evaluation for anything human-facing. Cognitive cap:
+# the agent runs the `plan.ux-design.expert` skill (cognitive science + HCI +
+# UX engineering + Jobs-to-be-Done) over a human-facing artifact and submits a
+# structured design whose weak assumptions are then vetted by the simulation
+# engine. Pair with a frontier model (set the affinity in models.yaml).
+
+workflows:
+  cap.plan.ux-design:
+    verb: plan
+    lifecycle: experimental
+    description: >
+      Design, evaluate, and pressure-test a human-facing experience through a
+      Jobs-to-be-Done + cognitive-science lens; emit a structured ux_design with
+      ranked directions and falsifiable weak assumptions (each with a
+      suggested_test + target_metric) for the simulation engine to vet.
+    snippet:
+      inputs:
+        artifact: { type: string, required: true }
+        jobs:     { type: array, default: [] }
+        audience: { type: string, default: "" }
+      outputs:
+        ux_design: { type: object }
+    skills: [plan.ux-design.expert]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Frame the job, model the user cognitively, design the experience,
+          pressure-test it, and recommend ranked paths + what to validate.
+        transitions:
+          submit_ux_design:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [ux_design]
+              properties:
+                ux_design: { type: object }
+            executor: { kind: noop }
+            output:
+              ux_design: "$.arguments.ux_design"
+      done: { terminal: true }

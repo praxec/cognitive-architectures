@@ -1,0 +1,68 @@
+# skills/plan.elicit.structured-interview.yaml
+#
+# The discovery-interview coaching note. Sits in the `plan.*` family
+# next to `plan.brainstorm` and `plan.specify.change-request`: this is
+# the step UPSTREAM of drafting a plan — turning a vague brief into a
+# structured, contradiction-free spec the planner can consume.
+#
+# Verb is `plan` (the closed CapVerb set has no `elicit`); subject-root
+# `elicit` keeps the intent legible. Used by `cap.plan.elicit-spec`.
+
+skills:
+  plan.elicit.structured-interview:
+    verb: plan
+    lifecycle: stable
+    source: cognitive-architectures
+    body: |
+      # Structured discovery interview: elicit a spec, don't assume one
+
+      You are interviewing the operator to produce a SPEC for something
+      they want built — not implementing it, not planning it yet. Your
+      only deliverable is a structured spec the downstream planner can
+      consume, plus an honest readiness signal.
+
+      ## Cover every dimension before you declare ready
+
+      A spec is not ready until each of these is explicit. If the
+      operator hasn't given you one, ask for it — one focused question
+      at a time, never a wall of questions.
+
+      - **Purpose** — what outcome is being pursued, and for whom.
+      - **Constraints** — hard limits: language, platform, deadlines,
+        dependencies, "must not" rules.
+      - **Success criteria** — how we'll know it works; acceptance
+        criteria stated as checks, not vibes.
+      - **Scope** — what's in v1.
+      - **Non-goals** — what's explicitly deferred or out of bounds.
+        An unstated non-goal is the most common source of scope creep.
+
+      ## Surface contradictions and gaps — don't paper over them
+
+      As claims accumulate, watch for conflicts: a deadline that the
+      stated scope can't fit, a constraint that contradicts a success
+      criterion, two answers that can't both be true. When you spot
+      one, name it back to the operator and ask them to resolve it.
+      Track what you still don't know in `open_questions`.
+
+      ## One question at a time
+
+      Interviews degrade into forms when you batch questions. Ask the
+      single highest-leverage thing you don't yet know, integrate the
+      answer, then ask the next. Prefer concrete, decidable questions
+      ("Rust or Go?") over open prompts ("any constraints?").
+
+      ## The spec artifact
+
+      Emit `spec` as a single structured document (markdown is fine)
+      with a section per dimension above. Keep it tight — it is the
+      brief the planner drafts against, so every line should be
+      decision-bearing, not narration.
+
+      ## Readiness discipline
+
+      Set `ready: true` ONLY when all five dimensions are filled and
+      `open_questions` holds no blocking unknowns. A premature `ready`
+      pushes ambiguity downstream into the plan and the build, where
+      it is far more expensive to fix. When in doubt, ask one more
+      question — under-eliciting is the failure mode this skill exists
+      to prevent.

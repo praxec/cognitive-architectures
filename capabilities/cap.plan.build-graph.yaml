@@ -1,0 +1,87 @@
+# capabilities/cap.plan.build-graph.yaml
+#
+# Decompose a spec into a SCHEDULABLE build graph: a PlanGraph (a
+# `deliverables` DAG) the CPM planner can schedule. Distinct from
+# cap.plan.draft (which normalizes a change request): different step,
+# different need, different output contract.
+#
+# The gate is RAISED on the producing step (vs surfacing the failure a
+# step later at cpm): the agent must submit a `graph` whose
+# `deliverables[]` carry { id, owned_files, prerequisites }, validated
+# by this cap's inputSchema BEFORE it leaves the step. The INDEPENDENT
+# evaluator of the harder properties (owned_files disjoint across
+# deliverables; prerequisites acyclic + referential) is cpm-planner
+# itself at the schedule step — the producer never grades its own work.
+#
+# Cognitive verb `plan` → V6 allows kind: noop (the agent submits the
+# graph; output mapping lifts it).
+
+workflows:
+  cap.plan.build-graph:
+    verb: plan
+    lifecycle: experimental
+    description: >
+      Decompose a spec into a CPM-schedulable PlanGraph PLUS the plan
+      envelope the downstream gates consume. Required outputs:
+      `graph.deliverables[]` (each { id, owned_files (file-disjoint),
+      prerequisites (acyclic), estimated_effort_hours? }),
+      `acceptance_criteria[]` (testable criteria the build must satisfy),
+      and `risk` (low|medium|high|critical) for risk-scaling.
+    snippet:
+      inputs:
+        brief: { type: string, required: true }
+      outputs:
+        graph:               { type: object }
+        acceptance_criteria: { type: array }
+        risk:                { type: string }
+        blast_radius:        { type: object }
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Decompose the supplied spec into a deliverables DAG (a work
+          breakdown the CPM planner can schedule). Submit `graph` =
+          { deliverables: [ { id, owned_files, prerequisites,
+          estimated_effort_hours } ] }. RULES: owned_files MUST be
+          DISJOINT across deliverables (no file owned by two); prerequisites
+          reference other deliverable ids and form an acyclic DAG;
+          foundational data-model/types deliverables come first, with tests
+          and the server/integration layer depending on them. Split work so
+          independent file-sets are separate deliverables (parallelizable)
+          and serialize only true dependencies. ALSO emit
+          `acceptance_criteria` (a testable list the built code must satisfy —
+          the downstream deliverable-gap + acceptance gates check against it)
+          and `risk` (low|medium|high|critical) + `blast_radius`.
+        transitions:
+          submit_graph:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [graph, acceptance_criteria, risk]
+              properties:
+                graph:
+                  type: object
+                  required: [deliverables]
+                  properties:
+                    deliverables:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: object
+                        required: [id, owned_files, prerequisites]
+                        properties:
+                          id:                     { type: string }
+                          owned_files:            { type: array, items: { type: string } }
+                          prerequisites:          { type: array, items: { type: string } }
+                          estimated_effort_hours: { type: number }
+                acceptance_criteria: { type: array, items: { type: string } }
+                risk:                { type: string, enum: [low, medium, high, critical] }
+                blast_radius:        { type: object }
+            executor: { kind: noop }
+            output:
+              graph:               "$.arguments.graph"
+              acceptance_criteria: "$.arguments.acceptance_criteria"
+              risk:                "$.arguments.risk"
+              blast_radius:        "$.arguments.blast_radius"
+      done: { terminal: true }

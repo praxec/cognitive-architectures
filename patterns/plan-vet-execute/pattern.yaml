@@ -1,0 +1,167 @@
+# Pattern: plan-vet-execute
+#
+# The flagship coding pattern. Composes:
+#   1. vet_plan workflow  (produces CPM-structured plan + FMECA)
+#   2. human approval gate (operator confirms the plan)
+#   3. scope-bounded execution (slot constraint enforces declared scope)
+#   4. parallel-critic-review (multiple critics verify the result)
+#
+# Output: a code change that has been planned, FMECA-optimized, scope-
+# constrained, executed, and adversarially reviewed before merge.
+
+version: "1.0.0"
+
+workflows:
+  plan_vet_execute:
+    description: >
+      Plan → human-approve → scope-bounded execute → multi-critic
+      review → merge gate. The flagship coding pattern: every change
+      gets governance discipline by composition, not by convention.
+    tags: [coding, governance, plan-vet-execute, fmeca]
+    version: "2026-05-25"
+    initialState: scoping
+    enable_human_ask: true
+    human_ask_cap: 3
+
+    inputSchema:
+      type: object
+      required: [task, allowed_paths]
+      properties:
+        task:           { type: string, minLength: 10 }
+        allowed_paths:  { type: array, items: { type: string } }
+
+    blackboard:
+      task:                       { type: string }
+      allowed_paths:              { type: array }
+      plan_markdown:              { type: string }
+      plan_json:                  { type: object }
+      changed_files:
+        type: array
+        items: { type: string }
+        constraint:
+          path_allowlist:
+            allow: ["src/**", "tests/**", "docs/**"]
+            deny:  ["src/legacy/**"]
+      critic_verdicts:            { type: array }
+      overall_verdict:            { type: string }
+
+    states:
+      scoping:
+        goal: Collect task + scope.
+        transitions:
+          start:
+            target: planning
+            executor: { kind: noop }
+            output:
+              task:          "$.workflow.input.task"
+              allowed_paths: "$.workflow.input.allowed_paths"
+
+      planning:
+        delegate: planner-agent
+        goal: >
+          Run compose.plan.vet skill. Emit CPM-structured plan
+          grounded in the lexicon. See compose.plan.vet skill body
+          for the structured output contract.
+        skills:
+          - compose.plan.vet
+        transitions:
+          submit_plan:
+            target: plan_approval
+            inputSchema:
+              type: object
+              required: [plan_markdown, plan_json]
+              properties:
+                plan_markdown: { type: string, minLength: 200 }
+                plan_json:     { type: object }
+            executor: { kind: noop }
+            output:
+              plan_markdown: "$.arguments.plan_markdown"
+              plan_json:     "$.arguments.plan_json"
+
+      plan_approval:
+        goal: Human reviews the plan before any code is written.
+        actor: human
+        transitions:
+          approve:
+            target: executing
+            actor: human
+            executor: { kind: noop }
+          reject:
+            target: planning   # back to drawing board
+            actor: human
+            executor: { kind: noop }
+
+      executing:
+        delegate: editing-agent
+        goal: >
+          Implement the plan. Submit changed_files as the FULL list of
+          paths your edit touches. The path_allowlist slot constraint
+          will reject the transition if anything is out of scope.
+        transitions:
+          submit_edit:
+            target: reviewing
+            inputSchema:
+              type: object
+              required: [changed_files]
+              properties:
+                changed_files: { type: array, items: { type: string }, minItems: 1 }
+            executor: { kind: noop }
+            output:
+              changed_files: "$.arguments.changed_files"
+
+      reviewing:
+        goal: >
+          Fan out N critic sub-workflows (security/performance/style/
+          correctness); aggregate to a single verdict. See the
+          parallel-critic-review pattern for the standalone shape.
+        transitions:
+          run_critics:
+            target: routing_after_review
+            actor: deterministic
+            executor:
+              kind: parallel
+              branches:
+                # Static four-critic fan-out — operators with their own
+                # critic taxonomy fork this and adjust.
+                - { kind: noop }   # security  (replace with: kind: workflow, definitionId: critique_aspect_security)
+                - { kind: noop }   # performance
+                - { kind: noop }   # style
+                - { kind: noop }   # correctness
+              join:
+                aggregator:
+                  kind: expression
+                  expr: "$.failed_count == 0"
+              max_concurrency: 4
+              on_branch_failure: continue
+            output:
+              critic_verdicts: "$.output.branches[*].ok"
+              overall_verdict: "$.output.summary.verdict"
+
+      routing_after_review:
+        goal: Approved → merge gate; rejected → re-execute.
+        transitions:
+          decide:
+            target: executing   # default — revise
+            actor: deterministic
+            executor: { kind: noop }
+            branches:
+              - when: { kind: expr, expr: "$.context.overall_verdict == 'succeeded'" }
+                target: merge_gate
+              - when: { kind: expr, expr: "$.context.overall_verdict == 'failed'" }
+                target: executing
+
+      merge_gate:
+        goal: Final human merge decision.
+        actor: human
+        transitions:
+          merge:
+            target: merged
+            actor: human
+            executor: { kind: noop }
+          abort:
+            target: aborted
+            actor: human
+            executor: { kind: noop }
+
+      merged:  { terminal: true }
+      aborted: { terminal: true }

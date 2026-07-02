@@ -1,0 +1,57 @@
+# capabilities/cap.diagnose.behavioral-gaps.yaml
+#
+# Behavioral-gaps diagnosis. Cognitive cap: the agent driving the gateway reads
+# the defect (bug report / failing output / code) under repo_path, builds a
+# behavioral inventory, finds the missing-spec / missing-coverage / contradiction
+# gaps, and formalizes the determinable behavior into atomic EARS statements.
+# Diagnosis ONLY — patch generation is NOT bundled here: the red-first failing
+# test + minimal patch are produced downstream under
+# implement.defect.failing-test-first, inside cap.implement.tdd-loop (whose
+# monotonic test-count guard enforces red-first by construction). Emits the
+# inventory + gaps + EARS + a coverage summary so a flow can branch.
+
+workflows:
+  cap.diagnose.behavioral-gaps:
+    verb: diagnose
+    lifecycle: experimental
+    description: >
+      Trace a defect to its intended behavior: build a behavioral inventory,
+      surface missing-spec / missing-coverage / contradiction gaps, and emit
+      atomic EARS statements + a coverage summary (no patch, no test
+      generation) so a flow can branch to the failing-test-first build path.
+    snippet:
+      inputs:
+        defect:    { type: object, required: true }
+        repo_path: { type: string, required: true }
+      outputs:
+        behavioral_gaps: { type: array }
+        ears:            { type: array }
+        coverage:        { type: object }
+    skills: [implement.defect.failing-test-first]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Read the defect and the code under repo_path; build a behavioral
+          inventory labeling evidence as Explicit/Derived/Assumed; identify
+          missing-spec, missing-coverage, contradiction, boundary, and
+          negative-path gaps; formalize Explicit/strongly-Derived behavior into
+          atomic EARS statements; emit a coverage summary. Do NOT generate a
+          patch or tests here.
+        transitions:
+          submit_gaps:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [behavioral_gaps, ears]
+              properties:
+                behavioral_gaps: { type: array }
+                ears:            { type: array }
+                coverage:        { type: object, default: {} }
+            executor: { kind: noop }
+            output:
+              behavioral_gaps: "$.arguments.behavioral_gaps"
+              ears:            "$.arguments.ears"
+              coverage:        "$.arguments.coverage"
+      done: { terminal: true }

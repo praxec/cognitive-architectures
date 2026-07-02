@@ -1,0 +1,29 @@
+# connections/science.yaml
+#
+# REFERENCE connection (operators copy into their gateway config; the manifest
+# keeps connections/ out of its load layout).
+#
+# MCP connection to scientific-process — a STATEFUL scientific-process / falsification
+# engine: hypothesis → experiment → observation → conclusion, with the standing
+# COMPUTED as a fold over an append-only event log (never stored). A short-term
+# RAG for disciplined investigation / pressure-testing.
+#
+# Install: `cargo install scientific-process` (binary
+# `scientific-process`, MCP/stdio).
+# Tools: session.open, append (variant add_hypothesis|add_experiment|
+#        add_observation|conclude), state.get, experiment.next, report.export.
+#
+# Stateful by design — drive it from a WORKFLOW (open a session, append
+# hypotheses/experiments, record observations, conclude), not a single
+# pass-through cap. The discoverable "scientific process" capability is the
+# flow that drives this loop (e.g. a pressure-test / falsification flow), which
+# calls these tools via `kind: mcp` against this connection.
+
+connections:
+  science:
+    kind: mcp
+    command: scientific-process
+    description: >
+      Stateful scientific-process / falsification engine (hypothesis →
+      experiment → observation → conclusion; computed append-only standing).
+      Driven by a pressure-test / investigation workflow.

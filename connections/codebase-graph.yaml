@@ -1,0 +1,19 @@
+# connections/codebase-graph.yaml
+#
+# MCP connection to a codebase-graph indexer (SCIP-backed or
+# equivalent). Exposes `search_symbol`, `resolve_dependencies`,
+# `find_tests`, `lookup_owner`, and `assemble_evidence_pack`.
+#
+# Reference implementation: a scip-mcp wrapper. The contract here is
+# the tool surface, not the implementation — any MCP server that
+# exposes the same five tools satisfies it.
+
+connections:
+  codebase_graph:
+    kind: mcp
+    transport:
+      kind: streamable_http
+      url: "http://localhost:7100/mcp"
+    description: >
+      Code graph (SCIP or equivalent): symbol search, dependency
+      resolution, test discovery, ownership lookup.

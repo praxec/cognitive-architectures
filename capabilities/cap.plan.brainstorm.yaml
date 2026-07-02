@@ -1,0 +1,78 @@
+# capabilities/cap.plan.brainstorm.yaml
+#
+# Generate divergent options before convergent decision-making.
+# Composition primitive — workflow authors drop this into any
+# orchestrator state where premature convergence is the failure
+# mode. Pair with `cap.plan.vet` (or any picking cap) downstream;
+# brainstorm produces option space, vet narrows it.
+#
+# Distinct from `cap.plan.draft` (which produces one structured
+# plan) and from praxec-meta's `cap.plan.compose-implementation`
+# (which proposes capability/orchestrator shapes from a tool
+# inventory). Brainstorm is the general-purpose option-generator:
+# architecture decisions, naming, pricing, scope choices,
+# escalation paths — anywhere a single recommendation would skip
+# necessary divergence.
+
+workflows:
+  cap.plan.brainstorm:
+    verb: plan
+    lifecycle: experimental
+    description: >
+      Generate 3-7 genuinely-different candidate options for a goal,
+      each with explicit assumptions and tradeoff dimensions, plus
+      `divergence_notes` naming the axes the option space spans.
+      Designed to surface premature-convergence anti-patterns before
+      a picking step.
+    snippet:
+      inputs:
+        goal:
+          type: string
+          required: true
+        constraints:
+          type: array
+          default: []
+        candidate_count_target:
+          type: integer
+          default: 4
+      outputs:
+        candidates:       { type: array }
+        divergence_notes: { type: string }
+    skills: [plan.brainstorm]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Generate 3-7 genuinely-different candidates per the skill
+          checklist; surface the dimensions the option space spans
+          in `divergence_notes` so downstream picking has context.
+        transitions:
+          submit_candidates:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [candidates, divergence_notes]
+              properties:
+                candidates:
+                  type: array
+                  minItems: 3
+                  maxItems: 7
+                  items:
+                    type: object
+                    required: [id, name, summary, tradeoffs, assumptions, confidence]
+                    properties:
+                      id:          { type: string }
+                      name:        { type: string }
+                      summary:     { type: string }
+                      tradeoffs:   { type: array, items: { type: string } }
+                      assumptions: { type: array, items: { type: string } }
+                      confidence:
+                        type: string
+                        enum: [low, medium, high]
+                divergence_notes: { type: string }
+            executor: { kind: noop }
+            output:
+              candidates:       "$.arguments.candidates"
+              divergence_notes: "$.arguments.divergence_notes"
+      done: { terminal: true }

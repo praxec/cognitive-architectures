@@ -1,0 +1,60 @@
+version: "1.0.0"
+scripts:
+  inspect.qa-ladder:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    # DETERMINISTIC QA-rejection escalation ladder. On a QA rejection the CODE
+    # decides the next implementation attempt; cap.implement.build-loop only
+    # ROUTES on `qa_next` and applies the model/effort overrides (observation-
+    # only). Policy: feed QA findings forward (engine injects $.context into the
+    # prompt), retry the SAME model `retries` times, then climb the model ladder,
+    # and when the top rung is still rejected hand to a human — never spin.
+    # Body is byte-for-byte the unit-tested escalate-qa-ladder.sh (8/8 green).
+    body: |
+      #!/usr/bin/env bash
+      # Args (positional; env fallback):
+      #   $1 tier_index    current ladder rung (0-based)            [QA_TIER_INDEX]
+      #   $2 tier_attempt  attempts already spent at this rung      [QA_TIER_ATTEMPT]
+      #   $3 retries       attempts allowed per rung before climbing[QA_SAME_MODEL_RETRIES]
+      #   $4 ladder_csv    comma-separated affinity rungs           [QA_MODEL_LADDER]
+      #
+      # Emits JSON on stdout:
+      #   { qa_next, affinity_override, effort_override, qa_tier_index,
+      #     qa_tier_attempt, summary }
+      # qa_next: "green" (retry/escalate — overrides already set) | "human" (exhausted).
+      # effort_override is "xhigh" only on the top (last) rung, else "".
+      # No `set -e`: this drives a loop; decisions are data, never an abort.
+      tier_index="${1:-${QA_TIER_INDEX:-0}}"
+      tier_attempt="${2:-${QA_TIER_ATTEMPT:-0}}"
+      retries="${3:-${QA_SAME_MODEL_RETRIES:-2}}"
+      ladder_csv="${4:-${QA_MODEL_LADDER:-coding,coding-standard,coding-frontier}}"
+
+      IFS=',' read -r -a rungs <<<"$ladder_csv"
+      last=$(( ${#rungs[@]} - 1 ))
+
+      new_attempt=$(( tier_attempt + 1 ))
+
+      if [ "$new_attempt" -lt "$retries" ]; then
+        # Same rung still has retries left — retry this model with the findings.
+        ti="$tier_index"; ta="$new_attempt"; qa_next="green"
+      elif [ "$tier_index" -lt "$last" ]; then
+        # Rung exhausted — climb to the next, more capable model. Reset its counter.
+        ti=$(( tier_index + 1 )); ta=0; qa_next="green"
+      else
+        # Top rung exhausted — circuit-break to a human (do not spin).
+        ti="$tier_index"; ta="$new_attempt"; qa_next="human"
+      fi
+
+      affinity="${rungs[$ti]}"
+      effort=""
+      [ "$ti" -ge "$last" ] && effort="xhigh"
+
+      if [ "$qa_next" = "human" ]; then
+        summary="QA rejected at top tier '$affinity' after $retries attempt(s)/rung — handing to human (ladder exhausted)."
+      else
+        summary="QA rejected — next attempt on tier $ti '$affinity'$([ -n "$effort" ] && echo " (effort=$effort)") (attempt $ta, retries/rung=$retries)."
+      fi
+
+      printf '{"qa_next":"%s","affinity_override":"%s","effort_override":"%s","qa_tier_index":%d,"qa_tier_attempt":%d,"summary":"%s"}\n' \
+        "$qa_next" "$affinity" "$effort" "$ti" "$ta" "$summary"

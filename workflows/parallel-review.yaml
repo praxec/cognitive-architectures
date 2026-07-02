@@ -1,0 +1,88 @@
+# workflows/parallel-review.yaml
+#
+# A workflow that fans out N critique sub-workflows (one per review aspect)
+# in parallel, all must succeed, rolls up to a single verdict. Demonstrates
+# DYNAMIC for_each fan-out + `kind: workflow` branches (parallel sub-
+# workflow spawning) + `join: all` + per-branch isolation (each critic gets
+# its own sub-workflow audit trail).
+#
+# The composing gateway must declare:
+# - The critique-aspect sub-workflow (a generic workflow that takes
+#   {aspect, patch} input, runs ONE critique-agent against ONE aspect,
+#   returns {verdict, findings}). Not shipped here — operator-specific.
+# - The aspects list on the parent's input (e.g. ["security", "performance",
+#   "style", "correctness"]).
+
+version: "1.0.0"
+
+workflows:
+  parallel_review:
+    version: "2026-05-25"
+    initialState: reviewing
+    # SPEC §29.3 (v0.4): individual aspect critiques may surface
+    # ambiguity; the operator can be asked mid-review without
+    # blocking the whole fan-out.
+    enable_human_ask: true
+    human_ask_cap: 2
+    blackboard:
+      candidatePatch: { type: object }
+      aspects:        { type: array }   # input
+      # NOTE (refreshed v0.4): `allPassed` is a string per SPEC §24.3
+      # ("succeeded"|"failed"|"threshold_not_met"), not boolean.
+      allPassed:      { type: string }
+      verdicts:       { type: array }
+      findings:       { type: array }
+    states:
+      reviewing:
+        goal: Fan out one critique sub-workflow per review aspect
+        transitions:
+          run:
+            target: rolled_up
+            actor: deterministic
+            # SPEC §24 — dynamic for_each over the operator-supplied
+            # `aspects` array. Each branch spawns a `critique_aspect`
+            # sub-workflow with that aspect + the patch. Each sub-
+            # workflow gets its own audit trail (linked to the parent
+            # transition by correlation_id + branch_index payload).
+            #
+            # join: all means every aspect must complete cleanly. A
+            # single critique failure aborts the whole (bail).
+            executor:
+              kind: parallel
+              branches:
+                for_each: "$.context.aspects"
+                # SPEC §24.2 (v0.4) — pre-fan-out filter. Skip aspects
+                # whose name starts with '_' (convention: prefix optional
+                # / debug aspects). The filter runs BEFORE branches
+                # spawn, so we don't pay the per-aspect cost for
+                # opt-outs. Operators with a static aspect list can
+                # drop the `where:` line.
+                where:    "$.value != ''"
+                do:
+                  kind: workflow
+                  definitionId: critique_aspect
+                  input:
+                    aspect:         "$.branch.value"
+                    patch:          "$.context.candidatePatch"
+                    branch_index:   "$.branch.index"
+              join: all
+              max_concurrency: 4
+              on_branch_failure: bail
+              total_timeout_ms: 600000  # 10 minutes total wall-clock
+            output:
+              # Aggregate the per-critique verdicts into one array.
+              verdicts: "$.output.branches[*].output.verdict"
+              findings: "$.output.branches[*].output.findings"
+              allPassed: "$.output.summary.verdict"
+      rolled_up:
+        transitions:
+          all_critics_passed:
+            target: approved
+            guards:
+              - { kind: expr, expr: "$.context.allPassed == 'succeeded'" }
+          any_critic_failed:
+            target: rejected
+            guards:
+              - { kind: expr, expr: "$.context.allPassed != 'succeeded'" }
+      approved: { terminal: true }
+      rejected: { terminal: true }

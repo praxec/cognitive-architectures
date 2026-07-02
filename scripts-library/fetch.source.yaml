@@ -1,0 +1,33 @@
+# scripts-library/fetch.source.yaml
+#
+# General open-source GROUNDING: fetch any package/repo's source locally via
+# opensrc and return its cached path, so design/investigation steps can read the
+# REAL implementation instead of guessing an API (this session lost time guessing
+# the execution-policy crate's API — fetch.source prevents that class of error).
+# Generalizes the Rust-only inspect.crate.source to ANY ecosystem.
+# Input (positional $1 / SPEC env): an opensrc spec —
+#   crates:<name> | npm:<name> | pypi:<name> | go:<module> | a git URL.
+# Emits {spec, path, source_files} JSON; exit 0 (resolution failure = data).
+version: "1.0.0"
+scripts:
+  fetch.source:
+    verb: fetch
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      spec="${1:-${SPEC:-}}"
+      if [ -z "${spec// /}" ]; then
+        printf '{"error":"empty spec — pass e.g. crates:tokio, npm:react, pypi:requests, go:<mod>, or a git URL"}\n'; exit 0; fi
+      if ! command -v opensrc >/dev/null 2>&1; then
+        printf '{"error":"opensrc not on PATH (run install.opensrc)","spec":"%s"}\n' "$spec"; exit 0; fi
+      # `opensrc path` fetches on cache-miss then prints the absolute cached path.
+      path="$(opensrc path "$spec" 2>/dev/null)"
+      if [ -z "$path" ] || [ ! -d "$path" ]; then
+        printf '{"error":"opensrc could not resolve spec","spec":"%s"}\n' "$spec"; exit 0; fi
+      files=$(find "$path" -type f \( -name '*.rs' -o -name '*.py' -o -name '*.ts' -o -name '*.tsx' \
+                -o -name '*.js' -o -name '*.go' -o -name '*.java' -o -name '*.rb' \) 2>/dev/null | wc -l)
+      jq -n --arg spec "$spec" --arg path "$path" --argjson files "${files:-0}" \
+        '{spec:$spec, path:$path, source_files:$files}' 2>/dev/null \
+        || printf '{"spec":"%s","path":"%s"}\n' "$spec" "$path"

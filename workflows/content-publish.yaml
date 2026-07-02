@@ -1,0 +1,119 @@
+# workflows/content-publish.yaml
+#
+# Draft → review → publish, one pass. An agent drafts; a human reviewer
+# either approves (publishes) or sends back with notes (drafting again).
+# A maximum of three revision rounds — after that, the workflow escalates
+# to a `stalled` terminal for editorial intervention.
+#
+# Skills expected in scope:
+#   - review.code.final-approval   (re-used here as a generic "final
+#                                    sign-off discipline" fragment)
+#
+# Connections expected in scope:
+#   - cms   (REST — the CMS that actually publishes)
+
+version: "1.0.0"
+
+workflows:
+  content_publish:
+    description: >
+      Drafting → human review → publish. Caps revision rounds at three to
+      force an explicit editorial decision rather than infinite ping-pong.
+    tags: [content, publish, governed, editorial]
+    version: "2026-05-25"
+    initialState: drafting
+    # SPEC §29.3 (v0.4): editing agent can ask the reviewer for
+    # clarification on tone / audience targeting before re-submitting.
+    enable_human_ask: true
+    human_ask_cap: 2
+    skills:
+      - review.code.final-approval
+    blackboard:
+      draft:           { type: object }
+      reviewerNotes:   { type: string }
+      revisions:       { type: integer }
+      publishedUrl:    { type: string }
+    initialContext:
+      revisions: 0
+
+    inputSchema:
+      type: object
+      required: [topic, audience]
+      properties:
+        topic:    { type: string }
+        audience: { type: string }
+
+    states:
+      drafting:
+        delegate: editing-agent
+        goal: Produce a draft for the topic and audience
+        transitions:
+          submit_draft:
+            target: reviewing
+            inputSchema:
+              type: object
+              required: [draft]
+              properties:
+                draft: { type: object }
+            executor: { kind: noop }
+            output:
+              draft: "$.arguments.draft"
+
+      reviewing:
+        goal: Human review of the draft
+        actor: human
+        skills:
+          - review.code.final-approval
+        transitions:
+          approve:
+            target: publishing
+            executor: { kind: human }
+          revise:
+            target: deciding_revision
+            executor: { kind: human }
+            inputSchema:
+              type: object
+              required: [reviewerNotes]
+              properties:
+                reviewerNotes: { type: string }
+            output:
+              reviewerNotes: "$.arguments.reviewerNotes"
+              revisions:     { add: ["$.context.revisions", 1] }
+
+      deciding_revision:
+        goal: Decide whether to revise again or stall for editorial intervention
+        transitions:
+          another_round:
+            target: drafting
+            guards:
+              - { kind: expr, expr: "$.context.revisions < 3" }
+            executor: { kind: noop }
+          stall:
+            target: stalled
+            guards:
+              - { kind: expr, expr: "$.context.revisions >= 3" }
+            executor: { kind: noop }
+
+      publishing:
+        goal: Push the approved draft through the CMS
+        transitions:
+          publish:
+            target: published
+            actor: deterministic
+            executor:
+              kind: rest
+              connection: cms
+              method: POST
+              path: /posts
+              body:
+                draft:    "$.context.draft"
+                topic:    "$.workflow.input.topic"
+                audience: "$.workflow.input.audience"
+            output:
+              publishedUrl: "$.output.json.url"
+
+      published:
+        terminal: true
+
+      stalled:
+        terminal: true

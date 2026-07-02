@@ -1,0 +1,19 @@
+# connections/constrained-edit.yaml
+#
+# CLI connection to a constrained-edit tool that accepts a JSON edit
+# script over stdin and emits a structured patch over stdout. The tool
+# enforces the eight allowed operations declared in the
+# `implement.edit.constrained` skill.
+#
+# Reference implementation lives outside this repo. Any binary on
+# PATH that reads `{operations: [...]}` on stdin and emits
+# `{patch: {...}, diagnostics: [...]}` on stdout satisfies the
+# contract.
+
+connections:
+  constrained_edit:
+    kind: cli
+    command: constrained-edit
+    description: >
+      Structured-edit CLI. Accepts the eight allowed edit operations
+      and returns a unified patch + diagnostics.

@@ -1,0 +1,41 @@
+# capabilities/cap.run.scaffold-repo.yaml
+#
+# Deterministic cap: bind to the `run.scaffold.cargo-mcp` script to
+# create a brand-new greenfield Rust MCP-server repo skeleton. Verb
+# `run` (the deterministic catch-all in the closed CapVerb set) → V6
+# requires a `kind: script` executor, like cap.verify.workspace-green.
+
+workflows:
+  cap.run.scaffold-repo:
+    verb: run
+    lifecycle: experimental
+    description: >
+      Scaffold a greenfield Rust MCP-server repo (cargo crate, license,
+      CI, README, git init + initial commit) at the target path.
+    snippet:
+      inputs:
+        repo_path:  { type: string, required: true }
+        crate_name: { type: string, required: true }
+      outputs:
+        scaffolded: { type: boolean }
+        repo_path:  { type: string }
+    initialState: ready
+    states:
+      ready:
+        goal: Create the new repo skeleton; emit scaffolded + repo_path.
+        transitions:
+          scaffold:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.scaffold.cargo-mcp
+              args:
+                - "$.workflow.input.repo_path"
+                - "$.workflow.input.crate_name"
+            # The script executor wraps stdout: the parsed script JSON is at
+            # $.output.json.* (alongside $.output.{exitCode,success,stdout,...}).
+            output:
+              scaffolded: "$.output.json.scaffolded"
+              repo_path:  "$.output.json.repo_path"
+      done: { terminal: true }

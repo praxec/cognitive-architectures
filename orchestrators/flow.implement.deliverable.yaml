@@ -1,0 +1,85 @@
+# orchestrators/flow.implement.deliverable.yaml
+#
+# Execute ONE plan deliverable end-to-end, then record it in the durable
+# plan tracker:
+#   building        → run the recoverable build-loop on the deliverable
+#                     (builder → cargo → QA reviewer → commit-slice), via a
+#                     `kind: workflow` sub-mission (cap.implement.build-loop).
+#   marking_complete→ cpm-planner `plan.mark_status` complete (compare-and-swap;
+#                     the caller must hold the deliverable's cohort lock —
+#                     `caller_id`). LOCK_NOT_HELD / a CAS conflict fails the run.
+#
+# This is a FLOW (not a capability): capabilities are composition leaves
+# (SPEC §3/§4.1, V6/V10) — only flows may invoke other workflows via
+# `kind: workflow`. It is the execution LEAF the cohort driver
+# (flow.execute-cohorts) calls per acquired deliverable; flow.loom composes
+# elicit → design → plan → cohorts on top. The build-loop already escalates
+# models on review failure and surfaces to a human at its cap, so this flow
+# does not re-implement recovery — it couples a verified build to the durable
+# status transition (earned value).
+#
+# Requires the `cpm-planner` connection (see connections/cpm-planner.yaml).
+
+workflows:
+  flow.implement.deliverable:
+    lifecycle: experimental
+    description: >
+      Build one plan deliverable via the recoverable build-loop, then mark it
+      complete in cpm-planner (CAS; caller must hold the cohort lock). The
+      execution leaf the cohort driver calls per acquired deliverable.
+    inputs:
+      # The deliverable spec — passed straight through as the build-loop `plan`
+      # (goal + deliverables/steps + acceptance_criteria).
+      deliverable:    { type: object, required: true }
+      repo_path:      { type: string, required: true }
+      # cpm-planner coordinates: which plan/deliverable, and the lock holder.
+      plan_id:        { type: string, required: true }
+      deliverable_id: { type: string, required: true }
+      caller_id:      { type: string, required: true }
+    # `status` for plan.mark_status is an internally-tagged OBJECT
+    # ({"status":"complete"}); a map: binding can't build an object literal, so
+    # seed it here and bind it by path.
+    initialContext:
+      status_complete: { status: complete }
+    initialState: building
+    states:
+
+      # Run the build-loop as a child mission; capture its result on completion.
+      building:
+        goal: Build the deliverable to green via the recoverable build-loop.
+        transitions:
+          build:
+            target: marking_complete
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.build-loop
+              use:
+                inputs:
+                  plan:      "$.workflow.input.deliverable"
+                  repo_path: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.result": result
+
+      # Record the verified deliverable as complete in the durable tracker.
+      # CAS + lock-ownership are enforced by cpm-planner (fail-fast on conflict).
+      marking_complete:
+        goal: Mark the deliverable complete in cpm-planner (earned value).
+        transitions:
+          mark:
+            target: done
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.mark_status
+              map:
+                plan_id:        "$.workflow.input.plan_id"
+                deliverable_id: "$.workflow.input.deliverable_id"
+                caller_id:      "$.workflow.input.caller_id"
+                status:         "$.context.status_complete"
+            output:
+              mark_result: "$.output"
+
+      done:
+        terminal: true

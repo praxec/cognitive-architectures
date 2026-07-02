@@ -1,0 +1,97 @@
+# capabilities/cap.review.fmeca.yaml
+#
+# FMECA gate, computed not generated. Splits the analysis along the
+# separation-of-concerns boundary:
+#   1. fetching_catalog (deterministic mcp) — pull the FIXED observation
+#      vocabulary from fmeca-mcp for the selected matrix strategy.
+#   2. enumerating (agent) — the LLM does the FUZZY half: find failure modes,
+#      causes, effects, and pick OBSERVATIONS from that catalog. It does NOT
+#      score and does NOT emit a verdict (skill review.fmeca.enumerate).
+#   3. analyzing (deterministic mcp) — fmeca-mcp `analyze` computes criticality,
+#      residual, readiness, response_class. The VERDICT is code-computed.
+#
+# Replaces the old generative-FMECA agent leaf: the model can no longer
+# hallucinate a score — it supplies observations; the tool derives the number.
+# Verb `review` is cognitive (V6 allows kind: mcp | noop), so the mcp + agent
+# leaves are valid. Requires the `fmeca-mcp` connection in the gateway config.
+
+workflows:
+  cap.review.fmeca:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Deterministic FMECA gate over any artifact (plan, design, or system/diff).
+      The LLM enumerates failure modes + observations; fmeca-mcp computes
+      criticality/residual/readiness/response_class. Emits the COMPUTED `ready`
+      (true iff no residual High/Medium and all scored), a risk_ranking, and
+      blockers — so a flow branches on a code-computed verdict, not an LLM one.
+    snippet:
+      inputs:
+        subject:         { type: object, required: true }
+        subject_kind:    { type: string, enum: [plan, design, system], default: system }
+        context:         { type: string, default: "" }
+        matrix_strategy: { type: string, enum: [qualitative3x3, nasa8004_5x5], default: qualitative3x3 }
+      outputs:
+        ready:        { type: boolean }
+        risk_ranking: { type: array }
+        blockers:     { type: array }
+        report:       { type: object }
+    initialState: fetching_catalog
+    states:
+
+      # 1. Deterministic: fetch the fixed observation catalog for the strategy.
+      fetching_catalog:
+        transitions:
+          fetch:
+            target: enumerating
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: fmeca-mcp
+              tool: scoring.catalog
+              map:
+                matrix_strategy: "$.workflow.input.matrix_strategy"
+            output:
+              fmeca_catalog: "$.output"
+
+      # 2. Agent (fuzzy): enumerate failure modes + observations. No scoring.
+      enumerating:
+        goal: >
+          Read $.context — the `subject` ($.workflow.input.subject, kind
+          $.workflow.input.subject_kind) and the scoring vocabulary
+          ($.context.fmeca_catalog). Enumerate the subject's failure modes;
+          for each, pick severity_observations + probability_observations from
+          the catalog (ids only — never a score). Submit `failure_modes`.
+        skills: [review.fmeca.enumerate]
+        transitions:
+          enumerate:
+            target: analyzing
+            actor: agent
+            inputSchema:
+              type: object
+              required: [failure_modes]
+              properties:
+                failure_modes: { type: array }
+            executor: { kind: noop }
+            output:
+              fmeca_batch: "$.arguments.failure_modes"
+
+      # 3. Deterministic: the tool computes the verdict.
+      analyzing:
+        transitions:
+          analyze:
+            target: done
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: fmeca-mcp
+              tool: analyze
+              map:
+                matrix_strategy: "$.workflow.input.matrix_strategy"
+                failure_modes:   "$.context.fmeca_batch"
+            output:
+              ready:        "$.output.ready"
+              risk_ranking: "$.output.risk_ranking"
+              blockers:     "$.output.blockers"
+              report:       "$.output"
+      done: { terminal: true }

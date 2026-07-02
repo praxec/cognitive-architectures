@@ -1,0 +1,68 @@
+version: "1.0.0"
+scripts:
+  verify.stub-scan:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Deterministic stub / dead-code scan: grep non-test Rust under a repo for
+      # stub and unfinished-work markers. The deterministic complement to the
+      # `review.completeness.critic` judgment gate — a flow runs this leaf first,
+      # then critiques. Emits JSON { passed, hits, count } on stdout; passed is
+      # true iff count == 0 (no markers found).
+      #
+      # Inputs (positional first, env fallback — matches the library's script arg
+      # convention, e.g. run.scaffold.cargo-mcp / search.codebase.ripgrep):
+      #   $1 / REPO_PATH — repo directory to scan
+      set -euo pipefail
+      REPO_PATH="${1:-${REPO_PATH:?repo_path required (arg 1 or \$REPO_PATH)}}"
+
+      # Markers that signal unfinished or dishonest work. Word-boundaried where
+      # it matters so `panic!(` matches the macro call, not unrelated text.
+      PATTERN='todo!\(|unimplemented!\(|unreachable!\(|panic!\(|TODO|FIXME'
+
+      # Build the hits array. Exclude tests (tests/ dirs, *_test.rs, #[cfg(test)]
+      # files are covered by the tests/ path filter) and generated/build output.
+      # rg exits 1 when there are no matches — that's success here, so guard it.
+      hits="[]"
+      count=0
+      if command -v rg >/dev/null 2>&1; then
+        raw="$(rg --no-heading --line-number --type rust \
+                  --glob '!target/**' --glob '!**/tests/**' --glob '!**/*_test.rs' \
+                  --glob '!vendor/**' \
+                  -e "$PATTERN" "$REPO_PATH" || true)"
+      else
+        raw="$(grep -rEn --include='*.rs' \
+                  --exclude-dir=target --exclude-dir=tests --exclude-dir=vendor \
+                  "$PATTERN" "$REPO_PATH" 2>/dev/null || true)"
+      fi
+
+      if [ -n "$raw" ]; then
+        # Each line: <file>:<lineno>:<text>. Extract file, line, and the marker.
+        hits="$(printf '%s\n' "$raw" | awk -F: '
+          {
+            file=$1; line=$2;
+            rest=$0;
+            marker="unknown";
+            if (rest ~ /todo!\(/)          marker="todo!(";
+            else if (rest ~ /unimplemented!\(/) marker="unimplemented!(";
+            else if (rest ~ /unreachable!\(/)   marker="unreachable!(";
+            else if (rest ~ /panic!\(/)         marker="panic!(";
+            else if (rest ~ /FIXME/)            marker="FIXME";
+            else if (rest ~ /TODO/)             marker="TODO";
+            gsub(/\\/,"\\\\",file); gsub(/"/,"\\\"",file);
+            printf "%s{\"file\":\"%s\",\"line\":%s,\"marker\":\"%s\"}", sep, file, line, marker;
+            sep=",";
+          }
+          END { }
+        ')"
+        hits="[$hits]"
+        count="$(printf '%s\n' "$raw" | grep -c '' || true)"
+      fi
+
+      if [ "$count" -eq 0 ]; then
+        echo "{\"passed\": true, \"hits\": [], \"count\": 0, \"subject\": \"$PRAXEC_SCRIPT_SUBJECT\"}"
+      else
+        echo "{\"passed\": false, \"hits\": $hits, \"count\": $count, \"subject\": \"$PRAXEC_SCRIPT_SUBJECT\"}"
+      fi

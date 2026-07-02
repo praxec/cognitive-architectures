@@ -1,0 +1,89 @@
+# Spec §9, §24.2 — declarative circuit breaker via guard-gated transitions
+#
+# A state loops back to itself (retry) while a guard holds, and exits
+# to either success or escalation once the guard fails. The counter
+# lives on the blackboard; the guards read it; every iteration is a
+# transition record.
+#
+# ┌──────────┐ retry: failure AND retryCount < 5
+# │  action   │──────────────┐
+# └──────────┘              │ (loops back)
+#     │ work: success        │
+#     │ escalate: retries ≥ 5│
+#     ▼                      │
+#   done   escalate_to_human │
+#                             ▼
+#                        human_triage
+
+version: "1.0.0"
+audit:
+  sink: stdout
+
+workflows:
+  circuit_breaker_demo:
+    initialState: action
+    blackboard:
+      result:      { type: string }
+      retryCount:  { type: integer }
+    initialContext:
+      retryCount: 0
+
+    states:
+      action:
+        goal: Attempt the operation
+        guidance: >
+          This state tries an operation that might fail transiently.
+          It loops on failure up to 5 times, then escalates.
+        transitions:
+          # ── attempt (submit the result of an external try) ──
+          # PATTERN CONTRACT: the agent / sub-workflow submits this
+          # transition with `arguments.result` set to "ok" or any
+          # failure marker. The output mapping persists it onto
+          # context so the routing guards below have a reachable
+          # writer (closes the use-before-def warning).
+          attempt:
+            target: action                            # ← stays here; routing fires next
+            inputSchema:
+              type: object
+              required: [result]
+              properties:
+                result: { type: string }
+            executor: { kind: noop }
+            output:
+              result: "$.arguments.result"
+
+          # ── succeed (exit) ──
+          work:
+            target: done
+            guards:
+              - kind: expr
+                expr: "$.context.result == 'ok'"
+            executor: { kind: noop }
+
+          # ── retry (loop back) ──
+          retry:
+            target: action                            # ← loops to itself
+            guards:
+              - kind: expr
+                expr: "$.context.result != 'ok'"
+              - kind: expr
+                expr: "$.context.retryCount < 5"      # circuit still closed
+            # SPEC §29.6 (v0.4): defense-in-depth alongside the count guard.
+            max_fires_per_visit: 5
+            executor: { kind: noop }
+            output:
+              retryCount: { add: ["$.context.retryCount", 1] }
+
+          # ── escalate (circuit open) ──
+          escalate:
+            target: escalate_to_human
+            guards:
+              - kind: expr
+                expr: "$.context.retryCount >= 5"     # circuit breaker trips
+            executor: { kind: noop }
+
+      escalate_to_human:
+        terminal: true
+
+      done:
+        terminal: true

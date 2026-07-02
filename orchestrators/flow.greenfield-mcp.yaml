@@ -1,0 +1,474 @@
+# orchestrators/flow.greenfield-mcp.yaml
+#
+# Greenfield SDLC with staged risk gates:
+#   elicit → PLAN → plan-FMECA → DESIGN → arch-validity → design-FMECA →
+#   schedule → human signoff → scaffold → implement(TDD) → verify →
+#   stub-scan → deliverable-gap → acceptance → completeness → adversarial → done
+#
+# Every analysis gate emits a MACHINE-PARSEABLE typed verdict and is followed by
+# a branch state (guards evaluate BEFORE a transition's executor fires, so each
+# "execute + branch" is two states). Abort branches use `!= success` so an
+# unexpected/absent verdict fails loudly rather than wedging. All gates are
+# declarative caps in this repo; the engine stays generic.
+#
+# Scope discipline (SPEC §7.3): start inputs are read via `$.workflow.input.*`;
+# intermediate artifacts (plan/design/verdicts) are blackboard outputs read via
+# `$.context.*`. `repo_path` flows to every code gate from `$.workflow.input`.
+
+workflows:
+  flow.greenfield-mcp:
+    description: |
+      Build a greenfield MCP server end to end with staged risk gates:
+      plan → plan-FMECA → design → design-FMECA → execution, then a
+      build-quality review gauntlet (stub-scan, deliverable-gap,
+      acceptance-criteria, completeness, adversarial) before done.
+    inputs:
+      project_brief: { type: string, required: true }
+      crate_name:    { type: string, required: true }
+      repo_path:     { type: string, required: true }
+      base_ref:      { type: string, default: main }
+    initialState: eliciting
+    states:
+
+      # Elicitation is an OPERATOR-BOUNDARY activity; the operator supplies the
+      # already-elicited spec as `project_brief` and this leaf adopts it.
+      eliciting:
+        transitions:
+          elicit:
+            target: spec_vetting
+            actor: deterministic
+            executor: { kind: noop }
+
+      # SPEC-VET: INCOSE/EARS testability check on the operator-supplied spec
+      # before any planning (validation only — tests are generated at build time).
+      spec_vetting:
+        transitions:
+          vet_spec:
+            target: spec_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.review.spec-ears
+              use:
+                inputs:
+                  spec: "$.workflow.input.project_brief"
+                outputs:
+                  "$.context.spec_status":        status
+                  "$.context.spec_defects":       defects
+                  "$.context.spec_clarifications": clarifications
+
+      spec_gate:
+        transitions:
+          advance:
+            target: planning
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.spec_status == 'validated'"
+          abort:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.spec_status != 'validated'"
+
+      # PLAN: deliverables DAG + acceptance criteria + risk (one plan artifact
+      # feeds cpm, the gap-check, the acceptance gate, and risk-scaling).
+      planning:
+        transitions:
+          plan:
+            target: plan_fmeca
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.plan.build-graph
+              use:
+                inputs:
+                  brief: "$.workflow.input.project_brief"
+                outputs:
+                  "$.context.plan":                graph
+                  "$.context.acceptance_criteria": acceptance_criteria
+                  "$.context.risk":                risk
+
+      # PLAN-FMECA: FMECA the plan (forward-looking risk on the approach).
+      plan_fmeca:
+        transitions:
+          fmeca:
+            target: plan_fmeca_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.review.fmeca
+              use:
+                inputs:
+                  subject:      "$.context.plan"
+                  subject_kind: plan
+                outputs:
+                  "$.context.plan_fmeca_ready": ready
+                  "$.context.plan_risk_ranking": risk_ranking
+                  "$.context.plan_fmeca_blockers": blockers
+
+      plan_fmeca_gate:
+        transitions:
+          advance:
+            target: designing
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.plan_fmeca_ready == true"
+          abort:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.plan_fmeca_ready != true"
+
+      # DESIGN: technical/architecture design from spec + plan.
+      designing:
+        transitions:
+          design:
+            target: design_arch
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.plan.technical-design
+              use:
+                inputs:
+                  spec: "$.workflow.input.project_brief"
+                  plan: "$.context.plan"
+                outputs:
+                  "$.context.design": design
+
+      # DESIGN architecture-validity ("should each component exist?").
+      design_arch:
+        transitions:
+          arch:
+            target: design_arch_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.review.architecture
+              use:
+                inputs:
+                  design: "$.context.design"
+                outputs:
+                  "$.context.design_arch_verdict": verdict
+                  "$.context.design_components":   component_table
+
+      design_arch_gate:
+        transitions:
+          advance:
+            target: design_fmeca
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.design_arch_verdict == 'approved'"
+          abort:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.design_arch_verdict != 'approved'"
+
+      # DESIGN-FMECA: FMECA the design.
+      design_fmeca:
+        transitions:
+          fmeca:
+            target: design_fmeca_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.review.fmeca
+              use:
+                inputs:
+                  subject:      "$.context.design"
+                  subject_kind: design
+                outputs:
+                  "$.context.design_fmeca_ready": ready
+                  "$.context.design_risk_ranking": risk_ranking
+                  "$.context.design_fmeca_blockers": blockers
+
+      design_fmeca_gate:
+        transitions:
+          advance:
+            target: scheduling
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.design_fmeca_ready == true"
+          abort:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.design_fmeca_ready != true"
+
+      # SCHEDULE: CPM over the plan's deliverables DAG.
+      scheduling:
+        transitions:
+          schedule:
+            target: awaiting_signoff
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.coordinate.cpm-plan
+              use:
+                inputs:
+                  tasks: "$.context.plan"
+                outputs:
+                  "$.context.schedule": schedule
+
+      # Human signoff — direct actor:human gate (blocks the chain for a real
+      # decision; the cap.gate.human-signoff wrapper does NOT block).
+      awaiting_signoff:
+        transitions:
+          signoff:
+            target: signoff_received
+            actor: human
+            inputSchema:
+              type: object
+              required: [decision]
+              properties:
+                decision:  { type: string, enum: [approved, rejected] }
+                rationale: { type: string, default: "" }
+            executor: { kind: noop }
+            output:
+              signoff_decision: "$.arguments.decision"
+
+      signoff_received:
+        transitions:
+          advance:
+            target: scaffolding
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.signoff_decision == 'approved'"
+          abort:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.signoff_decision != 'approved'"
+
+      scaffolding:
+        transitions:
+          scaffold:
+            target: implementing
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.run.scaffold-repo
+              use:
+                inputs:
+                  repo_path:  "$.workflow.input.repo_path"
+                  crate_name: "$.workflow.input.crate_name"
+                outputs:
+                  "$.context.scaffolded": scaffolded
+
+      # IMPLEMENT + VERIFY, as a RECOVERABLE build loop: the producer writes
+      # slices (no shell), praxec runs cargo (fmt+clippy+test) as a script in
+      # the repo, and the gate loops back on failure instead of stopping —
+      # bounded, then escalates to a human. The loop only finishes when the
+      # workspace is green, so it SUBSUMES the old separate verify gate (a
+      # producer crash / no-shell no longer aborts the build).
+      implementing:
+        transitions:
+          tdd_loop:
+            target: stub_scanning
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.implement.build-loop
+              use:
+                inputs:
+                  plan:      "$.context.plan"
+                  repo_path: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.implementation_result": result
+                  "$.context.tests_added":           tests_added
+
+      # STUB-SCAN: deterministic no-stub/no-dead-code gate.
+      stub_scanning:
+        transitions:
+          stub_scan:
+            target: stub_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.verify.stub-scan
+              use:
+                inputs:
+                  repo_path: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.stub_passed": passed
+                  "$.context.stub_hits":   hits
+
+      stub_gate:
+        transitions:
+          advance:
+            target: checking_deliverables
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.stub_passed == true"
+          abort:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.stub_passed != true"
+
+      # DELIVERABLE-GAP: every plan deliverable vs what actually exists on disk;
+      # gaps_found surfaces gaps + todos and fails the build.
+      checking_deliverables:
+        transitions:
+          deliverable_gap:
+            target: deliverable_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.review.deliverable-gap
+              use:
+                inputs:
+                  plan:      "$.context.plan"
+                  repo_path: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.deliverable_verdict": verdict
+                  "$.context.deliverable_gaps":    gaps
+                  "$.context.deliverable_todos":   todos
+
+      deliverable_gate:
+        transitions:
+          advance:
+            target: checking_acceptance
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.deliverable_verdict == 'complete'"
+          abort:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.deliverable_verdict != 'complete'"
+
+      # ACCEPTANCE: built code vs the plan's acceptance_criteria.
+      checking_acceptance:
+        transitions:
+          acceptance:
+            target: acceptance_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.review.acceptance-criteria
+              use:
+                inputs:
+                  plan:      "$.context.plan"
+                  repo_path: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.acceptance_verdict": verdict
+                  "$.context.acceptance_results": criteria_results
+
+      acceptance_gate:
+        transitions:
+          advance:
+            target: review_routing
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.acceptance_verdict == 'all_met'"
+          abort:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.acceptance_verdict != 'all_met'"
+
+      # RISK-SCALING: the two heaviest LLM review gates (completeness critic +
+      # adversarial review) run only when the plan's risk is non-trivial. A
+      # low-risk change has already cleared the deterministic stub scan,
+      # deliverable-gap, and acceptance gates — sufficient — so it skips straight
+      # to done instead of paying the full gauntlet on every change. Guards are
+      # exhaustive + mutually exclusive over risk (low vs not-low).
+      review_routing:
+        transitions:
+          full_review:
+            target: checking_completeness
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.risk != 'low'"
+          light_review:
+            target: done
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.risk == 'low'"
+
+      # COMPLETENESS: orphans / dead code / DRY / interface gaps critic.
+      checking_completeness:
+        transitions:
+          completeness:
+            target: completeness_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.review.completeness
+              use:
+                inputs:
+                  repo_path: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.completeness_verdict":  verdict
+                  "$.context.completeness_findings": findings
+
+      completeness_gate:
+        transitions:
+          advance:
+            target: reviewing
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.completeness_verdict == 'approved'"
+          abort:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.completeness_verdict != 'approved'"
+
+      # ADVERSARIAL: line-level correctness/security review of the diff.
+      reviewing:
+        transitions:
+          review:
+            target: reviewed
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.review.adversarial
+              use:
+                inputs:
+                  diff_against: "$.workflow.input.base_ref"
+                outputs:
+                  "$.context.review_verdict":  verdict
+                  "$.context.review_findings": findings
+
+      reviewed:
+        transitions:
+          advance:
+            target: done
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.review_verdict == 'approved'"
+          abort:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.review_verdict != 'approved'"
+
+      done:
+        terminal: true
+
+      failed:
+        terminal: true

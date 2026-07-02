@@ -1,0 +1,16 @@
+# examples/praxec-cognitive-only.yaml
+#
+# Minimal gateway config that loads the cognitive-architectures repo
+# only. Useful for smoke-testing capability/orchestrator loading.
+#
+# Usage:
+#   praxec check --config examples/praxec-cognitive-only.yaml
+#
+# The repo's manifest declares `namespace: cognitive`, so every
+# loaded definitionId surfaces under `cognitive/<id>` (e.g.
+# `cognitive/flow.add-feature`).
+
+version: "1.0.0"
+
+repos:
+  - path: ..

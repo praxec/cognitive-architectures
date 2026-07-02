@@ -1,0 +1,50 @@
+# capabilities/cap.review.deliverable-gap.yaml
+#
+# THE headline SDLC quality gate. Cognitive cap: the agent driving the gateway
+# sees the `review.deliverable.gap-analysis` skill guidance and checks EVERY
+# deliverable in the plan against what ACTUALLY exists in the codebase (reading
+# the real files — producer != evaluator), then emits a typed verdict + a gap
+# table + a todo per gap so a flow can branch and loop back to close them.
+
+workflows:
+  cap.review.deliverable-gap:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Check every plan deliverable against what actually exists in the
+      codebase (read the real owned_files; do not trust claimed results);
+      emit a per-deliverable gap table + closing todos + a typed verdict.
+    snippet:
+      inputs:
+        plan:      { type: object, required: true }
+        repo_path: { type: string, required: true }
+      outputs:
+        verdict: { type: string, enum: [complete, gaps_found] }
+        gaps:    { type: array }
+        todos:   { type: array }
+    skills: [review.deliverable.gap-analysis]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Enumerate the plan's deliverables; verify each one's owned_files
+          exist, hold a real (non-stub) implementation, and have tests;
+          classify present/partial/missing with evidence; emit a closing
+          todo per gap and a typed verdict.
+        transitions:
+          submit_gap_analysis:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [verdict, gaps, todos]
+              properties:
+                verdict: { type: string, enum: [complete, gaps_found] }
+                gaps:    { type: array, default: [] }
+                todos:   { type: array, default: [] }
+            executor: { kind: noop }
+            output:
+              verdict: "$.arguments.verdict"
+              gaps:    "$.arguments.gaps"
+              todos:   "$.arguments.todos"
+      done: { terminal: true }

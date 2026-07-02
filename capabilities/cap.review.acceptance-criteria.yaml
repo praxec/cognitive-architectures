@@ -1,0 +1,47 @@
+# capabilities/cap.review.acceptance-criteria.yaml
+#
+# Acceptance-criteria SDLC gate. Cognitive cap: the agent driving the gateway
+# sees the `review.acceptance.criteria-met` skill and checks the BUILT
+# code/tests against the plan's acceptanceCriteria (each criterion -> met/unmet
+# with evidence: a test name or file:line; producer != evaluator), emitting a
+# typed verdict + per-criterion results so a flow can branch and loop back.
+
+workflows:
+  cap.review.acceptance-criteria:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Check the built code/tests against the plan's acceptanceCriteria;
+      each criterion -> met/unmet with concrete evidence (a test name or
+      file:line); emit a typed verdict + per-criterion results.
+    snippet:
+      inputs:
+        plan:      { type: object, required: true }
+        repo_path: { type: string, required: true }
+      outputs:
+        verdict:          { type: string, enum: [all_met, unmet] }
+        criteria_results: { type: array }
+    skills: [review.acceptance.criteria-met]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Enumerate the plan's acceptanceCriteria; verify each against the
+          built code/tests under repo_path with a citable test name or
+          file:line; emit per-criterion met/unmet + evidence and a typed
+          verdict.
+        transitions:
+          submit_criteria_check:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [verdict, criteria_results]
+              properties:
+                verdict:          { type: string, enum: [all_met, unmet] }
+                criteria_results: { type: array, default: [] }
+            executor: { kind: noop }
+            output:
+              verdict:          "$.arguments.verdict"
+              criteria_results: "$.arguments.criteria_results"
+      done: { terminal: true }

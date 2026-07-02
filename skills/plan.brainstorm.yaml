@@ -1,0 +1,114 @@
+# skills/plan.brainstorm.yaml
+#
+# Diverge before you converge. This skill lives next to
+# `plan.fix.scope-bounded` and `compose.plan.vet` — the cognitive
+# pair to "produce one structured plan." Brainstorming produces
+# the option space; picking narrows it. Skipping either step is
+# the failure mode this skill exists to prevent.
+
+skills:
+  plan.brainstorm:
+    verb: plan
+    lifecycle: stable
+    source: cognitive-architectures
+    body: |
+      # Brainstorming: divergent thinking, not the convergent kind
+
+      You're being asked to generate options — not to pick one.
+      That's the entire reason this skill exists as a distinct
+      cap from `cap.plan.draft` / `cap.plan.vet` / any other
+      picking cap. Premature convergence is the failure mode:
+      the moment you decide "candidate B feels right," you stop
+      generating, and the option space you actually had to choose
+      from collapses to two-or-three half-developed ideas.
+
+      Your output is a list of **3 to 7 candidates** plus a
+      one-paragraph `divergence_notes` that names what the
+      candidates actually differ across.
+
+      ## Each candidate carries
+
+      - **`id`** — short kebab-case token. Becomes a stable
+        handle downstream (the vet cap will reference it).
+
+      - **`name`** — one-line human-readable summary.
+
+      - **`summary`** — one or two paragraphs in plain language.
+        Avoid jargon. The reader is not necessarily an expert in
+        whatever domain the goal touches; they need enough to
+        compare against the other candidates.
+
+      - **`tradeoffs`** — an array of strings, not a single string.
+        Each entry names one axis this candidate gives up vs the
+        alternatives. "Faster to implement but harder to monitor."
+        "Lower vendor lock-in but slower per-query." The array
+        shape is deliberate — the downstream vet cap can count
+        them, and a candidate with one tradeoff isn't really being
+        compared against anything.
+
+      - **`assumptions`** — an array of strings naming the
+        explicit assumptions this candidate rests on. "Assumes
+        the team has Kubernetes experience." "Assumes traffic
+        stays below 10k RPS for the next two quarters." If your
+        candidates' assumptions all match, you're not really
+        diverging — you're just paraphrasing.
+
+      - **`confidence`** — `low | medium | high`. How confident
+        you are this candidate would actually work if picked. Use
+        `low` liberally — a low-confidence candidate that surfaces
+        an unexplored axis is more valuable than a high-confidence
+        candidate that mirrors one already on the list.
+
+      ## Divergence discipline
+
+      - **At least three, at most seven.** Two is "did you
+        actually think." Eight is decision paralysis: the vet
+        step downstream can't carry the cognitive load.
+        Generally aim for the operator's `candidate_count_target`
+        (default 4); skew higher if the constraints are loose,
+        lower if they're tight.
+
+      - **Make them genuinely different.** Two candidates that
+        differ only in naming are wasted slots; pick the better-
+        named one and propose a structurally different
+        alternative. Different axes. Different determinism
+        profiles. Different blast radius. Different cost
+        structure.
+
+      - **No pseudo-fanout.** Five near-identical options dressed
+        up with different names is worse than three real ones.
+        The vet step needs the option space to actually span
+        meaningfully different territory; if your "five" all
+        collapse into the same general shape, ship three.
+
+      - **Surface the dimensions in `divergence_notes`.** Name
+        the axes you spanned: "Candidates differ across hosting
+        location (cloud vs on-prem), pricing model (per-seat vs
+        usage), and HITL surface (always vs only-on-risk)." The
+        downstream consumer can audit whether you actually
+        explored or just generated.
+
+      ## Anti-patterns
+
+      - **Sneaking in your favorite.** If you write three
+        candidates where one is clearly best and the others are
+        straw men, you've produced a single recommendation
+        wearing a brainstorming hat. The vet step is the place
+        to recommend; brainstorming's job is to give vet real
+        choices.
+
+      - **Constraint-driven monoculture.** When constraints are
+        very tight, it's tempting to say "only one candidate is
+        actually viable." That's almost never true at the
+        brainstorming stage — find the second-best, the
+        radically-different-but-risky, and the
+        ignore-the-constraints version. If a constraint really
+        is hard, the vet step will eliminate violators; don't
+        pre-filter them out at brainstorming time.
+
+      - **Vague tradeoffs.** "More complex" is not a tradeoff
+        unless you name what makes it complex. "More moving
+        parts at runtime — three new processes to monitor"
+        beats "more complex." The vet step needs to be able to
+        weigh tradeoffs against constraints, which requires
+        them to be specific.

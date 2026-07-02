@@ -1,0 +1,48 @@
+# capabilities/cap.plan.technical-design.yaml
+#
+# Produce a technical / architecture design from a spec + plan. Cognitive cap:
+# the agent driving the gateway runs the plan.design.technical skill and
+# submits a typed design (components / interfaces / data flow / error strategy
+# / component classifications) as transition arguments.
+
+workflows:
+  cap.plan.technical-design:
+    verb: plan
+    lifecycle: experimental
+    description: >
+      Turn a spec + plan into a buildable technical design: components +
+      responsibilities, interfaces/contracts, data flow, error-handling
+      strategy, key trade-offs, and an explicit per-component classification
+      (Essential / Useful / Speculative / Unjustified) to prevent speculative
+      gold-plating. Minimal-but-sufficient.
+    snippet:
+      inputs:
+        spec: { type: object, required: true }
+        plan: { type: object, default: {} }
+      outputs:
+        design:    { type: object }
+        artifacts: { type: array }
+    skills: [plan.design.technical]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Read the spec + plan; emit a typed design with components,
+          interfaces, data_flow, error_strategy, trade_offs, and a
+          per-component classification (Essential/Useful/Speculative/
+          Unjustified), per the plan.design.technical skill.
+        transitions:
+          submit_design:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [design]
+              properties:
+                design:    { type: object }
+                artifacts: { type: array, default: [] }
+            executor: { kind: noop }
+            output:
+              design:    "$.arguments.design"
+              artifacts: "$.arguments.artifacts"
+      done: { terminal: true }

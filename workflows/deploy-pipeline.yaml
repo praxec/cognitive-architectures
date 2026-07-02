@@ -1,0 +1,130 @@
+# workflows/deploy-pipeline.yaml
+#
+# Pre-prod safety gate → deploy → rollback handler. The safety checklist
+# is enforced as a guidance_acknowledged guard: the agent cannot advance
+# to `deploying` without acknowledging the 10-point checklist body.
+#
+# Connections expected in scope:
+#   - verifier_harness   (MCP — runs the deploy checklist gates)
+#   - shell              (CLI — runs the actual deploy / rollback scripts)
+#
+# Skills expected in scope:
+#   - deploy.safety.checklist
+
+version: "1.0.0"
+
+workflows:
+  deploy_pipeline:
+    description: >
+      Governed deploy pipeline. Human acknowledges the 10-point safety
+      checklist, deploy runs, post-deploy verification decides between
+      `succeeded` and an automated rollback into `rolled_back`.
+    tags: [deploy, safety, governed, rollback]
+    version: "2026-05-25"
+    initialState: pre_deploy
+    # SPEC §29.3 (v0.4): operators running deploys can be paged for
+    # ad-hoc clarification (e.g. "are we sure about this artifact?")
+    # without escalating the whole workflow to human-gate semantics.
+    enable_human_ask: true
+    human_ask_cap: 2
+    skills:
+      - deploy.safety.checklist
+    blackboard:
+      service:           { type: string }
+      environment:       { type: string }
+      artifactId:        { type: string }
+      deployId:          { type: string }
+      postDeployHealthy: { type: boolean }
+      rollbackId:        { type: string }
+    # Default the health gate to `false` so the deciding state has a
+    # safety-biased default if the verifier somehow returns nothing.
+    initialContext:
+      postDeployHealthy: false
+    inputSchema:
+      type: object
+      required: [service, environment, artifactId]
+      properties:
+        service:     { type: string }
+        environment: { type: string, enum: [staging, production] }
+        artifactId:  { type: string }
+
+    states:
+      pre_deploy:
+        goal: Confirm the 10-point safety checklist before deploy
+        actor: human
+        skills:
+          - deploy.safety.checklist
+        transitions:
+          confirm_safety:
+            target: deploying
+            guards:
+              - kind: guidance_acknowledged
+                subject: deploy.safety.checklist
+            executor: { kind: noop }
+
+      deploying:
+        goal: Run the deploy
+        transitions:
+          run_deploy:
+            target: post_deploy_verify
+            actor: deterministic
+            executor:
+              kind: cli
+              connection: shell
+              args:
+                - "deploy"
+                - "$.workflow.input.service"
+                - "$.workflow.input.environment"
+                - "$.workflow.input.artifactId"
+            output:
+              deployId: "$.output.json.deployId"
+
+      post_deploy_verify:
+        goal: Verify the deploy is healthy
+        transitions:
+          run_post_deploy_check:
+            target: deciding
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: verifier_harness
+              tool: post_deploy_check
+            output:
+              postDeployHealthy: "$.output.healthy"
+
+      deciding:
+        goal: Decide on outcome based on post-deploy health
+        transitions:
+          succeed:
+            target: succeeded
+            guards:
+              - { kind: expr, expr: "$.context.postDeployHealthy == true" }
+            executor: { kind: noop }
+          rollback:
+            target: rolling_back
+            guards:
+              - { kind: expr, expr: "$.context.postDeployHealthy == false" }
+            executor: { kind: noop }
+
+      rolling_back:
+        goal: Roll back to the prior known-good artifact
+        transitions:
+          run_rollback:
+            target: rolled_back
+            actor: deterministic
+            executor:
+              kind: cli
+              connection: shell
+              args:
+                - "rollback"
+                - "$.workflow.input.service"
+                - "$.workflow.input.environment"
+                - "$.context.deployId"
+            output:
+              rollbackId: "$.output.json.rollbackId"
+
+      succeeded:
+        terminal: true
+
+      rolled_back:
+        terminal: true

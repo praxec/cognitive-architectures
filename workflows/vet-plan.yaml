@@ -1,0 +1,176 @@
+# workflows/vet-plan.yaml
+#
+# CPM-deliverable-artifact planning workflow with FMECA / poka-yoke /
+# TRIZ optimization. Grounds artifact names in the operator's
+# ubiquitous-language lexicon via gateway.lexicon.search (SPEC §30).
+#
+# Three states:
+#   scoping     — operator provides task + repo context (input gate)
+#   planning    — planner-agent invokes compose.plan.vet skill,
+#                 grounding artifact names in the lexicon and emitting
+#                 a CPM-structured markdown plan + structured JSON
+#   critiquing  — critic-agent reviews the plan against FMECA + poka-yoke
+#                 checklist; loops back to planning if issues found
+#                 (while: with max_iterations: 3 as poka-yoke against
+#                 critic-pickiness)
+#   approved    — human approval gate
+#   done        — plan delivered as $.context.plan_markdown
+#
+# Skills expected in scope:
+#   - compose.plan.vet              (the planner's skill body)
+#   - review.code.adversarial       (critic's checklist)
+#   - plan.specify.change-request   (planner's task-normalization helper)
+#
+# Connections expected in scope:
+#   - praxec  (MCP — exposes gateway.lexicon.* for grounding)
+
+version: "1.0.0"
+
+workflows:
+  vet_plan:
+    description: >
+      Take a task description; emit a CPM-structured plan oriented
+      around deliverable software artifacts; FMECA + poka-yoke +
+      TRIZ optimize; ground in the operator's ubiquitous-language
+      lexicon; human-approved before delivery.
+    tags: [planning, fmeca, poka-yoke, triz, ubiquitous-language, cpm]
+    version: "2026-05-25"
+    initialState: scoping
+    # SPEC §29.3 — the planner can ask clarifying questions about the
+    # task scope mid-plan; the critic can ask the human to disambiguate
+    # severity calls in the FMECA pass.
+    enable_human_ask: true
+    human_ask_cap: 3
+    skills:
+      - compose.plan.vet
+      - review.code.adversarial
+
+    inputSchema:
+      type: object
+      required: [task]
+      properties:
+        task:
+          type: string
+          minLength: 10
+          description: "the task to plan (e.g. 'Add OAuth provider connector')"
+        repo_context:
+          type: string
+          description: "optional pointers to relevant code (file paths, current shapes)"
+
+    blackboard:
+      task:                       { type: string }
+      repo_context:               { type: string }
+      plan_markdown:              { type: string }
+      plan_json:                  { type: object }
+      critic_verdict:             { type: string }   # "approved" | "needs_revision"
+      critic_notes:               { type: string }
+      revision_count:             { type: integer }
+      committed_plan_markdown:    { type: string }
+    initialContext:
+      revision_count: 0
+
+    states:
+      scoping:
+        goal: Receive the task + any caller-provided repo context.
+        transitions:
+          submit_task:
+            target: planning
+            executor: { kind: noop }
+            output:
+              task:         "$.workflow.input.task"
+              repo_context: "$.workflow.input.repo_context"
+
+      planning:
+        delegate: planner-agent
+        goal: >
+          Invoke the compose.plan.vet skill. Ground artifact names in
+          the lexicon via gateway.lexicon.search BEFORE naming.
+          Emit BOTH plan_markdown and plan_json per the skill's
+          output contract.
+        skills:
+          - compose.plan.vet
+        # State-local scratch — cleared on exit (SPEC §27).
+        slots:
+          lexicon_terms_seen: { type: integer, scope: state, default: 0 }
+        transitions:
+          submit_plan:
+            target: critiquing
+            inputSchema:
+              type: object
+              required: [plan_markdown, plan_json]
+              properties:
+                plan_markdown:
+                  type: string
+                  minLength: 200
+                  description: "the CPM-structured plan; must include `## Critical Path` and `## FMECA`"
+                plan_json:
+                  type: object
+                  required: [artifacts, critical_path, fmeca]
+                  properties:
+                    artifacts:                 { type: array, minItems: 1 }
+                    critical_path:             { type: array }
+                    fmeca:                     { type: array }
+                    trade_offs:                { type: array }
+                    proposed_lexicon_additions: { type: array }
+            executor: { kind: noop }
+            output:
+              plan_markdown: "$.arguments.plan_markdown"
+              plan_json:     "$.arguments.plan_json"
+
+      critiquing:
+        delegate: critic-agent
+        goal: >
+          Adversarially review the plan against the FMECA / poka-yoke
+          / TRIZ checklist. Surface any artifact with severity >= M
+          that's missing a mitigation. Flag work-shaped artifacts.
+          Verdict: "approved" or "needs_revision".
+        skills:
+          - review.code.adversarial
+        transitions:
+          submit_critique:
+            target: routing_after_critique
+            inputSchema:
+              type: object
+              required: [verdict]
+              properties:
+                verdict: { type: string, enum: [approved, needs_revision] }
+                notes:   { type: string }
+            executor: { kind: noop }
+            output:
+              critic_verdict: "$.arguments.verdict"
+              critic_notes:   "$.arguments.notes"
+
+      routing_after_critique:
+        goal: Route based on critic's verdict.
+        transitions:
+          route:
+            target: planning   # default; overridden by branch
+            actor: deterministic
+            executor: { kind: noop }
+            branches:
+              - when: { kind: expr, expr: "$.context.critic_verdict == 'approved'" }
+                target: human_approval
+              - when: { kind: expr, expr: "$.context.revision_count >= 3" }
+                target: human_approval   # cap hit; let human break ties
+              - when: { kind: expr, expr: "$.context.critic_verdict == 'needs_revision'" }
+                target: planning
+            output:
+              revision_count: { add: ["$.context.revision_count", 1] }
+
+      human_approval:
+        goal: Human reviews + approves the vet-plan output.
+        actor: human
+        transitions:
+          approve:
+            target: done
+            actor: human
+            executor: { kind: noop }
+            output:
+              committed_plan_markdown: "$.context.plan_markdown"
+          reject:
+            target: planning
+            actor: human
+            executor: { kind: noop }
+
+      done:
+        terminal: true

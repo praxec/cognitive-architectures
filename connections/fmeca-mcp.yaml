@@ -1,0 +1,12 @@
+# connections/fmeca-mcp.yaml — REFERENCE connection. MCP connection to fmeca-mcp,
+# the deterministic, offline structured-FMECA engine. Can back the plan-FMECA /
+# design-FMECA gates (cap.review.fmeca), the way elicitation backs readiness.
+# Install: `cargo install --path crates/fmeca-mcp`; binary `fmeca-mcp`, MCP/stdio.
+# Tools: session.open, append, state.get, risk.next, readiness.assess, report.export.
+connections:
+  fmeca-mcp:
+    kind: mcp
+    command: fmeca-mcp
+    description: >
+      Deterministic structured-FMECA engine: append failure modes + mitigations,
+      get computed criticality/residual + readiness (all High/Medium reduced to Low).

@@ -1,0 +1,103 @@
+# capabilities/cap.review.use-case-falsification.yaml
+#
+# Popperian adequacy gate over a DESIGN, COMPUTED not asserted. A design is
+# never "proven adequate" — we actively try to REFUTE its adequacy against a set
+# of (human-approved) use cases. One refuting observation = a real design gap;
+# surviving the whole set = inductive support (not proof) of adequacy.
+#
+# Separation of concerns (mirrors cap.review.fmeca exactly):
+#   1. assessing (agent) — the FUZZY half. For EACH approved use case the LLM
+#      attempts to express it ENTIRELY in the design and records a single
+#      observation: supports=true if fully representable, supports=false (a
+#      refutation) naming the SPECIFIC missing node-kind / edge / field. The LLM
+#      supplies ONLY observations — it does NOT decide adequacy or the verdict.
+#   2. adjudicating (deterministic mcp) — scientific-process `adjudicate` folds each
+#      observation into an adequacy hypothesis -> experiment -> observation ->
+#      conclusion (Refuted iff supports=false) and returns the COMPUTED verdict
+#      { adequate, refuted, report }. The model can no longer self-adjudicate.
+#
+# This is the V2 fix: the prior version let the agent emit `adequate`/`refuted`
+# directly (and skip scientific-process entirely, leaving an empty standing). Now the
+# verdict is a pure fold the tool computes from the agent's per-case supports.
+#
+# Requires the `science` connection (kind: mcp, command: scientific-process) with the
+# `adjudicate` tool. Verb `review` is cognitive (allows kind: mcp | agent | noop).
+
+workflows:
+  cap.review.use-case-falsification:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Pressure-test a design by trying to FALSIFY its adequacy against a set of
+      use cases (Popper). The agent records one supports/evidence observation per
+      use case; scientific-process.adjudicate computes the verdict. Emits adequate (true
+      iff NO use case refuted), refuted_use_cases, and the computed report.
+    snippet:
+      inputs:
+        subject:      { type: object, required: true }
+        subject_kind: { type: string, default: design }
+        use_cases:    { type: array,  required: true }
+      outputs:
+        adequate:          { type: boolean }
+        refuted_use_cases: { type: array }
+        report:            { type: object }
+    initialState: assessing
+    states:
+
+      # 1. Agent (fuzzy): one observation per use case. NO verdict — only supports.
+      assessing:
+        goal: >
+          You are an ADVERSARIAL reviewer. Goal: PROVE the design inadequate, not
+          praise it. Read $.workflow.input.subject (the design, kind
+          $.workflow.input.subject_kind) and $.workflow.input.use_cases. For EACH
+          use case, actually ATTEMPT to express it ENTIRELY in the design — every
+          entity, relationship, state, and field it needs. Then record ONE
+          observation object:
+            { use_case_id, supports: <bool>, evidence: <string>, rationale: <string> }
+          Set supports=false (a REFUTATION) if ANY required capability is missing,
+          and name the SPECIFIC missing node-kind / edge-relation / field / enum in
+          `evidence`. Set supports=true only if it is fully representable, with
+          evidence describing exactly how it maps. Be ruthless: a vague "probably
+          representable" is a refutation, not a pass. Submit `cases` = the array of
+          these observation objects (one per use case). Do NOT decide adequacy —
+          the tool computes the verdict from your observations.
+        transitions:
+          assess:
+            target: adjudicating
+            actor: agent
+            inputSchema:
+              type: object
+              required: [cases]
+              properties:
+                cases:
+                  type: array
+                  items:
+                    type: object
+                    required: [use_case_id, supports]
+                    properties:
+                      use_case_id: { type: string }
+                      supports:    { type: boolean }
+                      evidence:    { type: string }
+                      rationale:   { type: string }
+            executor: { kind: noop }
+            output:
+              uc_cases: "$.arguments.cases"
+
+      # 2. Deterministic: scientific-process computes the verdict (pure fold). The model
+      #    cannot influence `adequate` except through the per-case supports it gave.
+      adjudicating:
+        transitions:
+          adjudicate:
+            target: done
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: science
+              tool: adjudicate
+              map:
+                cases: "$.context.uc_cases"
+            output:
+              adequate:          "$.output.adequate"
+              refuted_use_cases: "$.output.refuted"
+              report:            "$.output.report"
+      done: { terminal: true }

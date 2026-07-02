@@ -1,0 +1,93 @@
+# orchestrators/flow.audit-codebase.yaml
+#
+# Vet an EXISTING codebase: run the reusable quality gates over a repo and
+# accumulate a consolidated remediation report. Unlike the build flow's gates
+# (which hard-fail), an audit is ADVISORY — every gate advances and deposits its
+# findings into context; the terminal `done` state carries the full report
+# (stub hits + completeness findings + system FMECA risk table). Operators turn
+# the findings/todos into a fix backlog (e.g. via flow.bugfix-from-error-log or
+# flow.add-feature per item).
+#
+# Reuses Wave-1 gates verbatim — no new capabilities. Generic engine; declarative.
+
+workflows:
+  flow.audit-codebase:
+    description: |
+      Audit an existing repo with the SDLC quality gates (stub/dead-code scan,
+      completeness critic, system FMECA) and emit a consolidated remediation
+      report. Advisory, not a hard gate.
+    inputs:
+      repo_path: { type: string, required: true }
+      base_ref:  { type: string, default: main }
+    initialState: digesting
+    states:
+
+      # DETERMINISTIC repo digest first: gather bounded structural facts so the
+      # downstream FMECA-enumeration agent works from context (the in-process
+      # agent has no file tools). The digest rides in the FMECA subject below.
+      digesting:
+        transitions:
+          digest:
+            target: stub_scanning
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.repo
+              args: ["$.workflow.input.repo_path"]
+            output:
+              "$.context.repo_digest": "$.output.json"
+
+      # Deterministic stub / dead-code scan.
+      stub_scanning:
+        transitions:
+          stub_scan:
+            target: completeness_review
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.verify.stub-scan
+              use:
+                inputs:
+                  repo_path: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.stub_passed": passed
+                  "$.context.stub_hits":   hits
+
+      # Completeness critic: orphans / dead code / DRY / interface gaps.
+      completeness_review:
+        transitions:
+          completeness:
+            target: system_fmeca
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.review.completeness
+              use:
+                inputs:
+                  repo_path: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.completeness_verdict":  verdict
+                  "$.context.completeness_findings": findings
+
+      # System FMECA: failure-mode risk over the existing system.
+      system_fmeca:
+        transitions:
+          fmeca:
+            target: done
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.review.fmeca
+              use:
+                inputs:
+                  subject:      { repo_path: "$.workflow.input.repo_path", focus: "existing-codebase risk audit", digest: "$.context.repo_digest" }
+                  subject_kind: system
+                outputs:
+                  "$.context.fmeca_ready":        ready
+                  "$.context.fmeca_risk_ranking": risk_ranking
+                  "$.context.fmeca_report":       report
+
+      # Terminal: context holds the consolidated remediation report
+      # (stub_hits + completeness_findings + fmeca_report/risk_ranking).
+      done:
+        terminal: true

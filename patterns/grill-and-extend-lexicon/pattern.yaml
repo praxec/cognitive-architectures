@@ -1,0 +1,121 @@
+# Pattern: grill-and-extend-lexicon
+#
+# Socratic-questioning workflow that proposes a new lexicon term
+# (or refines an existing one), routes through human approval, and
+# commits the result to praxec's lexicon via gateway.lexicon.define.
+#
+# This is the EXTENSION half of the ubiquitous-language loop. The
+# reuse half is built into every workflow that uses gateway.lexicon.search
+# at planning time (see vet-plan workflow).
+#
+# Workflow contract:
+#   Input:  {seed_term: string, context?: object}
+#   Output: $.context.committed_term (when committed) OR rejection trail in audit
+#
+# Connections expected in scope:
+#   - praxec   (MCP — exposes the gateway.lexicon.* tools; same
+#                 child-process that's running this workflow, talking
+#                 to itself via the MCP surface)
+
+version: "1.0.0"
+
+workflows:
+  grill_and_extend_lexicon:
+    description: >
+      Socratic-questioning workflow that extends the ubiquitous-language
+      lexicon. A grill-agent asks clarifying questions; the human
+      operator approves or rejects the resulting term + definition;
+      the runtime commits via gateway.lexicon.define.
+    tags: [lexicon, grilling, ubiquitous-language, governance]
+    version: "2026-05-25"
+    initialState: grilling
+    # SPEC §29.3 (v0.4) — the grill-agent leverages the auto-injected
+    # ask_human transition to surface clarifying questions mid-grill.
+    enable_human_ask: true
+    human_ask_cap: 5    # grilling is question-heavy by design
+
+    inputSchema:
+      type: object
+      required: [seed_term]
+      properties:
+        seed_term:        { type: string, description: "the term being grilled" }
+        bounded_context:  { type: string, description: "DDD bounded context (optional)" }
+
+    blackboard:
+      seed_term:        { type: string }
+      term:             { type: string }
+      definition:       { type: string }
+      bounded_context:  { type: string }
+      refs:             { type: array  }
+      committed_term:   { type: string }
+
+    states:
+      grilling:
+        delegate: grill-agent
+        goal: >
+          Socratically question the human until a precise, unambiguous
+          definition of the term emerges. Use the auto-injected
+          ask_human transition for each round of questioning.
+        # State-local scratch space — cleared on exit. SPEC §27.
+        slots:
+          question_count: { type: integer, scope: state, default: 0 }
+        transitions:
+          term_proposed:
+            target: human_approval
+            actor: agent
+            inputSchema:
+              type: object
+              required: [term, definition]
+              properties:
+                term:             { type: string, minLength: 1 }
+                definition:       { type: string, minLength: 10 }
+                bounded_context:  { type: string }
+                refs:             { type: array, items: { type: string } }
+            executor: { kind: noop }
+            output:
+              term:             "$.arguments.term"
+              definition:       "$.arguments.definition"
+              bounded_context:  "$.arguments.bounded_context"
+              refs:             "$.arguments.refs"
+
+      human_approval:
+        goal: >
+          The operator reviews the proposed term + definition. Approve
+          to commit; reject to send back to grilling for refinement.
+        actor: human
+        transitions:
+          approve:
+            target: writing
+            actor: human
+            executor: { kind: noop }
+          reject:
+            target: grilling
+            actor: human
+            executor: { kind: noop }
+
+      writing:
+        goal: Commit the approved term to the lexicon via the MCP tool.
+        transitions:
+          commit:
+            target: done
+            actor: deterministic
+            # The actor on this transition is `deterministic` so the
+            # gateway treats this as the human's authorization
+            # propagating through. The lexicon.define handler still
+            # checks principal.is_human() via the calling context; an
+            # operator submitting `approve` above with the `human` role
+            # carries that role through this transition.
+            executor:
+              kind: mcp
+              connection: praxec
+              tool: gateway.lexicon.define
+              args:
+                term:            "$.context.term"
+                definition:      "$.context.definition"
+                bounded_context: "$.context.bounded_context"
+                refs:            "$.context.refs"
+            output:
+              committed_term: "$.output.term"
+
+      done:
+        terminal: true

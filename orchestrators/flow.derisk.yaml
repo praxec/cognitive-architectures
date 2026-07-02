@@ -1,0 +1,87 @@
+# orchestrators/flow.derisk.yaml
+#
+# Reusable DERISK sub-flow: turn a brief into a vetted design via
+# elicit → design → FMECA (prevent → detect → fail-fast). Now a real
+# nestable sub-flow (V11 relaxed) — callers invoke it via `kind: workflow`
+# and type its results from the top-level `outputs:` block below. flow.loom
+# uses it as its planning prefix; it can be reused to derisk any artifact
+# (a phase, a design, a workflow itself) by passing the right brief.
+#
+# Requires (cognitive/*): cap.plan.elicit-spec, cap.plan.technical-design,
+# cap.review.fmeca.
+
+workflows:
+  flow.derisk:
+    lifecycle: experimental
+    description: >
+      Reusable derisk sub-flow: brief → elicited spec → technical design →
+      FMECA. Returns the design + its readiness/risk ranking for the caller.
+    inputs:
+      brief: { type: string, required: true }
+    # Top-level outputs (flows have no `snippet:`) — these name the terminal
+    # context slots a `kind: workflow` parent reads via `use.outputs`.
+    outputs:
+      spec:         { type: object }
+      design:       { type: object }
+      design_ready: { type: boolean }
+      design_risk:  { type: array }
+    initialState: eliciting
+    states:
+
+      eliciting:
+        goal: Elicit a falsified spec from the brief.
+        transitions:
+          elicit:
+            target: designing
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.plan.elicit-spec
+              use:
+                inputs:
+                  brief: "$.workflow.input.brief"
+                outputs:
+                  "$.context.spec":       spec
+                  "$.context.spec_ready": ready
+
+      designing:
+        goal: Produce a technical design from the spec.
+        transitions:
+          design:
+            target: derisking
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.plan.technical-design
+              use:
+                inputs:
+                  spec: "$.context.spec"
+                outputs:
+                  "$.context.design": design
+
+      # DESIGN-QA: harden the design via the FMECA CONVERGENCE loop (FMECA →
+      # poka-yoke/TRIZ mitigation → re-FMECA until LOW; bounded; escalate-to-
+      # human). Nests the reusable flow.harden.fmeca-converge (V11 relaxed); the
+      # HARDENED design replaces $.context.design.
+      derisking:
+        goal: Harden the design until residual FMECA risk is Low (convergence loop).
+        transitions:
+          harden:
+            target: done
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.harden.fmeca-converge
+              use:
+                inputs:
+                  subject:         "$.context.design"
+                  subject_kind:    "design"
+                  matrix_strategy: "qualitative3x3"
+                  check_codebase:  true
+                outputs:
+                  "$.context.design":       artifact
+                  "$.context.design_ready": fmeca_ready
+                  "$.context.design_risk":  risk_ranking
+
+      done:
+        terminal: true

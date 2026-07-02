@@ -1,0 +1,42 @@
+# capabilities/cap.verify.spec-readiness.yaml
+#
+# The dogfood recursion, closed: gate planning on elicitation's DETERMINISTIC
+# readiness assessment instead of an agent's guidance-only "ready" flag (spec §6).
+# The caller drives the interview into elicitation (session.open + append
+# claims/evidence/remediations) during elicitation; this cap then asks the engine
+# whether the spec has survived falsification — coverage withstood, no high
+# contradiction, acceptance met. Deterministic verb `verify` → kind: mcp.
+
+workflows:
+  cap.verify.spec-readiness:
+    verb: verify
+    lifecycle: experimental
+    description: >
+      Gate on elicitation's computed readiness for a session: returns
+      ready (bool) + blockers + per-dimension standing. Replaces guidance-only
+      elicit readiness with a deterministic, independently-evaluated gate.
+    snippet:
+      inputs:
+        session_id: { type: string, required: true }
+      outputs:
+        ready:    { type: boolean }
+        blockers: { type: array }
+    initialState: ready
+    states:
+      ready:
+        goal: Ask elicitation whether the session's spec is plan-ready.
+        transitions:
+          assess:
+            target: done
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: elicitation
+              tool: readiness.assess
+              # McpExecutor resolves `map:` (NOT `arguments:`) against scopes.
+              map:
+                session_id: "$.workflow.input.session_id"
+            output:
+              ready:    "$.output.ready"
+              blockers: "$.output.blockers"
+      done: { terminal: true }

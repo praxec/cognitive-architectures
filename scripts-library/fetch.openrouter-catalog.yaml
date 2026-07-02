@@ -1,0 +1,49 @@
+# scripts-library/fetch.openrouter-catalog.yaml
+#
+# #20 OpenRouter SYNC (as a script, not a Rust CLI — the 3600-line gateway.rs
+# blocks the build-loop, and curl+jq is simpler). Fetches OpenRouter's live model
+# list and updates the model_catalog.json PRICES + context for models already in
+# the catalog, PRESERVING their capability scores / intelligence / reasoning_levels
+# (OpenRouter doesn't provide those). Keeps cost data current for observe + the
+# best-fit selection. Read-only on capability data; price-only update.
+# Input ($1 / CATALOG env): catalog path (default = the praxec data file).
+# Needs OPENROUTER_API_KEY in env. Emits {synced, updated, catalog} JSON.
+version: "1.0.0"
+scripts:
+  fetch.openrouter-catalog:
+    verb: fetch
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      CATALOG="${1:-${CATALOG:-model_catalog.json}}"
+      if [ -z "${OPENROUTER_API_KEY:-}" ]; then printf '{"error":"OPENROUTER_API_KEY not set"}\n'; exit 0; fi
+      if [ ! -f "$CATALOG" ]; then printf '{"error":"catalog not found: %s"}\n' "$CATALOG"; exit 0; fi
+      # Fetch to a TEMP FILE (the model list is huge — passing it as a jq
+      # --argjson CLI arg overflows ARG_MAX; --slurpfile reads from the file).
+      tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+      curl -s --max-time 30 https://openrouter.ai/api/v1/models \
+        -H "Authorization: Bearer $OPENROUTER_API_KEY" > "$tmp"
+      if ! jq -e '.data' "$tmp" >/dev/null 2>&1; then
+        printf '{"error":"openrouter fetch failed or no .data"}\n'; exit 0; fi
+      # Update prices/context for catalog models matched by id; preserve all else.
+      # Null pricing is guarded (// "0") so a model without prices never aborts.
+      merged="$(jq -n --slurpfile cat "$CATALOG" --slurpfile rem "$tmp" '
+        ($rem[0].data) as $r
+        | $cat[0] as $c
+        | ($c.models | map(
+            . as $m
+            | (($m.vendor | sub("^openrouter/";"")) + "/" + $m.model) as $id
+            | (first($r[] | select(.id == $id)) // null) as $hit
+            | if $hit == null then $m
+              else $m + {
+                input_usd_per_million:  ((($hit.pricing.prompt // "0")|tonumber)*1000000),
+                output_usd_per_million: ((($hit.pricing.completion // "0")|tonumber)*1000000),
+                context: ($hit.context_length // $m.context)
+              } end)) as $models
+        | $c + {models: $models, captured: (now|todate)}' 2>/dev/null)"
+      if [ -z "$merged" ]; then printf '{"error":"jq merge failed"}\n'; exit 0; fi
+      printf '%s\n' "$merged" > "$CATALOG"
+      n="$(printf '%s' "$merged" | jq '.models|length')"
+      printf '{"synced": true, "catalog": "%s", "models": %s}\n' "$CATALOG" "$n"

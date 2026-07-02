@@ -1,0 +1,115 @@
+# workflows/triage-router.yaml
+#
+# Severity classification + ownership routing. A triage agent (or human)
+# reads the incoming report, classifies severity and owner, and the
+# workflow routes to one of four terminal states per severity. Each
+# terminal records the routing decision in the audit log for later
+# review.
+#
+# Skills expected in scope:
+#   - triage.issue.routing
+#
+# Connections expected in scope:
+#   - github_mcp   (MCP — optional; creates the routed issue)
+
+version: "1.0.0"
+
+workflows:
+  triage_router:
+    description: >
+      Classify an incoming report by severity (S1–S4) and assign an owner.
+      Routes to a per-severity terminal state. The classification itself
+      is the artifact; the audit log preserves the decision.
+    tags: [triage, routing, governed]
+    version: "2026-05-25"
+    initialState: intake
+    # SPEC §29.3 (v0.4): triage agent can ask for clarification on
+    # ambiguous severity signals (e.g. distinguish S2 vs S3 when both
+    # could apply) before committing the classification.
+    enable_human_ask: true
+    human_ask_cap: 2
+    skills:
+      - triage.issue.routing
+    blackboard:
+      report:    { type: object }
+      severity:  { type: string }
+      owner:     { type: string }
+      reason:    { type: string }
+
+    inputSchema:
+      type: object
+      required: [report]
+      properties:
+        report:
+          type: object
+          required: [title, body]
+          properties:
+            title: { type: string }
+            body:  { type: string }
+            reporter: { type: string }
+
+    states:
+      intake:
+        goal: Receive the incoming report
+        transitions:
+          start_triage:
+            target: classifying
+            executor: { kind: noop }
+            output:
+              report: "$.workflow.input.report"
+
+      classifying:
+        delegate: planning-agent
+        goal: Classify severity and assign owner per the routing rubric
+        skills:
+          - triage.issue.routing
+        transitions:
+          submit_classification:
+            target: routing
+            inputSchema:
+              type: object
+              required: [severity, owner, reason]
+              properties:
+                severity: { type: string, enum: [S1, S2, S3, S4] }
+                owner:    { type: string }
+                reason:   { type: string }
+            guards:
+              - kind: guidance_acknowledged
+                subject: triage.issue.routing
+            executor: { kind: noop }
+            output:
+              severity: "$.arguments.severity"
+              owner:    "$.arguments.owner"
+              reason:   "$.arguments.reason"
+
+      routing:
+        goal: Route based on declared severity
+        # SPEC §6 (refreshed v0.4) — one transition with `branches:` is
+        # canonical for guard-based routing. Replaces 4 separate
+        # transitions (route_s1..route_s4) with one route transition
+        # that uses when:-branched targets. Fewer states / transitions,
+        # same audit detail (transition.branched event names the
+        # branch that fired).
+        transitions:
+          route:
+            target: routed_s4    # default — overridden by first matching branch
+            actor: deterministic
+            executor: { kind: noop }
+            branches:
+              - when: { kind: expr, expr: "$.context.severity == 'S1'" }
+                target: routed_s1
+              - when: { kind: expr, expr: "$.context.severity == 'S2'" }
+                target: routed_s2
+              - when: { kind: expr, expr: "$.context.severity == 'S3'" }
+                target: routed_s3
+              - when: { kind: expr, expr: "$.context.severity == 'S4'" }
+                target: routed_s4
+
+      routed_s1:
+        terminal: true
+      routed_s2:
+        terminal: true
+      routed_s3:
+        terminal: true
+      routed_s4:
+        terminal: true

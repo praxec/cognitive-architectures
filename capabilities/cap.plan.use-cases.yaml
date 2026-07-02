@@ -1,0 +1,54 @@
+# capabilities/cap.plan.use-cases.yaml
+#
+# Propose (or normalize) a use-case set for pressure-testing a design. The agent
+# leaf lives HERE (a capability), so the orchestrator that consumes it stays a
+# deterministic chain (SPEC §7.3: nested-workflow use:.outputs provision context
+# slots; agent outputs do not). Pairs with cap.review.use-case-falsification and
+# flow.pressure-test.use-cases.
+
+workflows:
+  cap.plan.use-cases:
+    verb: plan
+    lifecycle: experimental
+    description: >
+      Produce an adversarial use-case set to falsify a design's adequacy. If the
+      caller supplied seed use cases, carry them (optionally augmented); otherwise
+      propose a diverse set chosen to expose gaps. Emits a proposal object (for a
+      human gate) and a flat use_cases array (for the falsifier).
+    snippet:
+      inputs:
+        subject:        { type: object, required: true }
+        subject_kind:   { type: string, default: design }
+        seed_use_cases: { type: array,  default: [] }
+      outputs:
+        proposal:  { type: object }
+        use_cases: { type: array }
+    initialState: proposing
+    states:
+      proposing:
+        goal: >
+          Read $.workflow.input.subject (the design, kind
+          $.workflow.input.subject_kind) and $.workflow.input.seed_use_cases. If
+          seed_use_cases is non-empty, return exactly those as the use cases (you
+          MAY append up to 3 additional adversarial ones targeting the design's
+          weakest claims, clearly marked). If it is empty, PROPOSE 6-10 use cases
+          deliberately chosen to FALSIFY the design's adequacy: span its claimed
+          scope AND probe its stated non-goals, edge cases, and any
+          'open_risks'/weak spots. Each use case =
+          { id, title, scenario, why_adversarial }. Emit `proposal` =
+          { use_cases: [...], coverage_rationale } and `use_cases` = the same array.
+        transitions:
+          propose:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [proposal, use_cases]
+              properties:
+                proposal:  { type: object }
+                use_cases: { type: array }
+            executor: { kind: noop }
+            output:
+              proposal:  "$.arguments.proposal"
+              use_cases: "$.arguments.use_cases"
+      done: { terminal: true }

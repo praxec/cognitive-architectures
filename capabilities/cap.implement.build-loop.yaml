@@ -1,0 +1,587 @@
+# capabilities/cap.implement.build-loop.yaml
+#
+# STRUCTURAL TDD build loop (v2) — test-first red→green is ENGINE-OBSERVED, not
+# promised. The discipline is enforced by routing on a DETERMINISTIC verdict the
+# `verify.test.tdd-verdict` script computes (observation-only: code decides, the
+# flow only routes):
+#
+#   red_test  (agent writes ONLY the next failing test + minimal stubs) →
+#   red_measuring (verdict script, phase=red) →
+#   red_gate:  red_ok→green | not_atomic/no_compile/no_growth/tautology→red_test | exhausted→human
+#   green_code (agent writes MINIMUM impl) →
+#   green_measuring (verdict script, phase=green) →
+#   green_gate: green_ok→QA review | still_red/no_compile/tests_deleted/needs_cleanup/not_atomic→green_code | exhausted→human
+#   reviewing (DISTINCT QA reviewer) → review_gate → committing → committed →
+#     finish | iterate_next (→ red_test, bumps prev_test_count) | escalate
+#
+# Enforced, unfakeable: (1) a NEW test is observed COMPILING and FAILING before
+# any implementation (red_ok); (2) exactly ONE assertion macro per #[test]
+# (atomic_passed); (3) test count is monotonic (no_growth blocks red,
+# tests_deleted blocks green); (4) green = fmt+clippy+test all pass. A producer
+# can no longer write code-first, batch assertions, or delete tests to converge.
+
+workflows:
+  cap.implement.build-loop:
+    verb: implement
+    lifecycle: experimental
+    description: >
+      Structural test-first TDD loop: agent writes ONE failing atomic test (no
+      shell) → praxec computes a deterministic red/green verdict (cargo + a
+      one-assertion-per-test scan) → routes red→green→QA→commit. RED (compiles +
+      fails), atomic assertions, and monotonic test count are engine-enforced,
+      not instructed.
+    snippet:
+      inputs:
+        plan:      { type: object, required: true }
+        repo_path: { type: string, required: true }
+      outputs:
+        result:      { type: object }
+        tests_added: { type: integer }
+    initialState: red_test
+    # Seed every slot the first guard/{add}/script-arg reads.
+    initialContext:
+      build_iter:        0
+      build_cap:         12
+      # Committed test count from the last green slice; RED must grow beyond it.
+      prev_test_count:   0
+      test_count:        0
+      passed_count:      0
+      failed_count:      0
+      compiled:          false
+      atomic_passed:     false
+      atomic_violations: "[]"
+      verdict:           ""
+      coding_done:       false
+      files_written:     ""
+      test_files_written: ""
+      commit_message:    "praxec tdd-loop: verified slice"
+      build_summary:     ""
+      build_issues:      ""
+      affinity_override: ""
+      # QA gate: every green slice scored by a DISTINCT reviewer before commit.
+      review_iter:       0
+      qa_verdict:        ""
+      qa_findings:       ""
+      # QA escalation ladder (CONFIGURABLE): on a QA rejection, retry the SAME
+      # model `qa_same_model_retries` times with the findings injected, then climb
+      # the model tier; when the TOP rung is still rejected, hand to a human —
+      # never spin. The decision is computed by the deterministic
+      # `escalate.qa-ladder` script (observation-only: code decides, gate routes).
+      # Rungs are affinity/tier keys (models.yaml); each leads with a more capable
+      # model: coding(deepseek) → coding-standard(glm-5.2) → coding-frontier(sonnet).
+      qa_same_model_retries: 2
+      qa_model_ladder:   "coding,coding-standard,coding-frontier"
+      qa_tier_index:     0
+      qa_tier_attempt:   0
+      qa_next:           ""
+      # Per-task model tier + reasoning effort for the next green_code attempt —
+      # read by the engine's auto_affinity / auto_effort. Written by the ladder
+      # (and affinity_override also by the red/green verdict per build_iter).
+      effort_override:   ""
+      # L2 end-of-plan review verdict (whole-plan acceptance_criteria).
+      plan_qa_verdict:   ""
+      plan_qa_findings:  ""
+      # Deterministic completion: `inspect.plan-complete` sets plan_status; the
+      # agent's coding_done is now only ONE input to it (can't false-finish).
+      # slices_done counts committed slices; max_slices bounds the whole build
+      # (separate from build_cap, the per-slice retry bound).
+      plan_status:       ""
+      slices_done:       0
+      max_slices:        30
+
+    states:
+
+      # ── RED ── WRITE-ONLY: the next failing test + the MINIMAL signature stubs
+      # needed for it to COMPILE. No real logic — the verdict step proves it fails.
+      red_test:
+        goal: >
+          RED step. Write or update EXACTLY ONE test for the next behavior in
+          `plan`, with ONE atomic declarative behavioral assertion (Arrange-Act-
+          Assert; a single assert_*! / assert_eq! / assert_matches!). Write ONLY
+          the minimal type signatures / stubs needed for the test to COMPILE
+          (e.g. a fn returning `unimplemented!()`), NOT the behavior — the next
+          step verifies the test compiles and FAILS. Do not touch unrelated code.
+          If $.context.atomic_violations is non-empty, your last test had ≠1
+          assertion — split it into one-assertion-per-test. If
+          $.context.build_issues is present with compiled=false, fix ONLY the
+          compile errors so the test builds and goes red. Report
+          `test_files_written` (space-separated repo-relative paths), `done=true`
+          ONLY when every plan behavior now has a test, and a one-line
+          `commit_message` for THIS slice.
+        skills: [implement.tdd.discipline]
+        transitions:
+          write_test:
+            target: red_measuring
+            actor: agent
+            inputSchema:
+              type: object
+              required: [done]
+              properties:
+                done:               { type: boolean }
+                test_files_written: { type: string }
+                commit_message:     { type: string }
+            executor: { kind: noop }
+            output:
+              coding_done:        "$.arguments.done"
+              test_files_written: "$.arguments.test_files_written"
+              commit_message:     "$.arguments.commit_message"
+
+      # Deterministic verdict, phase=red. Increments the loop counter.
+      red_measuring:
+        transitions:
+          measure:
+            target: red_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.test.tdd-verdict
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.workflow.input.repo_path"
+                - "red"
+                - "$.context.prev_test_count"
+                - "$.context.build_iter"
+                - "$.context.build_cap"
+                - "$.workflow.input.cargo_scope"
+                - "$.context.test_files_written"
+            output:
+              verdict:           "$.output.json.verdict"
+              compiled:          "$.output.json.compiled"
+              passed_count:      "$.output.json.passed_count"
+              failed_count:      "$.output.json.failed_count"
+              test_count:        "$.output.json.test_count"
+              atomic_passed:     "$.output.json.atomic_passed"
+              atomic_violations: "$.output.json.atomic_violations"
+              build_issues:      "$.output.json.issues"
+              build_summary:     "$.output.json.summary"
+              affinity_override: "$.output.json.affinity_override"
+              build_iter:        { add: ["$.context.build_iter", 1] }
+
+      # Route on the single verdict token (mutually exclusive + exhaustive over
+      # the red-phase verdict set).
+      red_gate:
+        transitions:
+          to_green:
+            target: green_code
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'red_ok'" } ]
+          fix_not_atomic:
+            target: red_test
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'not_atomic'" } ]
+          fix_compile:
+            target: red_test
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'no_compile'" } ]
+          add_test:
+            target: red_test
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'no_growth'" } ]
+          fix_tautology:
+            target: red_test
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'tautology'" } ]
+          escalate_red:
+            target: needs_human
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'exhausted'" } ]
+          # Default (V23) — an out-of-domain/null verdict (e.g. the verdict script
+          # failed to emit) routes to a human instead of dead-stalling the chain.
+          unexpected_verdict:
+            target: needs_human
+            actor: deterministic
+
+      # ── GREEN ── Write the MINIMUM code to make the failing test pass.
+      green_code:
+        goal: >
+          GREEN step. Write the MINIMUM implementation that makes the failing
+          test pass — replace the stubs with real behavior, laser-focused on the
+          one assertion; do NOT add untested behavior or speculative code. The
+          next step runs fmt + clippy + the full test suite. If
+          $.context.build_issues is present, the last verdict was
+          `$.context.verdict` — fix EVERY listed issue (errors, warnings, failed
+          tests, fmt/clippy) in one pass. If $.context.qa_findings is present, a
+          DISTINCT QA reviewer REJECTED this slice — you MUST address EVERY point
+          in qa_findings this pass (a more capable model may now be assigned);
+          never resubmit the slice unchanged. Report `files_written` — a single
+          space-separated string of ALL repo-relative paths for this slice (the
+          test file(s) from the RED step AND the implementation files), so the
+          verified slice is committed to exactly those files. When you complete a
+          behavior, REMOVE its stub/unfinished-work markers (TODO/FIXME/
+          `todo!()`/`unimplemented!()`/SCAFFOLD/"not yet implemented") — the
+          deterministic completion check treats any remaining marker as an
+          unbuilt deliverable.
+        skills: [implement.tdd.discipline]
+        transitions:
+          write_code:
+            target: formatting
+            actor: agent
+            inputSchema:
+              type: object
+              required: [done]
+              properties:
+                done:          { type: boolean }
+                result:        { type: object }
+                tests_added:   { type: integer }
+                files_written: { type: string }
+            executor: { kind: noop }
+            output:
+              coding_done:   "$.arguments.done"
+              result:        "$.arguments.result"
+              tests_added:   "$.arguments.tests_added"
+              files_written: "$.arguments.files_written"
+
+      # Language-agnostic mechanical cleanup BEFORE measuring: detect the repo's
+      # language(s) and auto-run each canonical formatter (write mode). Removes
+      # the pointless fmt-only `needs_cleanup` loop — the agent never hand-formats,
+      # and the green gate's fmt --check can then only fail on something real.
+      # Multi-language repos format every detected language. Clippy/lint stays the
+      # agent's job (not mechanical).
+      formatting:
+        transitions:
+          clean:
+            target: green_measuring
+            actor: deterministic
+            executor:
+              kind: script
+              subject: format.cleanup
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.workflow.input.repo_path"
+            output:
+              cleanup_summary: "$.output.json.summary"
+
+      # Deterministic verdict, phase=green (adds fmt+clippy to the bar).
+      green_measuring:
+        transitions:
+          measure:
+            target: green_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.test.tdd-verdict
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.workflow.input.repo_path"
+                - "green"
+                - "$.context.prev_test_count"
+                - "$.context.build_iter"
+                - "$.context.build_cap"
+                - "$.workflow.input.cargo_scope"
+                - "$.context.files_written"
+            output:
+              verdict:           "$.output.json.verdict"
+              compiled:          "$.output.json.compiled"
+              passed_count:      "$.output.json.passed_count"
+              failed_count:      "$.output.json.failed_count"
+              test_count:        "$.output.json.test_count"
+              atomic_passed:     "$.output.json.atomic_passed"
+              atomic_violations: "$.output.json.atomic_violations"
+              build_issues:      "$.output.json.issues"
+              build_summary:     "$.output.json.summary"
+              affinity_override: "$.output.json.affinity_override"
+              build_iter:        { add: ["$.context.build_iter", 1] }
+
+      green_gate:
+        transitions:
+          to_review:
+            target: reviewing
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'green_ok'" } ]
+          fix_still_red:
+            target: green_code
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'still_red'" } ]
+          fix_compile_green:
+            target: green_code
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'no_compile'" } ]
+          restore_tests:
+            target: green_code
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'tests_deleted'" } ]
+          cleanup:
+            target: green_code
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'needs_cleanup'" } ]
+          fix_not_atomic_green:
+            target: green_code
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'not_atomic'" } ]
+          escalate_green:
+            target: needs_human
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.verdict == 'exhausted'" } ]
+          # Default (V23) — an out-of-domain/null verdict routes to a human
+          # instead of dead-stalling the chain.
+          unexpected_verdict:
+            target: needs_human
+            actor: deterministic
+
+      # ── QA REVIEW ── DISTINCT reviewer (producer != evaluator), senior tier.
+      reviewing:
+        affinity: review
+        goal: >
+          You are a DISTINCT QA reviewer (NOT the author) of THIS green slice —
+          ONE incremental behavior, not the whole plan. Read ONLY the changed
+          files ($.context.files_written, $.context.test_files_written) and judge
+          the slice ON ITS OWN: does the implementation correctly satisfy the
+          behavior its new test asserts; is that single assertion a genuine pin
+          (not a tautology); are there regressions in adjacent code; is it
+          idiomatic and minimal? Do NOT judge whole-plan completeness here —
+          OTHER plan deliverables being unimplemented or still stubbed (functions
+          returning empty / `unimplemented!()` / `todo!()`) is EXPECTED mid-build
+          and is NOT grounds for rejection; whole-plan acceptance_criteria are
+          checked at the end (the plan-level review), not per slice. Emit
+          qa_verdict="approved" if THIS slice is correct with no regressions;
+          otherwise "rejected" with specific qa_findings scoped to THIS slice.
+        transitions:
+          review:
+            target: review_gate
+            actor: agent
+            inputSchema:
+              type: object
+              required: [qa_verdict]
+              properties:
+                qa_verdict:  { type: string, enum: [approved, rejected] }
+                qa_findings: { type: string }
+                qa_score:    { type: integer }
+            executor: { kind: noop }
+            output:
+              qa_verdict:  "$.arguments.qa_verdict"
+              qa_findings: "$.arguments.qa_findings"
+              qa_score:    "$.arguments.qa_score"
+              review_iter: { add: ["$.context.review_iter", 1] }
+
+      review_gate:
+        transitions:
+          qa_pass:
+            target: staging
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.qa_verdict == 'approved'" } ]
+          # Rejected → compute the escalation decision deterministically (retry
+          # same model with findings → climb the tier → human), then route on it.
+          qa_reject:
+            target: qa_escalating
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.qa_verdict == 'rejected'" } ]
+          # Default (V23) — a qa_verdict outside {approved,rejected} routes to a
+          # human instead of dead-stalling.
+          unexpected_qa_verdict:
+            target: needs_human
+            actor: deterministic
+
+      # Deterministic QA escalation ladder. CODE decides the next attempt's model
+      # + reasoning effort and whether to bail to a human (ladder exhausted); the
+      # gate only routes. Findings are fed forward via $.context (engine injects
+      # context into the next green_code prompt). This is the circuit breaker that
+      # stopped the old non-converging green↔review spin.
+      qa_escalating:
+        transitions:
+          escalate:
+            target: qa_route
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.qa-ladder
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.context.qa_tier_index"
+                - "$.context.qa_tier_attempt"
+                - "$.context.qa_same_model_retries"
+                - "$.context.qa_model_ladder"
+            output:
+              qa_next:           "$.output.json.qa_next"
+              affinity_override: "$.output.json.affinity_override"
+              effort_override:   "$.output.json.effort_override"
+              qa_tier_index:     "$.output.json.qa_tier_index"
+              qa_tier_attempt:   "$.output.json.qa_tier_attempt"
+              qa_escalation:     "$.output.json.summary"
+
+      qa_route:
+        transitions:
+          continue:
+            target: green_code
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.qa_next == 'green'" } ]
+          to_human:
+            target: needs_human
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.qa_next == 'human'" } ]
+          # Default (V23) — an out-of-domain qa_next routes to a human instead of
+          # dead-stalling.
+          unexpected_qa_next:
+            target: needs_human
+            actor: deterministic
+
+      # DETERMINISTIC staging: compute the slice's changed files from git (tracked
+      # mods + untracked non-ignored; gitignored target/ excluded) and OVERRIDE
+      # files_written. The commit no longer depends on the agent reporting
+      # files_written (which was optional → sometimes null → commit no-op).
+      staging:
+        transitions:
+          stage:
+            target: committing
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.changed-files
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.workflow.input.repo_path"
+            output:
+              files_written: "$.output.json.files"
+
+      # COMMIT the verified slice (best-effort, never blocks) AND advance the
+      # committed test-count baseline so the NEXT red step must grow beyond it.
+      committing:
+        transitions:
+          commit:
+            target: checking_complete
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.commit-slice
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.context.commit_message"
+                - "$.context.files_written"
+                - "cognitive/cap.implement.build-loop"
+            output:
+              last_commit:     "$.output.json"
+              prev_test_count: "$.context.test_count"
+              # Count the committed slice; reset the PER-SLICE retry budget so the
+              # next slice's `exhausted` bound is per-slice, not cumulative.
+              slices_done:     { add: ["$.context.slices_done", 1] }
+              build_iter:        0
+              # Reset per-slice QA state so the NEXT slice starts at the base tier
+              # with no stale findings/overrides.
+              review_iter:       0
+              qa_verdict:        ""
+              qa_findings:       ""
+              qa_tier_index:     0
+              qa_tier_attempt:   0
+              qa_next:           ""
+              affinity_override: ""
+              effort_override:   ""
+
+      # DETERMINISTIC completion check (observation-only): "all tests pass" is
+      # necessary but NOT sufficient — `inspect.plan-complete` requires green AND
+      # no unfinished-work markers remain AND the agent asserts done, so the agent
+      # can no longer false-finish a stubbed plan (the observed premature-done bug).
+      checking_complete:
+        transitions:
+          check:
+            target: committed
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.plan-complete
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.workflow.input.repo_path"
+                - "$.context.compiled"
+                - "$.context.failed_count"
+                - "$.context.coding_done"
+                - "$.context.test_count"
+                - "$.workflow.input.min_tests"
+            output:
+              plan_status:        "$.output.json.plan_status"
+              completion_summary: "$.output.json.summary"
+
+      # Route on the DETERMINISTIC plan_status (code decides), not the agent's
+      # self-reported coding_done. complete → L2 end-of-plan review; incomplete →
+      # build the next deliverable (bounded by a total slice budget, not the
+      # per-slice retry counter, so a real multi-deliverable build can run).
+      committed:
+        transitions:
+          finish:
+            target: plan_reviewing
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.plan_status == 'complete'" } ]
+          iterate_next:
+            target: red_test
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.plan_status == 'incomplete'" }
+              - { kind: expr, expr: "$.context.slices_done < $.context.max_slices" }
+          escalate_incomplete:
+            target: needs_human
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.plan_status == 'incomplete'" }
+              - { kind: expr, expr: "$.context.slices_done >= $.context.max_slices" }
+          # Default (V23) — an out-of-domain plan_status routes to a human instead
+          # of dead-stalling on recovery links.
+          unexpected_status:
+            target: needs_human
+            actor: deterministic
+
+      # ── L2: END-OF-PLAN QA ── every planned behavior now has a committed green
+      # slice. A DISTINCT reviewer judges the WHOLE implementation against the
+      # plan's acceptance_criteria (the end-to-end integration story). This is
+      # where whole-plan criteria live — NOT in the per-slice L0 review. (L3, the
+      # code-on-disk gap audit → remediation plan, is a future phase; for now an
+      # unmet criterion parks at a human.)
+      plan_reviewing:
+        affinity: review
+        goal: >
+          You are a DISTINCT end-of-plan QA reviewer (NOT the author). Every
+          planned behavior now has a committed, green slice. Review the FULL
+          implementation against the plan's acceptance_criteria
+          ($.workflow.input.plan.acceptance_criteria): does the whole module
+          satisfy them end-to-end (e.g. the worked example loads + contracts +
+          produces findings; NO function an acceptance criterion requires is
+          still a stub; the public API is coherent; no regressions)? Emit
+          plan_qa_verdict="approved" ONLY if EVERY acceptance criterion is met;
+          otherwise "rejected" with plan_qa_findings listing the specific gaps
+          (unmet criteria, remaining stubs) — these become the to-do list for the
+          remediation pass.
+        transitions:
+          plan_review:
+            target: plan_review_gate
+            actor: agent
+            inputSchema:
+              type: object
+              required: [plan_qa_verdict]
+              properties:
+                plan_qa_verdict:  { type: string, enum: [approved, rejected] }
+                plan_qa_findings: { type: string }
+            executor: { kind: noop }
+            output:
+              plan_qa_verdict:  "$.arguments.plan_qa_verdict"
+              plan_qa_findings: "$.arguments.plan_qa_findings"
+
+      plan_review_gate:
+        transitions:
+          plan_pass:
+            target: done
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.plan_qa_verdict == 'approved'" } ]
+          plan_gaps:
+            target: needs_human
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.plan_qa_verdict == 'rejected'" } ]
+          # Default (V23) — an out-of-domain plan_qa_verdict routes to a human.
+          unexpected_plan_verdict:
+            target: needs_human
+            actor: deterministic
+
+      # Bounded → human scope review (no silent spin, no silent stop).
+      needs_human:
+        transitions:
+          review_scope:
+            target: done
+            actor: human
+            inputSchema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string }
+                result:   { type: object }
+            executor: { kind: noop }
+            output:
+              result: "$.arguments.result"
+
+      done:
+        terminal: true

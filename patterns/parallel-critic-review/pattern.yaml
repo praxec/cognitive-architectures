@@ -1,0 +1,97 @@
+# Pattern: parallel-critic-review
+#
+# Fan out N critics (security/performance/style/correctness) against
+# a single artifact (diff / plan / spec); aggregate verdicts via the
+# parallel executor's aggregator pattern.
+#
+# Each critic is a separate sub-workflow (kind: workflow branch) so
+# its execution is isolated and audited per-aspect. The aggregator
+# synthesizes per-critic verdicts into a single approved/rejected
+# rollup.
+
+version: "1.0.0"
+
+workflows:
+  parallel_critic_review:
+    description: >
+      Run N adversarial critics in parallel; aggregate to a single
+      verdict. Each critic gets its own sub-workflow audit trail
+      linked to the parent transition's correlation_id.
+    tags: [review, parallel, critic, aggregator]
+    version: "2026-05-25"
+    initialState: fanning_out
+    enable_human_ask: true
+    human_ask_cap: 2
+
+    inputSchema:
+      type: object
+      required: [artifact, aspects]
+      properties:
+        artifact:
+          type: object
+          description: "the thing being reviewed (diff, plan, spec, etc.)"
+        aspects:
+          type: array
+          items: { type: string }
+          minItems: 1
+          description: "named critic aspects, e.g. [security, performance, style, correctness]"
+
+    blackboard:
+      artifact:        { type: object }
+      aspects:         { type: array }
+      branch_results:  { type: array }
+      verdicts:        { type: array }   # per-aspect verdicts (strings)
+      verdict:         { type: string }  # overall rollup: succeeded | failed | threshold_not_met
+
+    states:
+      fanning_out:
+        goal: Fan out one critic-aspect sub-workflow per aspect; aggregate.
+        transitions:
+          run:
+            target: routing
+            actor: deterministic
+            executor:
+              kind: parallel
+              branches:
+                for_each: "$.workflow.input.aspects"
+                # SPEC §24.2 — pre-fan-out filter; skip empty aspect names.
+                where:    "$.value != ''"
+                do:
+                  kind: workflow
+                  definitionId: critique_aspect    # operator supplies this sub-workflow
+                  input:
+                    aspect:        "$.branch.value"
+                    artifact:      "$.workflow.input.artifact"
+                    branch_index:  "$.branch.index"
+              # Aggregator pattern (SPEC §24.2): use an expression to
+              # compute the rollup. Operators wanting more sophisticated
+              # synthesis (weighted-vote, LLM rollup) swap kind:expression
+              # for kind:script or kind:mcp.
+              join:
+                aggregator:
+                  kind: expression
+                  expr: "$.failed_count == 0"
+              max_concurrency: 4
+              on_branch_failure: continue   # collect all critic verdicts even if one fails
+              total_timeout_ms: 600000      # 10 minutes total wall-clock
+            output:
+              branch_results: "$.output.branches"
+              # [*] projects per-branch output.verdict into a parallel array
+              verdicts: "$.output.branches[*].output.verdict"
+              verdict:  "$.output.summary.verdict"
+
+      routing:
+        goal: Route to approved / rejected based on aggregated verdict.
+        transitions:
+          decide:
+            target: rejected    # default
+            actor: deterministic
+            executor: { kind: noop }
+            branches:
+              - when: { kind: expr, expr: "$.context.verdict == 'succeeded'" }
+                target: approved
+              - when: { kind: expr, expr: "$.context.verdict == 'failed'" }
+                target: rejected
+
+      approved: { terminal: true }
+      rejected: { terminal: true }

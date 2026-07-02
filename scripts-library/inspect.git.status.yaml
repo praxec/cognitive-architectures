@@ -1,0 +1,31 @@
+# scripts-library/git.status.yaml
+#
+# Read-only repo state for "ability to manage": current branch, porcelain
+# working-tree status, and ahead/behind vs upstream. Emits structured JSON so a
+# workflow (or the controlling LLM) can see exactly what's uncommitted before/
+# after a commit-slice. Exit 0 always.
+# Inputs (env): WORKDIR — optional repo dir.
+version: "1.0.0"
+scripts:
+  inspect.git.status:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      [ -n "${WORKDIR:-}" ] && cd "$WORKDIR" 2>/dev/null
+      if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        printf '{"error":"not a git work tree"}\n'; exit 0; fi
+      branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+      head="$(git rev-parse --short HEAD 2>/dev/null)"
+      # porcelain lines (XY path) → JSON array of {code, path}
+      changes="$(git status --porcelain 2>/dev/null | jq -Rn '[inputs | {code: .[0:2], path: .[3:]}]' 2>/dev/null || printf '[]')"
+      dirty="$(git status --porcelain 2>/dev/null | grep -qc . && echo true || echo false)"
+      # ahead/behind vs upstream (if set)
+      ab="$(git rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null || echo '')"
+      behind="$(printf '%s' "$ab" | awk '{print $1+0}')"; ahead="$(printf '%s' "$ab" | awk '{print $2+0}')"
+      jq -n --arg branch "$branch" --arg head "$head" --argjson changes "$changes" \
+            --argjson dirty "${dirty:-false}" --argjson ahead "${ahead:-0}" --argjson behind "${behind:-0}" \
+        '{branch:$branch, head:$head, dirty:$dirty, ahead:$ahead, behind:$behind, changes:$changes}' \
+        2>/dev/null || printf '{"branch":"%s","head":"%s","error":"jq failed"}\n' "$branch" "$head"

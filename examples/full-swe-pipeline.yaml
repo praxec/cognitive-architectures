@@ -1,0 +1,37 @@
+# examples/full-swe-pipeline.yaml
+#
+# End-to-end SWE-agent pipeline. Pulls in:
+#   - the six-state swe_agent workflow
+#   - all five MCP/CLI connections referenced by that workflow
+#   - the five skill fragments referenced by that workflow
+#
+# Start with:
+#   praxec serve --config examples/full-swe-pipeline.yaml
+#
+# All three external tools (codebase_graph, verifier_harness,
+# constrained_edit) must be reachable at the addresses declared in
+# the connections/*.yaml files. See those files for adapt-to-your-
+# stack guidance.
+
+version: "1.0.0"
+
+include:
+  # Workflow
+  - ../workflows/swe-agent.yaml
+  # Connections referenced by the workflow's executors
+  - ../connections/codebase-graph.yaml
+  - ../connections/verifier-harness.yaml
+  - ../connections/constrained-edit.yaml
+  - ../connections/structureos.yaml
+  - ../connections/github-mcp.yaml
+  # Script subjects invoked by the workflow's script executors
+  - ../scripts-library/verify.workspace.green.yaml
+  # Skills referenced by workflow + state scopes
+  - ../skills/plan.specify.change-request.yaml
+  - ../skills/diagnose.codebase.search.yaml
+  - ../skills/implement.edit.constrained.yaml
+  - ../skills/review.code.adversarial.yaml
+  - ../skills/review.code.final-approval.yaml
+
+audit:
+  sink: stdout

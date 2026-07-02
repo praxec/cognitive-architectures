@@ -1,0 +1,49 @@
+version: "1.0.0"
+scripts:
+  inspect.crate.source:
+    verb: inspect
+    lifecycle: stable
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Resolve a Rust crate to a local source directory via opensrc.
+      # The typical "let me read this dep's source" gesture — used by
+      # workflows that need to confirm an upstream API shape, check a
+      # contribution doc, or quote a comment by line. Read-only.
+      #
+      # Crate name comes from $1 or $CRATE. opensrc fetches on first
+      # use, then returns the cached path instantly on subsequent runs.
+      # Requires opensrc on PATH (see install.opensrc).
+      #
+      # Emits {crate, path, version, subject} JSON on stdout; the
+      # directory listing goes to stderr for human inspection.
+      set -euo pipefail
+
+      crate="${1:-${CRATE:-}}"
+      if [ -z "$crate" ]; then
+        echo "Usage: pass the crate name as the first arg or via \$CRATE" >&2
+        exit 1
+      fi
+
+      if ! command -v opensrc >/dev/null 2>&1; then
+        echo "opensrc not found on PATH — run install.opensrc first" >&2
+        exit 1
+      fi
+
+      path="$(opensrc path "crates:$crate")"
+      if [ -z "$path" ] || [ ! -d "$path" ]; then
+        echo "opensrc returned an empty or invalid path for crates:$crate" >&2
+        exit 1
+      fi
+
+      # Best-effort version read from the crate's Cargo.toml. Falls back
+      # to "unknown" so the JSON envelope is always well-formed.
+      version="unknown"
+      if [ -f "$path/Cargo.toml" ]; then
+        version="$(awk -F\" '/^version[[:space:]]*=/ { print $2; exit }' "$path/Cargo.toml" 2>/dev/null || echo unknown)"
+      fi
+
+      echo "crate $crate → $path (v$version)" >&2
+      ls -1 "$path" >&2 || true
+
+      echo "{\"crate\": \"$crate\", \"path\": \"$path\", \"version\": \"$version\", \"subject\": \"$PRAXEC_SCRIPT_SUBJECT\"}"

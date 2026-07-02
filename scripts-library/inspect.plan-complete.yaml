@@ -1,0 +1,64 @@
+version: "1.0.0"
+scripts:
+  inspect.plan-complete:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    # DETERMINISTIC plan-completion check. "All tests pass" is necessary but NOT
+    # sufficient. Completion = green (compiles + tests pass) AND no unfinished-work
+    # markers in NON-test source AND the agent asserts done AND test_count meets a
+    # deliverable-coverage floor (>= min_tests). The coverage floor catches premature
+    # "done" independent of stub wording (the SCAFFOLD-not-TODO gap); the marker scan
+    # (incl. SCAFFOLD / not-yet-implemented) is defense-in-depth. Code decides; the
+    # cap routes (observation-only). Body = unit-tested plan-complete.sh (6/6 green).
+    body: |
+      #!/usr/bin/env bash
+      # Args: $1 REPO $2 compiled $3 failed_count $4 coding_done $5 test_count $6 min_tests
+      # Emits: { plan_status, green, stub_clean, agent_done, coverage_ok, stub_count, test_count, min_tests, summary }
+      REPO="${1:-${REPO_PATH:-.}}"
+      compiled="${2:-${COMPILED:-false}}"
+      failed="${3:-${FAILED_COUNT:-0}}"
+      coding_done="${4:-${CODING_DONE:-false}}"
+      test_count="${5:-${TEST_COUNT:-0}}"
+      min_tests="${6:-${MIN_TESTS:-0}}"
+
+      PATTERN='todo!\(|unimplemented!\(|TODO|FIXME|SCAFFOLD|not yet implemented'
+      # Scan CODE only — markdown/docs (ADRs, READMEs, design notes) legitimately
+      # mention TODO/SCAFFOLD and must NOT count as unbuilt deliverables.
+      if command -v rg >/dev/null 2>&1; then
+        stub_count="$(rg --no-heading --line-number \
+            --glob '!target/**' --glob '!**/tests/**' --glob '!**/*_test.*' \
+            --glob '!node_modules/**' --glob '!vendor/**' \
+            --glob '!**/*.md' --glob '!**/*.txt' --glob '!**/adr/**' --glob '!**/docs/**' \
+            -e "$PATTERN" "$REPO" 2>/dev/null | grep -c '' || true)"
+      else
+        stub_count="$(grep -rEn \
+            --exclude-dir=target --exclude-dir=tests --exclude-dir=node_modules --exclude-dir=vendor \
+            --exclude-dir=adr --exclude-dir=docs \
+            --exclude='*_test.*' --exclude='*.md' --exclude='*.txt' \
+            -e "$PATTERN" "$REPO" 2>/dev/null | grep -c '' || true)"
+      fi
+      [ -z "$stub_count" ] && stub_count=0
+      int(){ case "$1" in ''|*[!0-9-]*) echo 0 ;; *) echo "$1" ;; esac; }
+      test_count="$(int "$test_count")"; min_tests="$(int "$min_tests")"
+
+      stub_clean=false; [ "$stub_count" -eq 0 ] && stub_clean=true
+      green=false;      { [ "$compiled" = "true" ] && [ "$failed" = "0" ]; } && green=true
+      agent_done=false; [ "$coding_done" = "true" ] && agent_done=true
+      coverage_ok=false; { [ "$min_tests" -le 0 ] || [ "$test_count" -ge "$min_tests" ]; } && coverage_ok=true
+
+      if [ "$green" = true ] && [ "$stub_clean" = true ] && [ "$agent_done" = true ] && [ "$coverage_ok" = true ]; then
+        status="complete"; summary="plan complete: green + no unfinished-work markers + agent done + coverage ($test_count/$min_tests tests)."
+      else
+        status="incomplete"; reasons=""
+        [ "$green" != true ]       && reasons="${reasons}not-green "
+        [ "$stub_clean" != true ]  && reasons="${reasons}${stub_count}-stub-marker(s) "
+        [ "$agent_done" != true ]  && reasons="${reasons}agent-not-done "
+        [ "$coverage_ok" != true ] && reasons="${reasons}coverage ${test_count}/${min_tests} "
+        summary="plan incomplete: ${reasons}- keep building."
+      fi
+
+      jq -n --arg s "$status" --argjson green "$green" --argjson clean "$stub_clean" \
+            --argjson done "$agent_done" --argjson cov "$coverage_ok" --argjson n "$stub_count" \
+            --argjson tc "$test_count" --argjson mt "$min_tests" --arg sum "$summary" \
+        '{plan_status:$s, green:$green, stub_clean:$clean, agent_done:$done, coverage_ok:$cov, stub_count:$n, test_count:$tc, min_tests:$mt, summary:$sum}'

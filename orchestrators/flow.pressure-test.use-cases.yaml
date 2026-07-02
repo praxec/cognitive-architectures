@@ -1,0 +1,266 @@
+# orchestrators/flow.pressure-test.use-cases.yaml
+#
+# Pressure-test a DESIGN by trying to PROVE IT INADEQUATE against use cases
+# (Popperian falsification; adequacy is only ever inductively SUPPORTED, never
+# proven). Use cases come from the caller OR are proposed by the LLM and then
+# APPROVED before any are used. Adjudication is deterministic: scientific-process
+# computes the standing; a single refuting observation = a real gap.
+#
+# Loop: propose -> approve -> falsify (scientific-process) -> verdict gate.
+#   adequate              -> survived (inductive support; success)
+#   inadequate, budget    -> bump round -> remediate (poka-yoke + TRIZ) -> re-falsify
+#   inadequate, exhausted -> escalate (human accept/stop, or terminal needs_review)
+#
+# Robustness (V2, after the first runs exposed three bugs):
+#   1. The round counter is incremented in a DEDICATED noop-executor state
+#      (`bumping`), because an `output:` mutation on a bare guard/routing
+#      transition (no executor) is NOT applied — so incrementing on the
+#      verdict_gate transition silently left round=0 and looped unbounded.
+#   2. `adequate` is seeded in initialContext so the outcome check never errors
+#      with GUARD_UNSET_SLOT before the first falsification.
+#   3. `auto_approve` bypasses BOTH human gates (approval + escalation). In a
+#      headless/chat context the human gate posts to an invisible approvals
+#      queue; with auto_approve the operator pre-approves out-of-band and the
+#      run never strands. Default false preserves the HITL gate for TUI operators.
+#
+# Requires (cognitive/*): cap.plan.use-cases, cap.review.use-case-falsification,
+# cap.gate.human-signoff, cap.refactor.mitigate-risks. Requires the `science`
+# connection in the gateway config.
+
+workflows:
+  flow.pressure-test.use-cases:
+    lifecycle: experimental
+    description: >
+      Prove a design inadequate (or fail to) by falsifying its adequacy against a
+      set of use cases, via scientific-process. Loops propose -> approve -> falsify ->
+      remediate until the design survives the set, the round budget is hit, or a
+      human stops it. Returns the (possibly hardened) design + the falsification
+      report.
+    inputs:
+      subject:      { type: object,  required: true }
+      subject_kind: { type: string,  default: design }
+      use_cases:    { type: array,   default: [] }
+      max_rounds:   { type: integer, default: 2 }
+      auto_approve: { type: boolean, default: false }
+    outputs:
+      artifact:          { type: object }
+      adequate:          { type: boolean }
+      refuted_use_cases: { type: array }
+      report:            { type: object }
+    initialContext:
+      round: 0
+      adequate: false
+    outcomes:
+      - id: survived_falsification
+        statement: No approved use case refuted the design's adequacy (inductive support).
+        check: "$.context.adequate == true"
+    initialState: seeding
+    states:
+
+      # Seed working slots from inputs (artifact is mutated in place by
+      # remediation, so it must be a context slot; auto_approve/max_rounds are
+      # read by guards, which need a context writer, not just an input).
+      seeding:
+        goal: Seed the working artifact + parameters from inputs.
+        transitions:
+          seed:
+            target: proposing
+            actor: deterministic
+            executor: { kind: noop }
+            output:
+              artifact:     "$.workflow.input.subject"
+              subject_kind: "$.workflow.input.subject_kind"
+              max_rounds:   "$.workflow.input.max_rounds"
+              auto_approve: "$.workflow.input.auto_approve"
+
+      # PROPOSE — deterministic call into cap.plan.use-cases (agent leaf lives in
+      # the capability, keeping this orchestrator a deterministic chain).
+      proposing:
+        goal: Propose or normalize the adversarial use-case set.
+        transitions:
+          propose:
+            target: approval_route
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.plan.use-cases
+              use:
+                inputs:
+                  subject:        "$.context.artifact"
+                  subject_kind:   "$.context.subject_kind"
+                  seed_use_cases: "$.workflow.input.use_cases"
+                outputs:
+                  "$.context.uc_proposal": proposal
+                  "$.context.uc_set":      use_cases
+
+      # APPROVAL ROUTE — auto_approve bypasses the human gate (operator
+      # pre-approved out-of-band); otherwise park for a human signoff.
+      approval_route:
+        transitions:
+          auto:
+            target: falsifying
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.auto_approve == true" }
+          human:
+            target: approving_human
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.auto_approve == false" }
+
+      approving_human:
+        goal: A human approves (or rejects) the proposed use-case set.
+        transitions:
+          approve:
+            target: approval_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.gate.human-signoff
+              use:
+                inputs:
+                  artifact: "$.context.uc_proposal"
+                  prompt:   "Approve this use-case set to pressure-test the design? (reject to stop)"
+                outputs:
+                  "$.context.approval": decision
+
+      approval_gate:
+        transitions:
+          approved:
+            target: falsifying
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.approval == 'approved'" }
+          rejected:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.approval == 'rejected'" }
+
+      # FALSIFY — scientific-process adjudicates: try to refute adequacy for each use case.
+      falsifying:
+        goal: Falsify the design's adequacy against the approved use cases (scientific-process).
+        transitions:
+          falsify:
+            target: verdict_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.use-case-falsification
+              use:
+                inputs:
+                  subject:      "$.context.artifact"
+                  subject_kind: "$.context.subject_kind"
+                  use_cases:    "$.context.uc_set"
+                outputs:
+                  "$.context.adequate":          adequate
+                  "$.context.refuted_use_cases": refuted_use_cases
+                  "$.context.report":            report
+
+      verdict_gate:
+        transitions:
+          survived:
+            target: survived
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.adequate == true" }
+          remediate:
+            target: bumping
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.adequate == false" }
+              - { kind: expr, expr: "$.context.round < $.context.max_rounds" }
+          escalate:
+            target: escalation_route
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.adequate == false" }
+              - { kind: expr, expr: "$.context.round >= $.context.max_rounds" }
+
+      # BUMP — increment the round counter on a noop-executor transition (so the
+      # output mutation is actually applied), then remediate.
+      bumping:
+        goal: Increment the round counter.
+        transitions:
+          bump:
+            target: remediating
+            actor: deterministic
+            executor: { kind: noop }
+            output:
+              round: { add: ["$.context.round", 1] }
+
+      # REMEDIATE — design the missing capabilities IN (poka-yoke + TRIZ), using
+      # the refuted use cases as the blockers, then re-falsify.
+      remediating:
+        goal: Revise the design to cover the refuted use cases (poka-yoke + TRIZ); then re-falsify.
+        transitions:
+          remediate:
+            target: falsifying
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.refactor.mitigate-risks
+              use:
+                inputs:
+                  artifact:     "$.context.artifact"
+                  risk_ranking: "$.context.refuted_use_cases"
+                  blockers:     "$.context.refuted_use_cases"
+                  subject_kind: "$.context.subject_kind"
+                outputs:
+                  "$.context.artifact": artifact
+
+      # ESCALATE ROUTE — auto_approve terminates cleanly to needs_review (carrying
+      # the report); otherwise ask a human to accept-with-gaps or stop.
+      escalation_route:
+        transitions:
+          auto:
+            target: needs_review
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.auto_approve == true" }
+          human:
+            target: escalation_human
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.auto_approve == false" }
+
+      escalation_human:
+        goal: Use cases still refute the design after the budget — ask the human continue or stop.
+        transitions:
+          decide:
+            target: escalation_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.gate.human-signoff
+              use:
+                inputs:
+                  artifact: "$.context.artifact"
+                  prompt:   "The design is still refuted by some use cases after the round budget. Accept with documented gaps, or stop?"
+                outputs:
+                  "$.context.escalation_decision": decision
+
+      escalation_gate:
+        transitions:
+          accept_with_gaps:
+            target: survived
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.escalation_decision == 'approved'" }
+          stop:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.escalation_decision == 'rejected'" }
+
+      survived:
+        terminal: true
+        outcome: success
+
+      # Bounded but not fully survived: terminates cleanly carrying the report so
+      # the operator reviews surviving refutations out-of-band (no stranded queue).
+      needs_review:
+        terminal: true
+
+      failed:
+        terminal: true

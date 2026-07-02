@@ -1,0 +1,96 @@
+version: "1.0.0"
+scripts:
+  format.cleanup:
+    verb: format
+    lifecycle: experimental
+    source: cognitive-architectures
+    # LANGUAGE-AGNOSTIC cleanup: detect the language(s) in a repo and run each
+    # one's canonical auto-formatter in WRITE mode (multi-language repos run ALL
+    # detected). The build-loop runs this before green_measuring so a slice never
+    # fails the green gate on a mechanical formatting nit and the agent never
+    # hand-formats. Adding a language = add one row to the case registry below.
+    # Body is byte-for-byte the unit-tested format-cleanup.sh (8/8 detection green).
+    body: |
+      #!/usr/bin/env bash
+      # Args (positional; env fallback):
+      #   $1 REPO_PATH                         [REPO_PATH]
+      #   $2 LANGS_CSV  force languages, skip detection (optional)  [FORMAT_LANGS]
+      # Env: FORMAT_DRY=1 → detect + report only, run no formatter (deterministic).
+      # Emits JSON: { languages, formatters_run, skipped, summary }
+      # No `set -e`/`-u`: a missing tool is data, not an abort.
+      REPO="${1:-${REPO_PATH:-.}}"
+      LANGS_CSV="${2:-${FORMAT_LANGS:-}}"
+      DRY="${FORMAT_DRY:-}"
+
+      # A file matching $1 exists under REPO, excluding vendored/build dirs.
+      has() {
+        find "$REPO" \
+          \( -path '*/target' -o -path '*/node_modules' -o -path '*/.git' \
+             -o -path '*/dist' -o -path '*/build' -o -path '*/.venv' -o -path '*/venv' \) -prune \
+          -o -type f -name "$1" -print 2>/dev/null | head -1 | grep -q .
+      }
+
+      # ── detect languages ───────────────────────────────────────────────────
+      langs=()
+      if [ -n "$LANGS_CSV" ]; then
+        IFS=',' read -r -a langs <<<"$LANGS_CSV"
+      else
+        { has 'Cargo.toml' || has '*.rs'; } && langs+=(rust)
+        { has 'pyproject.toml' || has 'setup.py' || has 'setup.cfg' || has 'requirements.txt' || has '*.py'; } && langs+=(python)
+        { has 'package.json' || has '*.ts' || has '*.tsx' || has '*.js' || has '*.jsx' || has '*.mjs' || has '*.cjs'; } && langs+=(javascript)
+        { has 'go.mod' || has '*.go'; } && langs+=(go)
+      fi
+
+      # ── per-language formatter registry (write mode) ─────────────────────────
+      run_one() {
+        case "$1" in
+          rust)
+            if command -v cargo >/dev/null 2>&1 && has 'Cargo.toml'; then
+              ( cd "$REPO" && cargo fmt ) >/dev/null 2>&1 && echo "cargo fmt" || echo "SKIP:rust(cargo fmt failed)"
+            else echo "SKIP:rust(no cargo/Cargo.toml)"; fi ;;
+          python)
+            if command -v ruff >/dev/null 2>&1; then
+              ( cd "$REPO" && ruff format . ) >/dev/null 2>&1 && echo "ruff format" || echo "SKIP:python(ruff failed)"
+            elif command -v black >/dev/null 2>&1; then
+              ( cd "$REPO" && black . ) >/dev/null 2>&1 && echo "black" || echo "SKIP:python(black failed)"
+            else echo "SKIP:python(no ruff/black)"; fi ;;
+          javascript)
+            if command -v prettier >/dev/null 2>&1; then
+              ( cd "$REPO" && prettier --write . ) >/dev/null 2>&1 && echo "prettier" || echo "SKIP:javascript(prettier failed)"
+            elif command -v npx >/dev/null 2>&1; then
+              ( cd "$REPO" && npx --no-install prettier --write . ) >/dev/null 2>&1 && echo "npx prettier" || echo "SKIP:javascript(no prettier)"
+            else echo "SKIP:javascript(no prettier/npx)"; fi ;;
+          go)
+            if command -v gofmt >/dev/null 2>&1; then
+              ( cd "$REPO" && gofmt -w . ) >/dev/null 2>&1 && echo "gofmt -w" || echo "SKIP:go(gofmt failed)"
+            else echo "SKIP:go(no gofmt)"; fi ;;
+          *) echo "SKIP:$1(unknown language)" ;;
+        esac
+      }
+
+      run=()
+      skip=()
+      for l in ${langs[@]+"${langs[@]}"}; do
+        if [ -n "$DRY" ]; then
+          skip+=("SKIP:$l(dry)")
+        else
+          r="$(run_one "$l")"
+          case "$r" in SKIP:*) skip+=("$r") ;; *) run+=("$r") ;; esac
+        fi
+      done
+
+      arr() { if [ "$#" -eq 0 ]; then echo '[]'; else printf '%s\n' "$@" | jq -R . | jq -s .; fi; }
+      languages_json="$(arr ${langs[@]+"${langs[@]}"})"
+      run_json="$(arr ${run[@]+"${run[@]}"})"
+      skip_json="$(arr ${skip[@]+"${skip[@]}"})"
+
+      n_lang=$(jq 'length' <<<"$languages_json")
+      n_run=$(jq 'length' <<<"$run_json")
+      summary="cleanup: detected ${n_lang} language(s) [$(jq -r 'join(",")' <<<"$languages_json")]; ran ${n_run} formatter(s)$([ -n "$DRY" ] && echo ' (dry-run)')."
+
+      jq -n \
+        --argjson languages "$languages_json" \
+        --argjson formatters_run "$run_json" \
+        --argjson skipped "$skip_json" \
+        --arg summary "$summary" \
+        '{languages:$languages, formatters_run:$formatters_run, skipped:$skipped, summary:$summary}'

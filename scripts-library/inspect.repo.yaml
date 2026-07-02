@@ -1,0 +1,32 @@
+# scripts-library/inspect.repo.yaml
+#
+# DETERMINISTIC repo digest for FMECA / review enumeration. The in-process agent
+# has no file tools (its tools are MCP connections + final_answer), so an
+# enumerating leaf cannot read a codebase headless. This script gathers bounded
+# structural FACTS (file tree + line counts, risk markers, crate layout) so the
+# enumerate agent works from CONTEXT, not file access — keeping the split clean:
+# deterministic code gathers facts, the LLM enumerates from them, the tool scores.
+# Arg $1 = repo path. Emits JSON on stdout (read at $.output.json).
+# Subject root `inspect` is a blessed script namespace (SPEC §22.4).
+version: "1.0.0"
+scripts:
+  inspect.repo:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      REPO="${1:-.}"
+      if [ ! -d "$REPO" ]; then printf '{"error":"repo not found: %s"}\n' "$REPO"; exit 0; fi
+      cd "$REPO" || { printf '{"error":"cannot cd"}\n'; exit 0; }
+      # Bounded structural facts (no full file dumps).
+      tree=$(find . \( -path ./target -o -path ./.git -o -path ./node_modules \) -prune -o \
+                  -name '*.rs' -print 2>/dev/null | head -300 | while read -r f; do
+                printf '%s (%s lines)\n' "$f" "$(wc -l < "$f" 2>/dev/null || echo 0)"; done)
+      markers=$(grep -rnE 'TODO|FIXME|unimplemented!\(|todo!\(|\.unwrap\(\)|\.expect\(|panic!\(' \
+                  --include='*.rs' . 2>/dev/null | grep -v '/target/' | head -120)
+      crates=$(find . -name Cargo.toml -not -path './target/*' 2>/dev/null | head -50)
+      rs_count=$(find . -path ./target -prune -o -name '*.rs' -print 2>/dev/null | grep -vc '/target/')
+      jq -n --arg tree "$tree" --arg markers "$markers" --arg crates "$crates" --arg n "$rs_count" \
+        '{rs_file_count: ($n|tonumber? // 0), crates: $crates, file_tree: $tree, risk_markers: $markers}'

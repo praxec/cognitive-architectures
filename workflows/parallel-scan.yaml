@@ -1,0 +1,73 @@
+# workflows/parallel-scan.yaml
+#
+# A workflow that fans out N independent code inspections concurrently and
+# rolls up a verdict. Demonstrates the `parallel` executor with static
+# branches + `on_branch_failure: continue` (graded report — run all
+# inspections, then decide) + array-expansion mapping over branch outputs.
+#
+# The composing gateway must declare the referenced scripts (see
+# scripts-library/*) and include this workflow.
+
+version: "1.0.0"
+
+workflows:
+  parallel_scan:
+    version: "2026-05-25"
+    initialState: scanning
+    # SPEC §29.3 (v0.4): an operator monitoring a scan may want to
+    # ask a clarifying question (e.g. "is this lint failure a known
+    # waiver?") before deciding on the rolled-up verdict.
+    enable_human_ask: true
+    human_ask_cap: 2
+    blackboard:
+      # NOTE (refreshed v0.4): `allPassed` is a string, not boolean.
+      # The parallel executor's `summary.verdict` is "succeeded" or
+      # "failed" (SPEC §24.3). The pre-v0.4 declaration as `boolean`
+      # was a latent BLACKBOARD_TYPE_ERROR when the write actually
+      # happened; corrected here.
+      allPassed:    { type: string }
+      ok_count:     { type: integer }
+      failed_count: { type: integer }
+      verdicts:     { type: array }
+    states:
+      scanning:
+        goal: Run independent code inspections concurrently
+        transitions:
+          run:
+            target: rolled_up
+            actor: deterministic
+            # SPEC §24 — fan out 4 independent inspections. on_branch_failure:
+            # continue means every inspection runs even if one fails; the
+            # aggregate verdict is computed per join condition (here: all).
+            # That gives the operator a complete report rather than bailing
+            # at the first red signal.
+            executor:
+              kind: parallel
+              branches:
+                - { kind: script, subject: inspect.cargo.dependency-tree }
+                - { kind: script, subject: lint.rust.clippy-strict }
+                - { kind: script, subject: format.rust.check }
+                - { kind: script, subject: test.cargo.workspace }
+              join: all
+              max_concurrency: 4
+              on_branch_failure: continue
+              total_timeout_ms: 300000   # 5 minutes
+            output:
+              allPassed:    "$.output.summary.verdict"
+              ok_count:     "$.output.summary.ok_count"
+              failed_count: "$.output.summary.failed_count"
+              # [*] array-projection — pluck each branch's success boolean
+              # into a parallel array.
+              verdicts:     "$.output.branches[*].ok"
+      rolled_up:
+        transitions:
+          accept_all_green:
+            target: done
+            guards:
+              - { kind: expr, expr: "$.context.allPassed == 'succeeded'" }
+          reject_any_red:
+            target: failed
+            guards:
+              - { kind: expr, expr: "$.context.allPassed != 'succeeded'" }
+      done:   { terminal: true }
+      failed: { terminal: true }

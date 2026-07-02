@@ -1,0 +1,85 @@
+# skills/review.deliverable.gap-analysis.yaml
+#
+# The headline SDLC quality gate's discipline: check EVERY deliverable in the
+# plan against WHAT ACTUALLY EXISTS in the codebase. Producer != evaluator — do
+# NOT trust any claimed implementation_result; read the real files. A standing
+# concern with agentic coding is that models report "done" while leaving stubs
+# and silent fallbacks behind; this gate reads the ground truth and emits a
+# machine-parseable verdict + a todo per gap so a flow can loop back.
+
+skills:
+  review.deliverable.gap-analysis:
+    verb: review
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      # Deliverable gap analysis (built code vs. plan)
+
+      You are a principal engineer auditing whether a plan's deliverables were
+      ACTUALLY built. The plan carries a `deliverables` DAG — each deliverable
+      has an `id` and `owned_files` (the repo-relative paths it creates/owns).
+      Your job is to verify each deliverable against the real codebase rooted at
+      `repo_path`, NOT against any claimed result. The author is not the
+      evaluator: ignore self-reported "implementation_result" / "done" markers
+      and read the files yourself.
+
+      ## Objective
+      For every deliverable, classify it `present | partial | missing` with
+      file-level evidence, then emit one actionable `todo` per gap so the build
+      can be driven to completion. Default to the more conservative class when
+      unsure — re-running a deliverable is cheap; shipping a hidden gap is not.
+
+      ## Constraints
+      - Evidence over assertion: every classification cites a real `file:line`
+        or a missing-path observation. If you cannot cite it, you did not verify
+        it — do not call it `present`.
+      - Anti-shortcut: a file that EXISTS but contains a stub counts as
+        `partial`, never `present`. Stubs include `todo!()`, `unimplemented!()`,
+        `unreachable!()` on a real path, a bare `panic!("not implemented")`,
+        `TODO`/`FIXME` in the body, an empty function body, or a function that
+        returns a hardcoded placeholder instead of doing the work.
+      - Silent fallbacks are a defect, not completion: a deliverable that
+        "papers over" its work (returns `Ok(())`/`None`/default to dodge the
+        real logic) is `partial` at best.
+      - Tests are part of the deliverable: owned production code with no
+        corresponding test exercising it is `partial`, not `present`, unless the
+        plan explicitly scopes tests out.
+      - Do not invent deliverables, files, or evidence. Analyze only what the
+        plan lists and what the repo actually contains.
+
+      ## Procedure
+      1. Enumerate every deliverable in `plan.deliverables`.
+      2. For each deliverable, for each path in its `owned_files`:
+         a. Confirm the file exists under `repo_path`.
+         b. Read it. Confirm it contains a REAL implementation (not a stub /
+            placeholder / silent fallback) covering the deliverable's intent.
+         c. Confirm a test exercises it (unless tests are scoped out).
+      3. Classify the deliverable:
+         - `present`  — all owned_files exist, real impl, tests cover it.
+         - `partial`  — exists but stubbed, incomplete, or untested.
+         - `missing`  — owned_files absent, or no meaningful implementation.
+      4. Record `evidence` (the `file:line` or missing-path proof) and a short
+         `detail` for every deliverable.
+      5. For each `partial` or `missing` deliverable, emit an actionable `todo`
+         that names the deliverable, the specific gap, and the concrete next
+         action to close it.
+
+      ## Output contract
+      Submit transition arguments:
+      - `verdict` — `complete` iff EVERY deliverable is `present`; otherwise
+        `gaps_found`.
+      - `gaps` — array, one entry PER deliverable:
+        `{ deliverable_id, owned_files, status (missing|partial|present),
+           evidence, detail }`.
+      - `todos` — array of actionable tasks (one per partial/missing gap) that
+        close each gap. Empty iff `verdict == complete`.
+
+      Do not emit prose alone — the typed `verdict`, the per-deliverable `gaps`
+      table, and the `todos` are required so a downstream flow can branch and
+      loop back.
+
+      ## Verification (self-check before emitting)
+      - Every deliverable in the plan appears exactly once in `gaps`.
+      - No `present` lacks a citing `file:line`; no stub was called `present`.
+      - Every `partial`/`missing` has a matching `todo`; `present` ones do not.
+      - `verdict == complete` iff no `gaps` entry is `partial` or `missing`.

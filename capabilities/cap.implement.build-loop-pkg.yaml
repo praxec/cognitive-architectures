@@ -1,0 +1,295 @@
+# capabilities/cap.implement.build-loop.yaml
+#
+# A RECOVERABLE TDD build loop that decouples code-generation from cargo:
+#   coding (agent WRITES the next slice — no shell) →
+#   building (praxec runs cargo as a SCRIPT, in the built repo) →
+#   build_gate (branch on the result):
+#     finish    — build green AND agent says all slices done → done
+#     next      — build green, more slices → back to coding
+#     fix       — build FAILED → back to coding with the failure summary (bounded)
+#     escalate  — iteration cap reached → human scope review
+#
+# Why: a producer that can't run a shell (or that crashes mid-build) no longer
+# stops the build — cargo is praxec-owned + deterministic, and any failure
+# LOOPS BACK to the producer instead of aborting. The `coding` leaf is
+# idempotent/resume-from-worktree (re-driving it after a crash just continues).
+# The iteration counter bounds the loop, then fails-fast to a human (mirrors the
+# tdd.discipline "no convergence → scope review").
+
+workflows:
+  cap.implement.build-loop-pkg:
+    verb: implement
+    lifecycle: experimental
+    description: >
+      Recoverable build loop: agent writes a slice (no shell) → praxec runs
+      cargo as a script in the repo → gate branches done | next | fix | escalate.
+      Decouples code-gen from cargo so producer crashes / no-shell loop back
+      instead of stopping.
+    snippet:
+      inputs:
+        plan:      { type: object, required: true }
+        repo_path: { type: string, required: true }
+      outputs:
+        result:      { type: object }
+        tests_added: { type: integer }
+    initialState: coding
+    # Seed the loop counter + flags so the first gate evaluation + the {add}
+    # increment have concrete values to read.
+    initialContext:
+      build_iter:    0
+      build_passed:  false
+      coding_done:   false
+      # Forward-motion capture: each GREEN build commits the files the agent
+      # reported it wrote this slice (run.git.commit-slice stages ONLY these).
+      files_written:  ""
+      commit_message: "praxec build-loop: verified slice"
+      # QA gate: every green slice is scored by a DISTINCT reviewer before commit.
+      review_iter:  0
+      qa_verdict:   ""
+      qa_findings:  ""
+    states:
+
+      # WRITE-ONLY producer step. The agent edits files for the next plan slice;
+      # it does NOT run cargo (the building step does). On a re-entry after a
+      # failed build, $.context.build_summary carries the cargo errors to fix.
+      coding:
+        goal: >
+          Write the next slice of `plan` into the repo (one red→green→refactor
+          step). You ONLY write files — do NOT run cargo; the build step runs it
+          and feeds results back. If $.context.build_issues is present, the last
+          build FAILED — fix ALL of the listed issues (every error AND warning,
+          not just the first); $.context.build_summary has the raw tail for
+          context. If $.context.qa_findings is present, the last QA review
+          REJECTED the slice on quality — address those findings too. Set
+          done=true ONLY when every
+          plan deliverable is implemented AND tested. ALWAYS report:
+          `files_written` — a single SPACE-SEPARATED string of the repo-relative
+          paths you created or modified this slice (so the verified slice is
+          committed to exactly those files); and `commit_message` — a concise
+          one-line message describing THIS slice, derived from the plan
+          deliverable you implemented (used verbatim as the commit message).
+        skills: [implement.tdd.discipline]
+        transitions:
+          write:
+            target: building
+            actor: agent
+            inputSchema:
+              type: object
+              # Minimal required contract (commodity-friendly): only `done`.
+              # files_written + commit_message are OPTIONAL — a commodity model
+              # that omits them must NOT fail the transition (that would cascade
+              # to the expensive ceiling). commit-slice degrades gracefully:
+              # empty message → default; empty files → skip the commit (the
+              # milestone gate captures it later).
+              required: [done]
+              properties:
+                done:           { type: boolean }
+                result:         { type: object }
+                tests_added:    { type: integer }
+                files_written:  { type: string }
+                commit_message: { type: string }
+            executor: { kind: noop }
+            output:
+              coding_done:    "$.arguments.done"
+              result:         "$.arguments.result"
+              tests_added:    "$.arguments.tests_added"
+              files_written:  "$.arguments.files_written"
+              # Per-slice commit message from the plan-driven agent; falls back
+              # to the initialContext default if the agent omits it.
+              commit_message: "$.arguments.commit_message"
+
+      # BUILD step — praxec runs cargo (soft: always exits 0, reports passed)
+      # in the built repo, and increments the loop counter.
+      building:
+        transitions:
+          build:
+            target: build_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.cargo.cwd
+              workingDirectory: "$.workflow.input.repo_path"
+            output:
+              build_passed:  "$.output.json.passed"
+              build_summary: "$.output.json.summary"
+              # The COMPLETE list of errors+warnings+failed-tests (not a tail) so
+              # the next coding pass fixes EVERYTHING at once — fewer iterations,
+              # fewer model escalations.
+              build_issues:  "$.output.json.issues"
+              build_iter:    { add: ["$.context.build_iter", 1] }
+
+      # BRANCH — exactly one transition must be viable (the engine requires it),
+      # so the six guards below are mutually exclusive AND exhaustive over
+      # (build_passed, coding_done, build_iter</≥ thresholds 2 and cap=6).
+      #
+      # MODEL ESCALATION ON REVIEW/GATE FAILURE: the producer starts on the
+      # commodity tier (the auto-drive picks the cheapest-effective model and
+      # the executor already chain-walks WITHIN a call on capability failure).
+      # But a model that PRODUCES code which keeps FAILING the cargo gate is a
+      # QUALITY (review) failure, not a single-call capability failure — so after
+      # 2 failed build iterations we escalate the whole coding tier by writing
+      # $.context.affinity_override = "reasoning" (the auto_affinity helper reads
+      # context first). This is the "escalate to a more powerful model if reviews
+      # don't pass" half of self-heal — no config change, commodity-first.
+      build_gate:
+        transitions:
+          # GREEN build → QA-REVIEW the slice (distinct reviewer) BEFORE commit.
+          # Tests passing is necessary but not sufficient; the reviewer scores
+          # quality (correctness / regressions / idiomaticity vs acceptance).
+          to_review:
+            target: reviewing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.build_passed == true" }
+          # First couple of build failures: retry on the SAME (commodity) tier.
+          iterate_fix:
+            target: coding
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.build_passed == false" }
+              - { kind: expr, expr: "$.context.build_iter < 2" }
+          # Repeated gate failure (>=2): the commodity tier can't pass review —
+          # escalate the producer to the strongest tier for the remaining tries.
+          iterate_fix_escalate:
+            target: coding
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.build_passed == false" }
+              - { kind: expr, expr: "$.context.build_iter >= 2" }
+              - { kind: expr, expr: "$.context.build_iter < 6" }
+            # noop executor so the `output` mapping is actually applied (the
+            # chain merges output only on transitions that carry an executor —
+            # mirrors the `coding.write` step). Sets the escalation flag the
+            # auto-drive reads via auto_affinity($.context.affinity_override).
+            executor: { kind: noop }
+            output:
+              affinity_override: "reasoning"
+          escalate_failing:
+            target: needs_human
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.build_passed == false" }
+              - { kind: expr, expr: "$.context.build_iter >= 6" }
+
+      # QA REVIEW — a DISTINCT reviewer (producer != evaluator) scores the GREEN
+      # slice on quality (correctness / regressions / idiomaticity) vs the plan's
+      # acceptance_criteria. A fresh critical pass; passing tests is necessary but
+      # NOT sufficient. Emits a typed qa_verdict the review_gate branches on.
+      reviewing:
+        # Per-step affinity: the QA reviewer runs on the senior `review` chain
+        # (glm-5.2 → sonnet, capable + family-diverse from the qwen producer) —
+        # producer != evaluator at the MODEL level, not just a fresh pass.
+        affinity: review
+        goal: >
+          You are a DISTINCT QA reviewer (NOT the author) of the slice just built.
+          The build is GREEN (tests pass) — necessary but NOT sufficient. Read the
+          changed files ($.context.files_written) and review them against the
+          plan's acceptance_criteria ($.workflow.input.plan): assess correctness,
+          regressions to existing behavior, and idiomatic quality. Emit
+          qa_verdict="approved" ONLY if the slice genuinely meets the acceptance
+          criteria with no regressions; otherwise "rejected" with specific
+          qa_findings the author must fix. Be critical — catch what tests don't.
+        transitions:
+          review:
+            target: review_gate
+            actor: agent
+            inputSchema:
+              type: object
+              required: [qa_verdict]
+              properties:
+                qa_verdict:  { type: string, enum: [approved, rejected] }
+                qa_findings: { type: string }
+                qa_score:    { type: integer }
+            executor: { kind: noop }
+            output:
+              qa_verdict:  "$.arguments.qa_verdict"
+              qa_findings: "$.arguments.qa_findings"
+              qa_score:    "$.arguments.qa_score"
+              review_iter: { add: ["$.context.review_iter", 1] }
+
+      # BRANCH on the QA verdict (exhaustive over approved|rejected):
+      #   approved      → commit the slice
+      #   rejected, <3  → back to coding with qa_findings to fix
+      #   rejected, >=3 → surface to a human (quality not converging)
+      review_gate:
+        transitions:
+          qa_pass:
+            target: committing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.qa_verdict == 'approved'" }
+          qa_fix:
+            target: coding
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.qa_verdict == 'rejected'" }
+              - { kind: expr, expr: "$.context.review_iter < 3" }
+          qa_escalate:
+            target: needs_human
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.qa_verdict == 'rejected'" }
+              - { kind: expr, expr: "$.context.review_iter >= 3" }
+
+      # COMMIT the verified slice (best-effort, NEVER blocks): stage ONLY the
+      # files the agent reported writing, then commit. run.git.commit-slice exits
+      # 0 and reports {committed, error}; a no-op commit (empty files / default
+      # branch / nothing staged) just advances without committing — so the loop
+      # is never stuck on a commit, only ever moved forward by one.
+      committing:
+        transitions:
+          commit:
+            target: committed
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.commit-slice
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.context.commit_message"
+                - "$.context.files_written"
+                - "cognitive/cap.implement.build-loop-pkg"
+            output:
+              last_commit: "$.output.json"
+
+      # After committing a green slice: finish if all slices are done; otherwise
+      # loop back to coding (bounded), or surface to a human at the cap.
+      committed:
+        transitions:
+          finish:
+            target: done
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.coding_done == true" }
+          iterate_next:
+            target: coding
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.coding_done == false" }
+              - { kind: expr, expr: "$.context.build_iter < 6" }
+          escalate_incomplete:
+            target: needs_human
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.coding_done == false" }
+              - { kind: expr, expr: "$.context.build_iter >= 6" }
+
+      # Bounded → surface to a human for scope review (no silent spin, no silent
+      # stop). The operator decides: expand scope, accept, or abort.
+      needs_human:
+        transitions:
+          review_scope:
+            target: done
+            actor: human
+            inputSchema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string }
+                result:   { type: object }
+            executor: { kind: noop }
+            output:
+              result: "$.arguments.result"
+
+      done:
+        terminal: true

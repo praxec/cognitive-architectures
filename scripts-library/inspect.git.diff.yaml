@@ -1,0 +1,35 @@
+# scripts-library/git.diff.yaml
+#
+# Read-only diff for review gates: the staged+unstaged diff (optionally vs a
+# base ref), bounded so it doesn't flood a workflow blackboard. Emits
+# {files_changed, insertions, deletions, diffstat, truncated, error} JSON.
+# Inputs (env):
+#   WORKDIR  — optional repo dir
+#   BASE     — optional ref to diff against (default: working tree vs HEAD)
+#   MAX_BYTES — optional cap on the diffstat text (default 4000)
+version: "1.0.0"
+scripts:
+  inspect.git.diff:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      [ -n "${WORKDIR:-}" ] && cd "$WORKDIR" 2>/dev/null
+      if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        printf '{"error":"not a git work tree"}\n'; exit 0; fi
+      base="${BASE:-}"
+      max="${MAX_BYTES:-4000}"
+      if [ -n "$base" ]; then stat="$(git diff --stat "$base" 2>/dev/null)"; nums="$(git diff --numstat "$base" 2>/dev/null)"
+      else stat="$(git diff --stat HEAD 2>/dev/null)"; nums="$(git diff --numstat HEAD 2>/dev/null)"; fi
+      files="$(printf '%s\n' "$nums" | grep -c . || echo 0)"
+      ins="$(printf '%s\n' "$nums" | awk '{a+=$1} END{print a+0}')"
+      del="$(printf '%s\n' "$nums" | awk '{d+=$2} END{print d+0}')"
+      trunc=false
+      if [ "$(printf '%s' "$stat" | wc -c)" -gt "$max" ]; then
+        stat="$(printf '%s' "$stat" | head -c "$max")"; trunc=true; fi
+      jq -n --argjson files "${files:-0}" --argjson ins "${ins:-0}" --argjson del "${del:-0}" \
+            --arg diffstat "$stat" --argjson truncated "$trunc" \
+        '{files_changed:$files, insertions:$ins, deletions:$del, diffstat:$diffstat, truncated:$truncated}' \
+        2>/dev/null || printf '{"error":"jq failed"}\n'

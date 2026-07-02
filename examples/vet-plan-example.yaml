@@ -1,0 +1,69 @@
+# examples/vet-plan-example.yaml
+#
+# End-to-end vet-plan demo. Composes:
+#   - the vet_plan workflow
+#   - the compose.plan.vet planner skill
+#   - the review.code.adversarial critic skill
+#   - a seed lexicon (so gateway.lexicon.search has terms to ground on)
+#
+# Start with:
+#   praxec serve --config examples/vet-plan-example.yaml
+# Then drive via the seven MCP tools from any MCP-capable host, OR via
+# `praxec-tui walk --workflow vet_plan --input '{"task":"..."}'`.
+#
+# The lexicon shipped here is a tiny seed for the example — operators
+# extend it via the grill-and-extend-lexicon workflow before / during
+# real planning runs.
+
+version: "1.0.0"
+
+include:
+  - ../workflows/vet-plan.yaml
+  - ../skills/compose.plan.vet.yaml
+  - ../skills/review.code.adversarial.yaml
+
+audit:
+  sink: stdout
+
+# Seed lexicon — example ubiquitous-language terms for the gateway
+# bounded context. Real operators replace this with their org's
+# vocabulary, committed to praxec.yaml as a versioned artifact.
+lexicon:
+  connector:
+    bounded_context: gateway
+    definition_short: |
+      A unit of integration between the gateway and an external system.
+      Has a kind (mcp/cli/rest/...), a name, and capability-typed
+      inputs/outputs. Connectors are declared in the top-level
+      `connections:` block; workflows invoke them via executor configs.
+    refs: [capability, executor]
+    governance: human-only
+
+  capability:
+    bounded_context: gateway
+    definition_short: |
+      A typed surface that a connector exposes. Workflows compose
+      capabilities into transitions; the runtime enforces input /
+      output shapes per the capability's declared schema.
+    refs: [connector, executor]
+    governance: human-only
+
+  workflow:
+    bounded_context: gateway
+    definition_short: |
+      A state machine that orchestrates governed work. Composed of
+      states (with goal + skills + delegate), transitions (with
+      guards + executors + output mapping), and a blackboard.
+      Snapshot-stamped at start so in-flight instances are immune to
+      config edits.
+    refs: [state, transition, blackboard, executor]
+    governance: human-only
+
+  blackboard:
+    bounded_context: gateway
+    definition_short: |
+      The typed key-value store an in-flight workflow reads and writes.
+      Slots may be workflow-scoped or state-scoped (SPEC §27);
+      constraints (SPEC §28) enforce write-time invariants.
+    refs: [workflow]
+    governance: human-only

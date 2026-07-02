@@ -1,0 +1,25 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Rust (in case ops build alongside)
+target/
+Cargo.lock
+
+# Local secrets and environment overrides
+.env
+.env.local
+*.local.yaml
+*.local.yml
+
+# Logs / scratch
+*.log
+scratch/
+tmp/

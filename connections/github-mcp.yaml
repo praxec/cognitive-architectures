@@ -1,0 +1,17 @@
+# connections/github-mcp.yaml
+#
+# MCP connection to a GitHub MCP server (the official one, or any
+# compatible alternative). Used by pr-review, triage-router, and any
+# workflow that creates / updates issues or PRs.
+#
+# Operator note: the GitHub server typically reads `GITHUB_TOKEN` from
+# the environment. Export it before starting the gateway, or wire it
+# via your secrets manager.
+
+connections:
+  github_mcp:
+    kind: mcp
+    command: github-mcp-server
+    description: >
+      GitHub API surface (issues, PRs, reviews, files). Requires
+      GITHUB_TOKEN in the environment.

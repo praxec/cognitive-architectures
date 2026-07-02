@@ -1,0 +1,157 @@
+version: "1.0.0"
+scripts:
+  verify.test.tdd-verdict:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # DETERMINISTIC TDD verdict for the structural red→green build loop.
+      #
+      # The CODE computes the categorical verdict; the workflow only ROUTES on it
+      # (observation-only discipline: the engine never guesses, it reads a token).
+      # Runs cargo + a static one-assertion-per-test scan and emits ONE `verdict`
+      # token the cap's gate branches on, plus the supporting metrics.
+      #
+      # Args (positional; matches the library's script convention):
+      #   $1 REPO_PATH  — repo to test/scan (also the cwd via workingDirectory)
+      #   $2 PHASE      — "red" | "green"
+      #   $3 PREV_COUNT — committed test count from the previous green slice
+      #   $4 ITER       — current build_iter (pre-increment)
+      #   $5 CAP        — iteration cap before escalating to a human
+      #
+      # Emits JSON on stdout:
+      #   { verdict, compiled, passed_count, failed_count, test_count,
+      #     atomic_passed, atomic_violations, summary, issues, affinity_override }
+      #
+      # PHASE=red verdicts:   red_ok | not_atomic | no_compile | no_growth | tautology | exhausted
+      # PHASE=green verdicts: green_ok | not_atomic | no_compile | tests_deleted | still_red | needs_cleanup | exhausted
+      #
+      # RED is language-aware for Rust: a test must COMPILE and FAIL (write the
+      # test + MINIMAL signature stubs). A new test that passes immediately is a
+      # tautology; no new test (count not grown) is no_growth.
+      # No `set -e`: failures are DATA, never an abort (this drives a loop).
+      REPO_PATH="${1:-${REPO_PATH:-.}}"
+      PHASE="${2:-green}"
+      PREV_COUNT="${3:-0}"
+      ITER="${4:-0}"
+      CAP="${5:-10}"
+      # $6 CARGO_SCOPE — scope the cargo verb to keep a verdict FAST on a large
+      # workspace (e.g. "-p mycrate"). Empty/absent → "--workspace". Testing the
+      # whole workspace per iteration is what timed the script out and produced a
+      # NULL verdict (the dead-stall); scoping to the crate under build avoids it.
+      CARGO_SCOPE="${6:-${CARGO_SCOPE:---workspace}}"
+      # $7 SCAN_TARGET — files/dirs the atomic scan checks (the slice's changed
+      # files: test_files_written in RED, files_written in GREEN). Empty/absent →
+      # the whole REPO_PATH (greenfield). Scoping keeps the one-assertion-per-test
+      # rule on the NEW tests only, never a host repo's existing conventions.
+      SCAN_TARGET="${7:-}"
+      [ -z "${SCAN_TARGET// /}" ] && SCAN_TARGET="$REPO_PATH"
+      # Bound cargo so a slow/hung build can NEVER kill the script before it emits
+      # a verdict (null-safety: the gate must always receive a valid token).
+      TEST_TIMEOUT="${TEST_TIMEOUT:-600}"
+
+      # ── 1. Static scan: exactly ONE assertion macro per #[test] fn ───────────
+      # Counts assert!/assert_eq!/assert_ne!/assert_matches!/debug_assert*! macro
+      # CALLS (require the `(`) inside each test fn body via brace tracking.
+      # Violations = any test fn whose assertion count != 1.
+      #
+      # SCOPED to $SCAN_TARGET (the slice's changed files; falls back to the whole
+      # REPO_PATH for greenfield) so the discipline checks only the NEW tests, never
+      # a host repo's pre-existing multi-assertion tests. Each violation is emitted
+      # on ONE line, then joined with a SINGLE comma pass — so violations spanning
+      # multiple files can't lose their separators (the old per-file awk reset its
+      # separator → `}{` → invalid JSON → null verdict).
+      _viol_lines="$(
+        { command -v rg >/dev/null 2>&1 \
+            && rg -l --type rust --glob '!target/**' -e '#\[(tokio::)?test\]' $SCAN_TARGET \
+            || grep -rl --include='*.rs' --exclude-dir=target -e '#\[test\]' -e '#\[tokio::test\]' $SCAN_TARGET; } 2>/dev/null \
+        | while IFS= read -r f; do [ -n "$f" ] && [ -f "$f" ] && awk -v FN="$f" '
+            function flush(  ) {
+              if (intest && opened && cnt != 1)
+                printf "{\"file\":\"%s\",\"test\":\"%s\",\"assertions\":%d}\n", FN, name, cnt;
+              intest=0; opened=0; cnt=0; depth=0; name="";
+            }
+            {
+              line=$0; sub(/\/\/.*$/, "", line);            # strip line comments (naive)
+              if (!intest) {
+                if (line ~ /#\[[ \t]*(tokio::)?test[ \t]*\]/) { pending=1; next; }
+                if (pending && line ~ /fn[ \t]+[A-Za-z0-9_]+/) {
+                  name=line; sub(/^.*fn[ \t]+/, "", name); sub(/[^A-Za-z0-9_].*$/, "", name);
+                  intest=1; pending=0; depth=0; opened=0; cnt=0;
+                  # fall through to count braces/asserts on the signature line
+                } else { next; }
+              }
+              tmp=line;
+              n=gsub(/assert(_eq|_ne|_matches)?![ \t]*\(/, "X", tmp); cnt+=n;
+              tmp2=line;
+              n2=gsub(/debug_assert(_eq|_ne)?![ \t]*\(/, "X", tmp2); cnt+=n2;
+              ob=gsub(/{/, "{", line); cb=gsub(/}/, "}", line);
+              depth += ob - cb;
+              if (depth > 0) opened=1;
+              if (opened && depth <= 0) flush();
+            }
+            END { if (intest) flush(); }
+          ' "$f"; done
+      )"
+      if [ -n "$_viol_lines" ]; then
+        atomic_violations="[$(printf '%s' "$_viol_lines" | paste -sd, -)]"; atomic_passed=false
+      else
+        atomic_violations="[]"; atomic_passed=true
+      fi
+
+      # ── 2. Dynamic: compile + test (+ fmt/clippy only in GREEN) ──────────────
+      test_log="$(timeout "${TEST_TIMEOUT}" cargo test $CARGO_SCOPE --no-fail-fast 2>&1)"; tt_rc=$?
+      compiled=true
+      # timeout (124) → treat as could-not-verify (no_compile), never a null verdict.
+      if [ "$tt_rc" -eq 124 ]; then
+        compiled=false
+        test_log="${test_log} ; TIMEOUT: cargo test exceeded ${TEST_TIMEOUT}s (scope=${CARGO_SCOPE}) - could not verify"
+      fi
+      if printf '%s' "$test_log" | grep -qE 'error\[E[0-9]{3,4}\]|could not compile'; then compiled=false; fi
+      passed_count=$(printf '%s\n' "$test_log" | sed -nE 's/.*test result:.* ([0-9]+) passed.*/\1/p' | awk '{s+=$1} END{print s+0}')
+      failed_count=$(printf '%s\n' "$test_log" | sed -nE 's/.*test result:.* ([0-9]+) failed.*/\1/p' | awk '{s+=$1} END{print s+0}')
+      test_count=$(( passed_count + failed_count ))
+
+      fmt_rc=0; clippy_rc=0; lint_log=""
+      if [ "$PHASE" = "green" ]; then
+        fmt_log=$(cargo fmt --all -- --check 2>&1); fmt_rc=$?
+        clippy_log=$(timeout "${TEST_TIMEOUT}" cargo clippy $CARGO_SCOPE --lib --bins -- -D warnings 2>&1); clippy_rc=$?
+        lint_log="$fmt_log
+      $clippy_log"
+      fi
+
+      # ── 3. Compute the single categorical verdict ────────────────────────────
+      verdict=""
+      if [ "$PHASE" = "red" ]; then
+        if   [ "$atomic_passed" = "false" ]; then verdict="not_atomic"
+        elif [ "$compiled" = "false" ];     then verdict="no_compile"
+        elif [ "$test_count" -le "$PREV_COUNT" ]; then verdict="no_growth"
+        elif [ "$failed_count" -lt 1 ];     then verdict="tautology"
+        else verdict="red_ok"; fi
+      else
+        if   [ "$atomic_passed" = "false" ]; then verdict="not_atomic"
+        elif [ "$compiled" = "false" ];     then verdict="no_compile"
+        elif [ "$test_count" -lt "$PREV_COUNT" ]; then verdict="tests_deleted"
+        elif [ "$failed_count" -ge 1 ];     then verdict="still_red"
+        elif [ "$fmt_rc" -ne 0 ] || [ "$clippy_rc" -ne 0 ]; then verdict="needs_cleanup"
+        else verdict="green_ok"; fi
+      fi
+      # Escalate retries (NOT successes) once the iteration cap is hit.
+      case "$verdict" in
+        red_ok|green_ok) : ;;
+        *) if [ "$ITER" -ge "$CAP" ]; then verdict="exhausted"; fi ;;
+      esac
+      # Producer model escalation: after 2 iterations, bump the coding tier.
+      affinity_override=""; if [ "$ITER" -ge 2 ]; then affinity_override="reasoning"; fi
+
+      # ── 4. Diagnostics (complete issue set; jq-encoded) ──────────────────────
+      full_log="$test_log
+      $lint_log"
+      issues=$(printf '%s\n' "$full_log" \
+        | grep -nE 'error(\[|:)|^[[:space:]]*warning:|panicked|test result: FAILED|\.\.\. FAILED|cannot find|mismatched types|unresolved import|assertion .*failed' \
+        | head -300 | jq -Rs . 2>/dev/null || printf '""')
+      summary=$(printf '%s' "$full_log" | tail -c 2000 | jq -Rs . 2>/dev/null || printf '""')
+
+      printf '{"verdict":"%s","compiled":%s,"passed_count":%s,"failed_count":%s,"test_count":%s,"atomic_passed":%s,"atomic_violations":%s,"issues":%s,"summary":%s,"affinity_override":"%s"}\n' \
+        "$verdict" "$compiled" "$passed_count" "$failed_count" "$test_count" "$atomic_passed" "$atomic_violations" "$issues" "$summary" "$affinity_override"

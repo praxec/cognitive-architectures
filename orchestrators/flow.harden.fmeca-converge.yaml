@@ -1,0 +1,243 @@
+# orchestrators/flow.harden.fmeca-converge.yaml
+#
+# REUSABLE FMECA convergence loop, as a NESTABLE sub-flow (V11 relaxed): FMECA an
+# artifact, then poka-yoke/TRIZ mitigate + re-FMECA until residual risk is LOW
+# (code-computed by cap.review.fmeca), bounded by a round counter (LoopGuard),
+# escalating to a human continue/stop gate on exhaustion (never a silent stop).
+#
+# Replaces the one-shot "FMECA gate that aborts on residual risk". Each pass
+# re-runs the FULL FMECA on the CURRENT artifact, so a mitigation that introduces
+# a new failure mode keeps the loop running — it cannot silently pass.
+#
+# Nest it from any flow via `kind: workflow`, reading the hardened artifact +
+# readiness from the top-level `outputs:` block. flow.derisk nests it for
+# DESIGN-QA (subject_kind=design); flow.loom nests it for PLAN-QA
+# (subject_kind=plan). Recursion is bounded by the runtime max_depth cap.
+#
+# TODO (deferred): add a codebase-VALIDITY gate (cap.review.architecture,
+# structureos-grounded) alongside the FMECA gate for design-kind subjects, so the
+# artifact is checked against the ACTUAL current codebase, not just FMECA'd in the
+# abstract.
+#
+# Requires (cognitive/*): cap.review.fmeca, cap.refactor.mitigate-risks,
+# cap.gate.human-signoff.
+
+workflows:
+  flow.harden.fmeca-converge:
+    lifecycle: experimental
+    description: >
+      Loop FMECA → poka-yoke/TRIZ mitigation → re-FMECA until residual risk is
+      Low, bounded by a round counter; escalate to a human continue/stop gate on
+      exhaustion. Returns the hardened artifact + its readiness/risk ranking.
+    inputs:
+      # `subject` is the artifact to harden. The loop works on a SEPARATE
+      # `$.context.artifact` slot (seeded from subject, then mutated in place) —
+      # the mutated slot must not also be an input (V14 slot conflict).
+      subject:         { type: object,  required: true }
+      subject_kind:    { type: string,  default: design }
+      matrix_strategy: { type: string,  default: qualitative3x3 }
+      # When true, ALSO gate on a codebase-VALIDITY review (cap.review.architecture)
+      # in addition to the FMECA — the design must be valid against the actual
+      # codebase, not just FMECA'd. flow.derisk passes true for design-QA; plan-QA
+      # leaves it false (the default). Seeded into $.context.validate_codebase by
+      # the `seeding` state (a guard needs a reachable context writer, not an input).
+      check_codebase: { type: boolean, default: false }
+    # Top-level outputs (flows have no `snippet:`) — the terminal context slots a
+    # `kind: workflow` parent reads via `use.outputs`.
+    outputs:
+      artifact:     { type: object }
+      fmeca_ready:  { type: boolean }
+      risk_ranking: { type: array }
+    # Round counter MUST be seeded via initialContext (input defaults don't
+    # reliably seed $.context).
+    initialContext:
+      round: 0
+    outcomes:
+      - id: risk_converged
+        statement: All FMECA failure modes are at Low residual criticality (no High/Medium).
+        check: "$.context.fmeca_ready == true"
+    initialState: seeding
+    states:
+
+      # SEED the working artifact slot from the input subject (so the loop can
+      # mutate `$.context.artifact` in place without it being an input slot).
+      seeding:
+        goal: Seed the working artifact from the input subject.
+        transitions:
+          seed:
+            target: assessing
+            actor: deterministic
+            executor: { kind: noop }
+            output:
+              artifact:          "$.workflow.input.subject"
+              validate_codebase: "$.workflow.input.check_codebase"
+
+      # ASSESS — re-run the FULL FMECA on the CURRENT artifact. CODE-COMPUTED verdict.
+      assessing:
+        goal: FMECA the current artifact; capture readiness + risk ranking.
+        transitions:
+          fmeca:
+            target: gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.fmeca
+              use:
+                inputs:
+                  subject:         "$.context.artifact"
+                  subject_kind:    "$.workflow.input.subject_kind"
+                  matrix_strategy: "$.workflow.input.matrix_strategy"
+                outputs:
+                  "$.context.fmeca_ready":    ready
+                  "$.context.risk_ranking":   risk_ranking
+                  "$.context.fmeca_blockers": blockers
+
+      # FMECA gate (sequential — avoids OR): on FMECA pass, either go to the
+      # codebase-validity check (when requested) or straight to hardened.
+      gate:
+        transitions:
+          to_validating:
+            target: validating
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.fmeca_ready == true" }
+              - { kind: expr, expr: "$.context.validate_codebase == true" }
+          converged:
+            target: hardened
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.fmeca_ready == true" }
+              - { kind: expr, expr: "$.context.validate_codebase == false" }
+          mitigate:
+            target: mitigating
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.fmeca_ready == false" }
+              - { kind: expr, expr: "$.context.round < 2" }
+            output:
+              round: { add: ["$.context.round", 1] }
+          escalate:
+            target: escalation
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.fmeca_ready == false" }
+              - { kind: expr, expr: "$.context.round >= 2" }
+
+      # MITIGATE — design the residual failure modes out (poka-yoke + TRIZ), then
+      # loop back to re-score. Guarded back-edge (bounded by the round counter).
+      mitigating:
+        goal: Mitigate residual failure modes (poka-yoke + TRIZ); then re-FMECA.
+        transitions:
+          remediate:
+            target: assessing
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.refactor.mitigate-risks
+              use:
+                inputs:
+                  artifact:     "$.context.artifact"
+                  risk_ranking: "$.context.risk_ranking"
+                  blockers:     "$.context.fmeca_blockers"
+                  subject_kind: "$.workflow.input.subject_kind"
+                outputs:
+                  "$.context.artifact": artifact
+
+      # VALIDATE — codebase-validity review of the FMECA-clean artifact
+      # (cap.review.architecture; verdict ∈ approved|needs-revision|rejected).
+      # Reached only when validate_codebase==true (design-QA).
+      validating:
+        goal: Review the design's validity against the codebase; classify components.
+        transitions:
+          review:
+            target: validity_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.architecture
+              use:
+                inputs:
+                  design: "$.context.artifact"
+                outputs:
+                  "$.context.validity_verdict":  verdict
+                  "$.context.validity_findings": findings
+
+      validity_gate:
+        transitions:
+          valid:
+            target: hardened
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.validity_verdict == 'approved'" }
+          mitigate:
+            target: mitigating_validity
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.validity_verdict != 'approved'" }
+              - { kind: expr, expr: "$.context.round < 2" }
+            output:
+              round: { add: ["$.context.round", 1] }
+          escalate:
+            target: escalation
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.validity_verdict != 'approved'" }
+              - { kind: expr, expr: "$.context.round >= 2" }
+
+      # MITIGATE the VALIDITY findings (distinct from FMECA mitigation: passes the
+      # architecture findings as blockers), then re-assess (FMECA + validity again).
+      mitigating_validity:
+        goal: Mitigate the codebase-validity findings (poka-yoke + TRIZ); then re-assess.
+        transitions:
+          remediate:
+            target: assessing
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.refactor.mitigate-risks
+              use:
+                inputs:
+                  artifact:     "$.context.artifact"
+                  risk_ranking: "$.context.risk_ranking"
+                  blockers:     "$.context.validity_findings"
+                  subject_kind: "$.workflow.input.subject_kind"
+                outputs:
+                  "$.context.artifact": artifact
+
+      # ESCALATE — bound hit without convergence. NEVER silent: ask a human to
+      # continue with residual risk or stop.
+      escalation:
+        goal: Risk did not converge in the round budget — ask the human continue or stop.
+        transitions:
+          decide:
+            target: escalation_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.gate.human-signoff
+              use:
+                inputs:
+                  artifact: "$.context.artifact"
+                  prompt:   "FMECA did not converge within the round budget. Continue with the residual risk, or stop?"
+                outputs:
+                  "$.context.harden_decision": decision
+
+      escalation_gate:
+        transitions:
+          continue:
+            target: hardened
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.harden_decision == 'approved'" }
+          stop:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.harden_decision == 'rejected'" }
+
+      hardened:
+        terminal: true
+        outcome: success
+
+      failed:
+        terminal: true

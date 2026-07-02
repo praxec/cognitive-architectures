@@ -1,0 +1,96 @@
+# workflows/pr-review.yaml
+#
+# Three-state PR review pipeline: intake the PR, adversarial critique by
+# an agent, human sign-off. Designed for GitHub but works with any
+# MCP-exposed VCS.
+#
+# Connections expected in scope:
+#   - github_mcp   (MCP — fetches PR diff + metadata)
+#
+# Skills expected in scope:
+#   - review.code.adversarial
+#   - review.code.final-approval
+
+version: "1.0.0"
+
+workflows:
+  pr_review:
+    description: >
+      Adversarial PR review. A critique agent reads the diff and emits a
+      structured verdict; a human signs off (or rejects with a question)
+      before the workflow completes.
+    tags: [review, pr, github, governed]
+    version: "2026-05-25"
+    initialState: intake
+    # SPEC §29.3 (v0.4): the critique agent can ask the human reviewer
+    # mid-review for clarification on intent before submitting its
+    # verdict. Cap of 2 per state-visit prevents spam.
+    enable_human_ask: true
+    human_ask_cap: 2
+    skills:
+      - review.code.adversarial
+      - review.code.final-approval
+    blackboard:
+      prDiff:         { type: object }
+      prMetadata:     { type: object }
+      critique:       { type: object }
+      verdict:        { type: string }
+
+    states:
+      intake:
+        goal: Fetch the PR diff and metadata
+        transitions:
+          fetch_pr:
+            target: critiquing
+            inputSchema:
+              type: object
+              required: [repo, prNumber]
+              properties:
+                repo:     { type: string }
+                prNumber: { type: integer }
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: github_mcp
+              tool: get_pull_request
+            output:
+              prDiff:     "$.output.diff"
+              prMetadata: "$.output.metadata"
+
+      critiquing:
+        delegate: critique-agent
+        goal: Adversarial review of the diff
+        skills:
+          - review.code.adversarial
+        transitions:
+          submit_critique:
+            target: human_review
+            inputSchema:
+              type: object
+              required: [verdict, critique]
+              properties:
+                verdict:  { type: string, enum: [accept, retry, escalate] }
+                critique: { type: object }
+            executor: { kind: noop }
+            output:
+              verdict:  "$.arguments.verdict"
+              critique: "$.arguments.critique"
+
+      human_review:
+        goal: Final human sign-off on the agent's critique
+        actor: human
+        skills:
+          - review.code.final-approval
+        transitions:
+          approve:
+            target: approved
+            executor: { kind: human }
+          reject:
+            target: rejected
+            executor: { kind: human }
+
+      approved:
+        terminal: true
+
+      rejected:
+        terminal: true

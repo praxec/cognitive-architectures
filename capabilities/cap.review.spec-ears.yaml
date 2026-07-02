@@ -1,0 +1,56 @@
+# capabilities/cap.review.spec-ears.yaml
+#
+# EARS testability gate. Cognitive cap: the agent driving the gateway sees the
+# `review.spec.ears-testability` skill, validates the spec against INCOSE
+# criteria, and refines it toward atomic EARS behavioral statements. VALIDATION
+# ONLY — no tests are generated here (tests are generated later at build time).
+# Emits a typed status + defects + clarifications + EARS so a flow can branch:
+# blocked -> human clarification, validated -> proceed. Slots into the elicit
+# phase alongside cap.plan.elicit-spec / cap.verify.spec-readiness.
+
+workflows:
+  cap.review.spec-ears:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Validate a spec against INCOSE quality criteria and refine it toward
+      atomic, falsifiable EARS behavioral statements (no test generation);
+      emit a typed status (validated|blocked) + defects + clarifications + EARS
+      so a flow can branch.
+    snippet:
+      inputs:
+        spec: { type: string, required: true }
+      outputs:
+        status:         { type: string, enum: [validated, blocked] }
+        defects:        { type: array }
+        clarifications: { type: array }
+        ears:           { type: array }
+    skills: [review.spec.ears-testability]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Validate the spec against INCOSE criteria; on any blocker set
+          status=blocked and emit defects + clarifications with no EARS;
+          otherwise refine each behavior into atomic EARS statements
+          (positive + negative, with real preconditions and boundaries) and
+          emit status=validated. Do NOT generate tests.
+        transitions:
+          submit_validation:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [status]
+              properties:
+                status:         { type: string, enum: [validated, blocked] }
+                defects:        { type: array, default: [] }
+                clarifications: { type: array, default: [] }
+                ears:           { type: array, default: [] }
+            executor: { kind: noop }
+            output:
+              status:         "$.arguments.status"
+              defects:        "$.arguments.defects"
+              clarifications: "$.arguments.clarifications"
+              ears:           "$.arguments.ears"
+      done: { terminal: true }

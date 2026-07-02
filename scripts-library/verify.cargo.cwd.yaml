@@ -1,0 +1,36 @@
+# scripts-library/verify.cargo.cwd.yaml
+#
+# Package-SCOPED soft cargo verify for driving a fix into ONE member of a large
+# workspace. Identical contract to verify.cargo.soft ({passed, issues, summary},
+# always exit 0) but scoped to the package in the working directory — it drops
+# `--workspace` / `--all`, so cargo (run from a member's directory) builds, lints,
+# and tests ONLY that package, not the whole workspace.
+#
+# Why: verify.cargo.soft's `--workspace -D warnings` fails on ANY warning/test in
+# ANY crate of a big multi-product workspace (e.g. frontrails-product), so a
+# build-loop targeting one member could never converge. Point a build-loop's
+# repo_path at the member directory and use THIS verify (see
+# cap.implement.build-loop-pkg).
+version: "1.0.0"
+scripts:
+  verify.cargo.cwd:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: a failing cargo must NOT abort — report as data.
+      # cwd is a workspace MEMBER dir; without --workspace/--all cargo scopes to it.
+      fmt_out=$(cargo fmt -- --check 2>&1);                          fmt_rc=$?
+      clippy_out=$(cargo clippy --lib --bins -- -D warnings 2>&1);   clippy_rc=$?
+      test_out=$(cargo test 2>&1);                                   test_rc=$?
+      log="$fmt_out
+      $clippy_out
+      $test_out"
+      if [ "$fmt_rc" -eq 0 ] && [ "$clippy_rc" -eq 0 ] && [ "$test_rc" -eq 0 ]; then
+        passed=true; else passed=false; fi
+      issues=$(printf '%s\n' "$log" \
+        | grep -nE 'error(\[|:)|^[[:space:]]*warning:|panicked|test result: FAILED|\.\.\. FAILED|cannot find|mismatched types|unresolved import' \
+        | head -300 | jq -Rs . 2>/dev/null || printf '""')
+      summary=$(printf '%s' "$log" | tail -c 2000 | jq -Rs . 2>/dev/null || printf '""')
+      printf '{"passed": %s, "issues": %s, "summary": %s}\n' "$passed" "$issues" "$summary"

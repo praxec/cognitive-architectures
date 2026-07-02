@@ -1,0 +1,110 @@
+# Pattern: converge-until-critic-passes
+#
+# Author proposes → critic reviews → if rejected, author revises;
+# loop until critic approves OR max_iterations hit. Uses SPEC §26
+# `while:` loop semantic for the converge-then-exit pattern.
+#
+# Inspired by the grill-me pattern (see mattpocock/skills):
+# an author + critic pair converges via iterations capped at N.
+
+version: "1.0.0"
+
+workflows:
+  converge_until_critic_passes:
+      description: >
+          Convergence loop: author proposes; critic reviews; loop until
+          critic approves or max_iterations hit. The while: guard on the
+          reviewing state re-routes back to authoring when critic_verdict
+          is "needs_revision".
+      tags: [convergence, critic, while-loop, iteration-cap]
+      version: "2026-05-25"
+      initialState: authoring
+      enable_human_ask: true
+      human_ask_cap: 2
+
+      inputSchema:
+          type: object
+          required: [task]
+          properties:
+              task: { type: string, minLength: 5 }
+
+      blackboard:
+          task: { type: string }
+          draft: { type: object }
+          critic_verdict: { type: string }
+          critic_notes: { type: string }
+          iteration: { type: integer }
+      initialContext:
+          iteration: 0
+
+      states:
+          authoring:
+              delegate: author-agent
+              goal: Produce a draft addressing the task and any prior critic notes.
+              transitions:
+                  submit_draft:
+                      target: reviewing
+                      inputSchema:
+                          type: object
+                          required: [draft]
+                          properties:
+                              draft: { type: object }
+                      executor: { kind: noop }
+                      output:
+                          draft: "$.arguments.draft"
+                          iteration: { add: ["$.context.iteration", 1] }
+
+          reviewing:
+              delegate: critic-agent
+              goal: Adversarially review the draft; verdict = approved | needs_revision.
+              # SPEC §26 — while-guard re-enters reviewing if critic says
+              # needs_revision AND we haven't hit the iteration cap.
+              # Actually simpler: route back to authoring directly via
+              # routing_after_review state below; while: is overkill here.
+              transitions:
+                  submit_critique:
+                      target: routing_after_review
+                      inputSchema:
+                          type: object
+                          required: [verdict]
+                          properties:
+                              verdict:
+                                  {
+                                      type: string,
+                                      enum: [approved, needs_revision],
+                                  }
+                              notes: { type: string }
+                      executor: { kind: noop }
+                      output:
+                          critic_verdict: "$.arguments.verdict"
+                          critic_notes: "$.arguments.notes"
+
+          routing_after_review:
+              goal: Approved → done; needs_revision → back to authoring (capped).
+              transitions:
+                  decide:
+                      target: authoring # default: another iteration
+                      actor: deterministic
+                      executor: { kind: noop }
+                      branches:
+                          - when:
+                                {
+                                    kind: expr,
+                                    expr: "$.context.critic_verdict == 'approved'",
+                                }
+                            target: done
+                          - when:
+                                {
+                                    kind: expr,
+                                    expr: "$.context.iteration >= 5",
+                                }
+                            target: escalated # max iterations hit; human breaks the tie
+                          - when:
+                                {
+                                    kind: expr,
+                                    expr: "$.context.critic_verdict == 'needs_revision'",
+                                }
+                            target: authoring
+
+          done: { terminal: true }
+          escalated: { terminal: true }

@@ -1,0 +1,41 @@
+# capabilities/cap.coordinate.cpm-plan.yaml
+#
+# Coordination cap: submit a drafted task graph to the cpm-planner MCP
+# server and receive the computed plan (critical path, slack,
+# bottlenecks, cohort schedule). V6 maps the `coordinate` verb to a
+# `kind: mcp` executor (the only verb whose primary executor is an MCP
+# call — see cap.coordinate.pr-open). Operators wire the `cpm-planner`
+# connection in their gateway config (reference: connections/cpm-planner.yaml).
+
+workflows:
+  cap.coordinate.cpm-plan:
+    verb: coordinate
+    lifecycle: experimental
+    description: >
+      Submit a task graph to cpm-planner; return the computed schedule
+      (critical path, bottlenecks, parallel cohorts).
+    snippet:
+      inputs:
+        tasks: { type: object, required: true }
+      outputs:
+        schedule: { type: object }
+    initialState: ready
+    states:
+      ready:
+        goal: Submit the task graph to the CPM planner; capture the schedule.
+        transitions:
+          submit:
+            target: done
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.submit
+              # McpExecutor resolves `map:` (NOT `arguments:`) against
+              # $.arguments / $.context / $.workflow.input. The cap input
+              # `tasks` lives in workflow.input, so bind graph from there.
+              map:
+                graph: "$.workflow.input.tasks"
+            output:
+              schedule: "$.output"
+      done: { terminal: true }

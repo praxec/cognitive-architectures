@@ -1,0 +1,62 @@
+# capabilities/cap.coordinate.acquire-cohort.yaml
+#
+# Coordination cap: lease the next READY deliverable from a cpm-planner plan
+# (max_count 1) and return TYPED outputs — `exhausted` (scalar termination
+# signal), the leased deliverable's build `spec` (carried in its plan-graph
+# `metadata`), and its `deliverable_id`.
+#
+# Why a cap (not an inline mcp call in flow.execute-cohorts): a flow's slot
+# table (V13) only recognizes slots written by `inputs:` or by a child
+# workflow's `use.outputs` — NOT by a transition `output:` block. So an inline
+# `kind: mcp` acquire couldn't feed its result into the build-loop's
+# `use.inputs`. Wrapping the acquire in a snippet-typed capability makes its
+# outputs first-class slots the driver can route onward.
+#
+# Requires the `cpm-planner` connection (connections/cpm-planner.yaml).
+
+workflows:
+  cap.coordinate.acquire-cohort:
+    verb: coordinate
+    lifecycle: experimental
+    description: >
+      Lease the next ready deliverable from a cpm-planner plan (max_count 1);
+      return typed {exhausted, spec, deliverable_id}.
+    snippet:
+      inputs:
+        plan_id:   { type: string, required: true }
+        caller_id: { type: string, required: true }
+      outputs:
+        # Scalar termination signal — true when nothing is ready (all complete
+        # or blocked), so a state-machine driver can guard on it.
+        exhausted:      { type: boolean }
+        # The leased deliverable's build spec (rides in plan-graph metadata).
+        spec:           { type: object }
+        deliverable_id: { type: string }
+    # max_count is fixed at 1 (one ready deliverable per acquire); bound by path
+    # in the mcp map (which is not slot-table-checked).
+    initialContext:
+      one: 1
+    initialState: ready
+    states:
+      ready:
+        goal: Acquire the next ready deliverable from cpm-planner.
+        transitions:
+          acquire:
+            target: done
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.acquire_cohort
+              map:
+                plan_id:   "$.workflow.input.plan_id"
+                caller_id: "$.workflow.input.caller_id"
+                max_count: "$.context.one"
+            output:
+              exhausted:      "$.output.exhausted"
+              # Flat cohort wire shape: deliverables[0].metadata is the spec.
+              # When exhausted these coalesce to null (unused downstream).
+              spec:           "$.output.deliverables.0.metadata"
+              deliverable_id: "$.output.deliverables.0.id"
+      done:
+        terminal: true

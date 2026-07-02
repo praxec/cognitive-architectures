@@ -1,0 +1,52 @@
+# skills/refactor.poka-yoke.yaml
+#
+# The error-proofing lens for the FMECA convergence loop
+# (flow.harden.fmeca-converge). Poka-yoke (Shingo): don't ask people to be
+# careful — make the failure mode IMPOSSIBLE (or self-evident) by design. Used
+# by cap.refactor.mitigate-risks to turn a residual failure mode into a structural
+# change to the artifact, not a warning label.
+
+skills:
+  refactor.poka-yoke:
+    verb: refactor
+    lifecycle: stable
+    source: cognitive-architectures
+    body: |
+      # Poka-yoke: design the failure out, don't warn about it
+
+      You are mitigating a residual failure mode found by the FMECA. The weakest
+      mitigation is "tell the user to be careful" or "add a note". The strongest
+      — poka-yoke — changes the design so the failure mode **cannot occur**, or
+      becomes **impossible to miss**.
+
+      For each failure mode, prefer mitigations in this order:
+
+      1. **Elimination** — remove the feature/path that carries the risk. The
+         safest control is the one that isn't needed.
+      2. **Prevention (mistake-proofing)** — make the bad state unreachable:
+         a type that can't represent it, a control that's disabled until its
+         precondition holds, a default that is the safe choice, a required field
+         the flow can't advance without.
+      3. **Detection at the source** — if it can still occur, make it
+         self-evident the instant it does: an explicit state the UI must render
+         (loading, empty, partial, error, stale), an error boundary that
+         degrades one part without blanking the whole, a redundant signal so no
+         single channel (e.g. color alone) carries meaning.
+
+      ## For UI/design artifacts specifically
+
+      - Every async action has an explicit loading + disabled state — you cannot
+        double-submit or stare at a dead control.
+      - Every data surface has designed empty / partial / error states — a
+        missing or malformed value renders a legible fallback, never a blank or
+        a crash (an error boundary scopes the blast radius).
+      - No meaning rides on a single perceptual channel: pair color with text or
+        icon; pair motion with a persistent state change.
+      - Estimated / simulated / stale values are badged at the value, so they can
+        never be read as confirmed/live.
+
+      ## Output discipline
+
+      Apply the change to the artifact itself. For each failure mode you address,
+      state which poka-yoke level you used and why a weaker one wouldn't hold.
+      Do not invent new scope to "fix" a risk — eliminate or constrain first.

@@ -1,0 +1,22 @@
+# connections/elicitation.yaml
+#
+# REFERENCE connection (operators copy into their gateway config). MCP
+# connection to elicitation — the deterministic, offline structured-
+# discovery interview engine (claims are hypotheses; standing is computed;
+# readiness is a checkable gate). Closes the dogfood recursion: the tool the
+# greenfield SDLC built becomes the deterministic backend of the elicit phase.
+#
+# Install: `cargo install --path crates/elicitation` (from the
+# elicitation repo); binary `elicitation`, MCP/stdio.
+# Tools (six, command/query split): session.open, append, state.get,
+#        question.next, readiness.assess, spec.export.
+
+connections:
+  elicitation:
+    kind: mcp
+    command: elicitation
+    description: >
+      Deterministic structured-discovery interview engine. Backs the elicit
+      phase: open a session, append caller-extracted claims/evidence/
+      remediations, and gate planning on a computed readiness assessment
+      (coverage withstood + no high contradiction + acceptance met).
