@@ -10,6 +10,21 @@ own governed agent systems.
 
 ---
 
+## Get up and running
+
+One command provisions this pack **and its MCP tools** (cpm-planner, fmeca,
+elicitation, scientific-process), sets up your provider keys, and leaves you ready to
+serve — assuming the [`praxec`](https://github.com/praxec/praxec) gateway is installed
+(`cargo install praxec`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/praxec/packs/main/setup.sh | bash -s -- cognitive-architectures
+```
+
+Or wire it manually: point your gateway config at this repo —
+`repos: [{ path: /path/to/cognitive-architectures }]` — and every definition loads under
+the `cognitive/` namespace.
+
 ## The Thesis
 
 > A cheap or open-weight model, directed by a precise cognitive
