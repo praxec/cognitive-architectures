@@ -7,13 +7,16 @@
 > frontier model *reaches for it* rather than reasoning unaided — the repo's core
 > thesis, instantiated for polyglot work.
 
-**Revision note (v2).** Revised after a Fable adversarial FMECA/poka-yoke/TRIZ
-vetting pass whose engine claims were re-verified against the praxec source
-(`/home/mc/working/mcp-flowgate`, file:line cited inline). The headline change:
-§2 was grounded on constraint **V11 (no nested flows), which the engine has
-RELAXED** — so this version re-grounds the mechanism on the *actual* engine. Two
-gates remain open by explicit request (§11): a **repo-priority/precedence**
-mechanism, and a **full HOP-schema vetting before any code is written**.
+**Revision note (v3).** v2 re-grounded on the relaxed **V11** (flows may nest
+flows). v3 converges the enforcement seam: a slot is a **first-class declared
+primitive** (`hop_slot:`, §2.3) whose typed **input and output** contracts the
+engine *injects at load* and validates on existing per-transition seams — so an
+LLM (or an LLM-authored flow) **cannot bypass** a HOP contract. It also adds the
+**load-time validity layer** ("workflow typechecker", §4.4) and a **sequenced
+parallel fan-out/fan-in extension** (§7.1). All engine claims re-verified against
+`/home/mc/working/mcp-flowgate` (file:line inline). The HOP typed-core schema set
+is designed and vetted in the companion **Spec A.1** (`spec-hop-schema.md`) —
+clearing the §11 gate; **repo-priority/precedence** (§5.6) remains open.
 
 This is **Spec A of a family of four**. Three subsystems it names but does not
 design are carried separately:
@@ -37,21 +40,26 @@ Spec B's public API (contract precedes tool); Spec D authors against A/B.
 The design goal is **maximum in configuration, minimum in core code** — but "core"
 is not empty. The line:
 
-> **Core holds the stable typed contracts.** The HOP (hand-off point) typed core,
-> the slot I/O types, the `SchemaBound` primitive, the tri-state gate enum, the
-> `Severity` enum. Compile-time, ships with the binary, extends `praxec-schema`
-> (which already uses typify). This is the *only* core codebase change the design
-> requires, and it is small and stable — a bounded contract surface, not content.
+> **Core holds the stable, un-forkable contract bytes.** The HOP (hand-off point)
+> vocabulary — the slot `In`/`Out` schemas, `SchemaBound`, the tri-state
+> `GateStatus`, the `Severity` enum — shipped in the binary as a canonical
+> `hop.schema.json` and **enforced at runtime by jsonschema validation** on every
+> transition (Spec A.1). This is the *only* core codebase change the design
+> requires: a bounded, stable schema surface plus the load-time injector/validator
+> that wires it in — not content.
 >
 > **Config holds all the variability.** Stack packs, `detect` rulesets, idiom
 > lenses, codegen scripts, dispatch flows, stack profiles, severity retunes.
 > Everything that *varies per stack* is a pack/config concern with no core code.
 
-Why the typed core *cannot* be config: the spine branches only on typed core
-fields (§4.2); typify is build-time while packs load at runtime; and the
-guarantee that a malformed handoff can't cross a transition is a compile-time
-property config can't provide. "Minimal core" means the core *is the contract*,
-not the content.
+Why the vocabulary *must* be core: it is the **interop contract** the generic
+spine depends on across *every* pack — anchoring it in the binary makes it
+un-forkable (a pack cannot diverge it) and single-sourced. The enforcement is
+**runtime** jsonschema validation against those shipped bytes, **not** a
+compile-time property (Rust types generated from the schema have zero runtime
+consumers today and are deferred — the guarantee comes from validation, not
+types; Spec A.1 §8). "Minimal core" means the core *is the contract*, not the
+content.
 
 ---
 
@@ -113,33 +121,57 @@ recursion is bounded: `MAX_WORKFLOW_DEPTH = 10`
 flows may invoke other workflows."* So anything that dispatches to a sub-workflow
 must be a **flow**, not a capability. Simple leaf work stays a capability.
 
-### 2.3 Slot resolution mechanism (was "open"; now resolved)
+### 2.3 The `hop_slot` primitive + resolution (the enforcement seam)
 
-Both mechanisms the v1 draft proposed are **refuted by the live engine**:
-- **Dynamic `definitionId`** (`cap.verify.${stack.profile}`) — dead. V22 requires
-  every `kind: workflow` ref to statically resolve at load
-  (`config.rs:2450`, `UNRESOLVED_WORKFLOW_REF`), and the executor reads
-  `definitionId` raw with no template rendering (`workflow.rs:142`).
-- **Dispatch *capability*** — dead, by V10 (§2.2).
+A slot is a **first-class declared transition marker** — the keyword **`hop_slot:
+<name>`** (NOT `slots:`, which is already taken for state-scoped blackboard-slot
+declarations, `runtime_chain.rs:1172` — the naming collision is deliberate to call
+out). Declaring `hop_slot: verify` makes the engine, at **load time**:
 
-**The engine-true mechanisms (all config, no forced core change):**
+1. **Inject** the canonical `verifyIn` as the transition's `inputSchema` and the
+   canonical `verifyOut` as the `$.context.verify` blackboard-slot schema (Spec
+   A.1). The author cannot supply, omit, or diverge the contract — the engine
+   owns it.
+2. **Resolve** the marker to the concrete `cap.verify.<stack>` (mechanisms below).
+
+Both I/O checks then ride **existing per-transition seams** — the engine already
+validates input (`validate_schema(transition.inputSchema)`, `runtime_submit.rs:749`,
+→ `INPUT_SCHEMA_VIOLATION`) and output against typed blackboard slots
+(`validate_blackboard_writes`, `runtime_records.rs:47`, **kind-agnostic, all five
+write paths**). So a raw `kind: agent` writing `{status:"pass"}` into a typed slot
+is **already rejected at runtime** before the transition advances. The *new* engine
+work is a load-time injector (precedent: `synthesize_input_schema` `config.rs:425`,
+`expand_use_bindings` `config.rs:480`) plus one doctor rule — not new runtime
+enforcement.
+
+**Why this and not a convention + detect-heuristic:** slot-ness is *declared*, so
+there is no implicit "did this transition secretly write a slot key?" to detect
+and no hole to sneak through. The contract is *engine-injected*, so a mismatched
+or absent schema is unrepresentable. This is an **allowlist** (the engine owns the
+contract) not a **denylist** (which hunts bypass shapes and is only as complete as
+its enumeration — a scoping pass found a 5th hole a denylist misses: operator-form
+writes). This is the poka-yoke answer to "an LLM can't bypass it": **reject-at-load
+(a bypassing flow can't load) + runtime validation (already exists).**
+
+**Resolution — how `hop_slot: verify` becomes `cap.verify.<stack>`** (all config,
+no forced core change; both dynamic-`definitionId` and dispatch-*capability* were
+refuted by V22/V10, §2.2):
 1. **Additive layering + host override (single-stack / explicit — the common
    case).** Repos deep-merge, later-wins, arrays concatenate (`config.rs:7`,
    `:191-198`); each repo is uniquely namespaced (V20, `:2209`). Dropping a stack
    pack into `repos:` **unions its namespaced definitions in** — genuinely
-   additive, no central edit. The host may shadow a generic slot with the stack's
-   binding via an explicit `overrides:` entry (V23, `:2227-2256`). **Host-config
-   only.**
+   additive, no central edit. The host may shadow a generic slot binding via an
+   explicit `overrides:` entry (V23, `:2227-2256`). **Host-config only.**
 2. **Per-slot dispatch *flow* (polyglot / per-deliverable runtime selection).** A
    flow (legal post-§2.1) branches on the stack descriptor to literal per-stack
-   targets, with an **unguarded generic default** (which also makes it
-   warning-clean, matching the real doctor rule at `validate.rs:367`). It is a
-   **YAML flow in a pack — config, not core.** Adding a stack costs one config
-   edit to this flow.
+   targets, with an **unguarded generic default** (warning-clean, matching the
+   doctor rule at `validate.rs:367`). Config, not core.
 3. **Optional future engine feature:** template-resolved `definitionId` against a
-   load-time-declared candidate set (preserving V22's closed world) → makes even
-   (2) zero-touch. **Polish, never required.** Do not build first; the dispatch
-   flows carry an explicit deletion plan if it lands.
+   load-time-declared candidate set (preserving V22's closed world) → zero-touch
+   stack addition. **Polish, never required.**
+
+Because the `hop_slot:` marker is the **single anchor** for *both* resolution and
+contract-injection, they cannot drift — one keyword drives both.
 
 ### 2.4 Nesting vs spawning (both available)
 
@@ -156,10 +188,11 @@ Parallel implement units (§7) use spawning; the fix-loops use nesting.
 
 ## 3. The six slots
 
-A **slot** is a stack-resolved unit of work honoring a **typed I/O contract**
-(the HOP, §4). Resolution is by the mechanisms in §2.3. The spine knows only the
-contract, never the innards — so a specialization ranges from a one-line cap to a
-multi-state flow.
+A **slot** is a `hop_slot:`-declared, stack-resolved unit of work whose **typed
+`In`/`Out` contract is engine-injected and enforced** (input on entry, output on
+exit — §2.3, §4). Both the input contract and the output contract are *enforced*,
+not merely documented. The spine knows only the contract, never the innards — so a
+specialization ranges from a one-line cap to a multi-state flow.
 
 | Slot | Kind | Fires | Specializes by |
 |---|---|---|---|
@@ -292,32 +325,33 @@ specializations compose with the language specialization. Mechanics in §5.
 
 ## 4. The HOP (hand-off point) model
 
-Every step-to-step transfer is a **HOP** — a typed handoff contract. Every slot
-`contract out` above *is* a HOP. **The HOP typed core is the one core-codebase
-change (§0); it extends `praxec-schema` (typify).**
-
-> **Gate (§11): the full HOP schema set is vetted before any code is written
-> against it.** This section is the design intent, not the frozen schema.
+Every step transfer is a **HOP** — a typed handoff contract. Every slot `In` and
+`Out` above *is* a HOP. **The HOP vocabulary is the one core-codebase change
+(§0):** a canonical `hop.schema.json` shipped in the binary and enforced at
+runtime (§2.3). The complete schema set — the `In`/`Out` defs, `SchemaBound`,
+`GateStatus`, `Severity`, and the load/runtime validation design — is specified
+and Fable-vetted in the companion **Spec A.1** (`spec-hop-schema.md`), clearing the
+§11 gate. This section is the design intent; A.1 is the frozen schema.
 
 ### 4.1 Nested schema: typed core + `SchemaBound` extension points
 
-One cohesive payload — a compile-time-typed core whose *designated fields* are
-schema-bound extension points mapped deterministically to an inner (config-time)
-schema:
+One cohesive payload — a canonical (schema-defined) core whose *designated fields*
+are schema-bound extension points mapped deterministically to an inner
+(config-time) schema. Shown as a shape (the source of truth is the JSON Schema in
+Spec A.1, enforced at runtime — not a generated Rust type):
 
-```rust
-// Tier-1 core, typify'd from a compile-time schema (ships with the binary)
-struct Finding {
-    file: String,
-    line: u32,
-    rule_id: String,
-    severity: Severity,   // spine branches on this → fully typed
+```
+Finding {
+    file, line,
+    rule_id,
+    severity: Severity,   // producers compute gate status FROM severity; the
+                          // spine never compares severities (§6)
     fix: SchemaBound,     // the ONE extension point in v1 (see scoping below)
 }
 
-struct SchemaBound {
-    schema_ref: SchemaRef,        // names an inner schema in the pack registry
-    value: serde_json::Value,     // validated at runtime against that schema
+SchemaBound {
+    schema_ref,                   // names an inner schema in the pack registry
+    value  (opaque JSON)          // validated at runtime against that schema
 }
 ```
 
@@ -333,19 +367,22 @@ Avoids speculative generality.
 
 ### 4.2 The boundary rule (poka-yoke)
 
-> The core HOP is typed (typify) and declares its extension points explicitly as
-> `SchemaBound` fields. **The spine branches only on typed core fields — never on
-> the inner `value`, never on prose.** Each `SchemaBound` maps deterministically to
-> a pack-registered inner schema, validated at the boundary.
+> The core HOP is schema-defined and declares its extension points explicitly as
+> `SchemaBound` fields. **The spine branches only on canonical core fields — never
+> on the inner `value`, never on prose.** Each `SchemaBound` maps deterministically
+> to a pack-registered inner schema, validated at the boundary.
 >
-> **Metastructure = the typed envelope + declared extension points. Instance = the
-> inner validated value.** One nested payload, both contracts.
+> **Metastructure = the canonical envelope + declared extension points. Instance =
+> the inner validated value.** One nested payload, both contracts.
 
 Runtime validation of pack-authored inner values **extends the existing agent
 conformance loop** (`rig_runner.rs` `final_answer` `expected_keys`/`expected_types`
 + retry-with-feedback) to full `jsonschema` validation — `jsonschema` is already a
-workspace dep. Persistent nonconformance = content `FailureClass` → existing model
-chain-walk escalation (FM7). No parallel abstraction.
+workspace dep. **FailureClass routing (vet-confirmed):** an *agent* producer that
+exhausts retries → `AGENT_NO_RESULT` → `FailureClass::Capability`, which
+**escalates** up the model chain-walk (FM7). A *deterministic* producer's schema
+violation → `ExecutorError::SchemaViolation` → `FailureClass::ContentOther`, which
+**surfaces** (a pack/tool bug the chain can't repair). No parallel abstraction.
 
 ### 4.3 HOP vs blackboard
 
@@ -357,6 +394,52 @@ chain-walk escalation (FM7). No parallel abstraction.
 **Handoff design pass (implementation section):** classify every step edge —
 typed HOP vs blackboard write — cheap because the slot contracts already define
 the envelopes.
+
+### 4.4 Chaining semantics — mappings, not schema identity
+
+Chaining step A → step B does **not** require A's `Out` schema to *be* B's `In`
+schema. They are **independent contracts joined by a mapping**:
+
+- A writes its `<A>Out` to `$.context.<A>`, validated on exit.
+- The flow **maps** a slice of context into B's `arguments`.
+- B's `arguments` are validated against **B's own `<B>In`** on entry.
+
+This is what makes composition powerful — **fan-in** (B draws from several upstream
+outputs + the blackboard), **fan-out** (A feeds several consumers), and
+**transformation** (`implement.changed[]` → `verify.file_set` for `changed_only`).
+Forcing `A.out == B.in` would make every step rigidly single-source. Soundness
+holds because **both ends are validated** (off-shape input fails fast at B's entry,
+whoever supplied it — human, LLM, or mapping). What schema validation *cannot*
+catch is a shape-valid *wrong-field* mapping — that is a semantic/authoring concern
+(§4.5 boundary).
+
+### 4.5 The load-time validity layer (the "workflow typechecker")
+
+Because slots are first-class and their `In`/`Out` are engine-known, the engine
+proves at **load** everything structurally provable, turning whole classes of
+runtime failure into failures a flow **cannot even load with** — especially
+valuable for **LLM-authored flows** (Spec D):
+
+- **Composition soundness** — every required `<B>In` field is satisfiable from some
+  upstream `<Out>` or a declared source ⇒ a mis-wired chain won't load.
+- **Typed-mapping compatibility** — a mapping feeding a string into an
+  integer-typed field is a load error, not a runtime surprise.
+- **Slot-contract conformance** — a `hop_slot: X` resolves to a cap whose I/O
+  matches canonical `<X>In`/`<X>Out`.
+- **Resolution coverage** — every stack a flow claims has a registered cap or a
+  generic default (no dead branch → warning-clean).
+- **Existing poka-yokes** — `schema_ref`s resolve (V24, A.1); gate guards compare
+  `== "pass"`; every deterministic branch has a default.
+
+> **Principle: prove at load everything structurally provable; runtime fail-fast
+> everything else; nothing silent.**
+
+**Honest boundary:** load-time checks prove **structural** validity (shapes present,
+refs resolve, mappings compatible, chains satisfiable). They **cannot** prove
+**semantic** correctness (a shape-valid mapping of the *wrong* field) or **runtime
+behavior** (whether the verify command actually exercises the code). Those fall to
+runtime fail-fast + review. This is the compiler's "it typechecks" vs "it's
+correct" line.
 
 ---
 
@@ -448,11 +531,13 @@ merge/override logic or stays pure config.
 ### Observability additions (from vetting)
 
 The engine's transition records + audit events already trace per-step. This design
-adds exactly three: **`STACK_RESOLVED`** provenance events (§5.4), the **tri-state
-gate status surfaced in mission outcomes** (so `not_evaluated` gates are countable
-per run), and **loop round/finding-count telemetry** (breaker-exhaustion rate).
-Premature completion is structurally caught by the outcomes/`met` wiring `verify`
-targets; policy regressions are load-loud via contract-hash pinning (V15/V16).
+adds: **`STACK_RESOLVED`** provenance events (§5.4); **gate-status counting** (so
+`not_evaluated` gates are countable per run — A.1 defers a dedicated `hopRecord`
+and derives counts from the existing `blackboardDelta`; the "mission outcomes"
+vehicle is a §11 reconciliation); and **loop round/finding-count telemetry**
+(breaker-exhaustion rate). Premature completion is structurally caught by the
+outcomes/`met` wiring `verify` targets; policy regressions are load-loud via
+contract-hash pinning (V15/V16).
 
 ---
 
@@ -471,6 +556,38 @@ many small units, run **parallel (disjoint file-sets, via spawning §2.4) or cha
 Ties three threads: commodity granularity, critical-path/file-set-ownership
 orchestration, and Spec C worktrees (parallel units → true isolation). The
 **CPM ↔ spine HOP shape** is an open question (§11).
+
+### 7.1 Parallel fan-out/fan-in — a SEQUENCED EXTENSION of D (after the sequential core is proven)
+
+Work parallelization (map-reduce) is high value **provided it governs the
+fan-out/fan-in boundaries with the same typed contracts** — it must **not**
+re-implement scheduling. The engine already has the mechanisms:
+
+- **`kind: parallel`** — a registered executor (`praxec-executors/src/lib.rs:64`)
+  for static, bounded in-flow fan-out.
+- **`cpm-planner`** — the dependency-aware, lock-safe **cohort scheduler**
+  (`flow.execute-cohorts.yaml`; `plan.acquire_cohort`/`plan.mark_status`; per-unit
+  build spec in `deliverable.metadata`; N drivers with distinct `caller_id`s kept
+  **file-disjoint** by its locks). This is the workhorse for dynamic parallelism.
+- **Spawning** — mission-level parallelism (§2.4).
+
+The extension **types the boundaries**, riding those mechanisms underneath:
+- **Map boundary:** each item handed to a parallel worker is validated against the
+  worker's `<slot>In`.
+- **Reduce / fan-in boundary:** the gather step's input is a typed collection of
+  the workers' `<slot>Out`, with a composition check (§4.5) proving *the reduce
+  consumes what the map produces*.
+
+**Not a new scheduler** — re-implementing dependency scheduling in the workflow
+language is the over-engineering signal; `cpm-planner` already is that, and better.
+Reduce is **graph-modeled** today (a dependent deliverable / the `exhausted`
+flag); the extension governs the *boundaries*, not the schedule.
+
+**Sequencing:** prove the **sequential** slot loop + HOP contracts first (one unit,
+typed and unbypassable), *then* generalize the boundary contracts to parallel
+edges. Note `flow.execute-cohorts.yaml` carries a **stale-V11 comment** (flow→flow
+"illegal") to de-stale; V11-relaxation now also permits spawning cohorts as
+sub-flows rather than N externally-launched drivers.
 
 ---
 
@@ -554,23 +671,27 @@ known gaps are prerequisites on our own build path (from the change-request raft
   layering + dispatch flow (§2.3).
 - ~~Capability-loop expressiveness~~ → dissolved; loops are reusable flows (§2.1).
 
-**Still open:**
-1. **Runtime `jsonschema` validation of `SchemaBound` values** — extend the
-   `final_answer` conformance loop (Adapted; deps present, §4.2). Confirm the
-   retry/FailureClass wiring covers it.
-2. **CPM ↔ spine HOP shape** — the exact handoff between a cpm-planner unit DAG and
-   the per-unit loop (§7).
+**Resolved by v3:**
+- ~~Full HOP-schema vetting~~ → done in **Spec A.1** (`spec-hop-schema.md`),
+  Fable-vetted; schema set + load/runtime validation design frozen.
+- ~~Slot resolution / bypass enforcement~~ → the first-class `hop_slot` primitive
+  (§2.3): reject-at-load + existing runtime validation.
 
-**Gates (must clear before coding):**
+**Still open:**
+1. **CPM ↔ spine HOP shape** — the exact handoff between a cpm-planner unit DAG and
+   the per-unit loop (§7); the typed parallel-edge boundaries (§7.1).
+2. **Observability vehicle** — A.1 defers `hopRecord` and recommends deriving
+   `not_evaluated`/gate counts from `blackboardDelta`; reconcile with §6's "mission
+   outcomes" phrasing before wiring.
+
+**Gate (must clear before coding):**
 3. **Repo-priority / precedence (§5.6)** — design the configurable
    company-over-shared-repo override; verify config-only vs small-core.
-4. **Full HOP-schema vetting (§4)** — the complete typed-core schema set is vetted
-   as a unit *before any code is written against it* (explicit requirement — this
-   is the core-codebase change, so it must be right first).
 
 ---
 
-*v2 — revised after Fable adversarial FMECA vetting; engine claims re-verified
-against source. Design + vetting driven with Fable; build runs the normal path.
-Companion specs: B (detector engine), C (worktree lifecycle), D (specialization
-authoring).*
+*v3 — first-class `hop_slot` primitive + load-time validity layer + sequenced
+parallel extension; engine claims re-verified against source; HOP schema set frozen
+in Spec A.1. Design + vetting driven with Fable; build runs the normal path.
+Companion specs: A.1 (HOP schema), B (detector engine), C (worktree lifecycle), D
+(specialization authoring).*
