@@ -7,7 +7,8 @@
 > frontier model *reaches for it* rather than reasoning unaided — the repo's core
 > thesis, instantiated for polyglot work.
 
-**Revision note (v3).** v2 re-grounded on the relaxed **V11** (flows may nest
+**Revision note (v4).** v4 clears the last two gates — repo-priority (§5.6) and
+the observability vehicle (§6). v2 re-grounded on the relaxed **V11** (flows may nest
 flows). v3 converges the enforcement seam: a slot is a **first-class declared
 primitive** (`hop_slot:`, §2.3) whose typed **input and output** contracts the
 engine *injects at load* and validates on existing per-transition seams — so an
@@ -16,7 +17,9 @@ LLM (or an LLM-authored flow) **cannot bypass** a HOP contract. It also adds the
 parallel fan-out/fan-in extension** (§7.1). All engine claims re-verified against
 `/home/mc/working/mcp-flowgate` (file:line inline). The HOP typed-core schema set
 is designed and vetted in the companion **Spec A.1** (`spec-hop-schema.md`) —
-clearing the §11 gate; **repo-priority/precedence** (§5.6) remains open.
+clearing the §11 gate. Both remaining gates are now cleared (v4): **repo-priority**
+(§5.6, explicit `priority:` per repo) and the **observability vehicle** (§6, gate
+status → mission outcomes).
 
 This is **Spec A of a family of four**. Three subsystems it names but does not
 design are carried separately:
@@ -496,17 +499,27 @@ Every deterministic branch ships an **explicit default** (`generic`) — the hon
 floor, and what makes packs ship **warning-clean** (matches the real doctor rule,
 §9 #7). No stack ever hits a dead branch.
 
-### 5.6 OPEN — repo-priority / precedence (gate, §11)
+### 5.6 Repo-priority / precedence (RESOLVED)
 
 Today cross-repo ids are **namespaced** (no collision) and only the **host** may
 override a repo id via explicit `overrides:` (`config.rs:2227-2256`). There is
 **no repo-over-repo priority** — a company repo cannot automatically override a
-shared repo (e.g. `cognitive-architectures`) for the same logical slot. **We need
-a configurable priority/precedence** so a higher-priority repo wins. Likely
-config-expressible (order repos; resolution prefers the higher-priority namespace
-in the dispatch/override), but the mechanism is **unverified and must be designed**
-before relying on it — including whether it needs a small core addition to the
-merge/override logic or stays pure config.
+shared repo (e.g. `cognitive-architectures`) for the same logical slot.
+
+**Decision:** an explicit **numeric `priority:` field on each repo declaration**
+in the `repos:` block. When more than one repo provides a registration for the
+resolved `cap.<slot>.<stack>`, the **highest-priority repo wins**; **equal
+priority + both provide it = a load-time error** (no silent tie-break —
+poka-yoke). Shared/upstream packs (`cognitive-architectures`) default to a low
+priority; a company pack declares a higher one to take precedence without
+hand-listing every `overrides:` entry.
+
+This is a **config-declared field** (`priority:`, variability stays in config)
+plus a **small core addition** to honor it in resolution — distinct from the
+stack-resolution chain (§5.1, which orders *specificity* within a resolution);
+repo-priority orders *which pack's* registration wins. Rejected: declaration-order
+(reordering silently changes behavior) and `overrides:`-only (verbose, doesn't
+scale).
 
 ---
 
@@ -531,17 +544,21 @@ merge/override logic or stays pure config.
 ### Observability additions (from vetting)
 
 The engine's transition records + audit events already trace per-step. This design
-adds: **`STACK_RESOLVED`** provenance events (§5.4); **gate-status counting** (so
-`not_evaluated` gates are countable per run — A.1 defers a dedicated `hopRecord`
-and derives counts from the existing `blackboardDelta`; the "mission outcomes"
-vehicle is a §11 reconciliation); and **loop round/finding-count telemetry**
+adds: **`STACK_RESOLVED`** provenance events (§5.4); **gate status via mission
+outcomes** (RESOLVED — see below); and **loop round/finding-count telemetry**
 (breaker-exhaustion rate). Premature completion is structurally caught by the
 outcomes/`met` wiring `verify` targets; policy regressions are load-loud via
 contract-hash pinning (V15/V16).
 
----
-
-## 7. Implement granularity + CPM scheduling
+**Gate status → mission outcomes (RESOLVED).** Each slot gate's typed status
+binds to a **mission outcome `met`** (the existing outcomes surface,
+`workflow-response.schema.json:60-74`, ADR-0008): `pass` = met; `fail` /
+`not_evaluated` = **not met**, carrying the reason. This ties gate observability
+to the *definition of done* — a `not_evaluated` gate is a first-class "not done"
+signal, reinforcing the never-silently-pass poka-yoke (FM8). It is
+**config-wireable** (a flow declares an outcome bound to `$.context.<slot>.status`)
+with **no new core**. `blackboardDelta` remains the forensic detail; the deferred
+`hopRecord` is **dropped** (A.1 §8).
 
 The `implement` slot operates on **one tight unit**. A deliverable decomposes into
 many small units, run **parallel (disjoint file-sets, via spawning §2.4) or chained
@@ -677,16 +694,18 @@ known gaps are prerequisites on our own build path (from the change-request raft
 - ~~Slot resolution / bypass enforcement~~ → the first-class `hop_slot` primitive
   (§2.3): reject-at-load + existing runtime validation.
 
-**Still open:**
-1. **CPM ↔ spine HOP shape** — the exact handoff between a cpm-planner unit DAG and
-   the per-unit loop (§7); the typed parallel-edge boundaries (§7.1).
-2. **Observability vehicle** — A.1 defers `hopRecord` and recommends deriving
-   `not_evaluated`/gate counts from `blackboardDelta`; reconcile with §6's "mission
-   outcomes" phrasing before wiring.
+**Resolved by v4 (gates cleared):**
+- ~~Observability vehicle~~ → **mission outcomes** (§6): each slot gate's status
+  binds to an outcome `met` (pass = met; fail/`not_evaluated` = not met); config-
+  wireable, no new core; `hopRecord` dropped.
+- ~~Repo-priority / precedence~~ → explicit numeric **`priority:` per repo**
+  (§5.6); highest wins, equal-priority-both-provide = load-time error; config field
+  + small core addition to resolution.
 
-**Gate (must clear before coding):**
-3. **Repo-priority / precedence (§5.6)** — design the configurable
-   company-over-shared-repo override; verify config-only vs small-core.
+**Still open (design, not blocking the sequential core):**
+1. **CPM ↔ spine HOP shape** — the exact handoff between a cpm-planner unit DAG and
+   the per-unit loop (§7); the typed parallel-edge boundaries (§7.1). Belongs with
+   the parallel extension, sequenced after the sequential slot/HOP core.
 
 ---
 
