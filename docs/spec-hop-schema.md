@@ -1,214 +1,136 @@
 # Spec A.1 — The HOP Typed-Core Schema Set
 
 > The concrete design of the **one core-codebase change** Spec A allows
-> (`docs/spec-stack-aware-specialization.md` §0, §4): the HOP (hand-off point)
-> typed core in `praxec-schema`, the `SchemaBound` primitive scoped to the one
-> real extension point (`fix` on a detect `Finding`), the tri-state `GateStatus`
-> enum, the shared `Severity` enum, and the five slot contract-outs of §3.
-> This document clears §11 gate 4 ("full HOP-schema vetting before any code is
-> written"). Every engine claim below was verified firsthand against
-> `/home/mc/working/mcp-flowgate` (file:line cited); two claims were verified
-> **empirically** by running the proposed schema through the real typify
-> pipeline (§1.2).
+> (`docs/spec-stack-aware-specialization.md` §0, §2.3, §4): the canonical HOP
+> (hand-off point) vocabulary shipped as a standalone `schemas/hop.schema.json`,
+> the `hop_slot:` first-class primitive that injects and enforces it, the
+> `SchemaBound` extension point scoped to the one real use (`fix` on a `finding`),
+> the tri-state `GateStatus`, the shared `Severity`, and a typed `In`/`Out`
+> contract for each of the five specialization slots. This document clears the
+> parent §11 gate ("full HOP-schema vetting before any code is written"). Every
+> engine claim is verified firsthand against `/home/mc/working/mcp-flowgate`
+> (file:line inline).
 
 Status: **design, pre-implementation.** Companion to Spec A (parent), Spec B
 (detect producer), Spec C (worktrees), Spec D (authoring).
 
 ---
 
-## Revision note (v2) — converged design + Fable-vet punch-list
+## 0. The shape of the design in one paragraph
 
-v1 (below) is grounded and correct but predates two decisions. Where the body
-conflicts, **this note wins**; the body is retained for its verified grounding.
-
-1. **First-class `hop_slot` primitive (supersedes "convention + detect-heuristic").**
-   A slot is a declared transition marker; at load the engine **injects** the
-   canonical `<slot>In` as the transition `inputSchema` and `<slot>Out` as the
-   `$.context.<slot>` blackboard-slot schema, then resolves `cap.<slot>.<stack>`.
-   Enforcement rides seams that already run per-transition: input
-   `validate_schema(transition.inputSchema)` (`runtime_submit.rs:749`), output
-   `validate_blackboard_writes` (`runtime_records.rs:47`, **kind-agnostic, all 5
-   write paths** — a raw `kind:agent` `{status:"pass"}` write is already rejected).
-   The slot table is V13. So "unbypassable" is **reject-at-load + already-existing
-   runtime validation**, not a new heuristic. The FM-7/FM-9/FM-13 bypass class
-   largely evaporates (slot-ness declared, contract engine-owned); the §5 lints
-   remain only as defense for non-slot writes.
-
-2. **Vocabulary lives in a STANDALONE `hop.schema.json`, NOT wired into typify /
-   `build.rs`.** Because `hopRecord` and typify Rust types are **deferred** (item 3),
-   there is no typed `TransitionRecord.hop` field, so the E1 cross-file-`$ref`
-   panic **is sidestepped entirely** — it constrained only typify *type generation*,
-   which we no longer do. The file is shipped as bytes (`include_str!` **in
-   praxec-core directly**, avoiding a new praxec-core→praxec-schema dep edge) and
-   enforced at **runtime** via the jsonschema registry. The core value is
-   **un-forkable contract bytes + runtime validation**, not compile-time safety
-   (vet-confirmed: typify types have zero runtime consumers).
-
-3. **Add `<slot>In` defs** — the v1 set has only `*Out`. The frozen set adds
-   `verifyIn`/`detectIn`/`scaffoldIn`/`implementIn`/`lintFormatIn` (matching parent
-   §3 `In:` lines), making **input** contracts real and enforced. **Defer**
-   `hopRecord` and typify types to "when a consumer exists"; derive
-   `not_evaluated`/gate counts from the existing `blackboardDelta` (reconcile the
-   "mission outcomes" vehicle with parent §6 — flagged like the §7.6 FailureClass
-   note).
-
-4. **Vet punch-list applied:** §4.5 delete the agent-schema **bundler**
-   (praxec-agents already deps praxec-core:18 — reuse `compile_validator`) and fix
-   the source to the child cap's own `/snippet/outputs`; §4.2 add **step 2b**
-   (compile all `snippet.outputs` fragments registry-aware at load, FM-3) +
-   **canonical-spelling** enforcement (`praxec://hop#/$defs/<def>` only — the `$id`
-   URL spelling also resolves and would evade L2, FM-2); §4.3 **force
-   `HOP_REGISTRY` init at serve startup + unit test** (FM-1); §4.4 replace the
-   `SCHEMA_BOUND_PATHS` path-DSL with a **hardcoded walk of `findings[].fix`**,
-   match designation on the canonical `$ref` fragment tail (inline-copy evasion =
-   accepted residual, FM-9); **drop `hopRecord.schema_refs`** (kills cross-crate
-   `ExecuteResult` plumbing, duplicates `blackboardDelta`, FM-10); E1b (shared
-   bare-name def keyspace across typify inputs) is a **future guard** only — moot
-   while the file is standalone. Path nit: `runtime_schema.rs` →
-   `runtime/runtime_schema.rs`.
-
-5. **Load-time validity layer** (mirrors parent §4.5): composition soundness,
-   typed-mapping compatibility, resolution coverage, slot-contract conformance —
-   proving **structural** validity at load; the honest boundary is that semantic
-   correctness and runtime behavior fall to runtime fail-fast.
-
-6. **Minimality (three buckets):** *strictly required* = registry-aware
-   `compile_validator` + `SchemaBound` (V24 + L2) + the `gateway-config` `schemas:`
-   property; *core-vs-config choice* = the vocabulary bytes → **core-anchor for
-   un-forkability**; *optional/deferred* = typify types, `hopRecord`.
-
-7. **Parallel edges** — the fan-out/fan-in typed-boundary extension is defined in
-   parent §7.1 (a sequenced extension over `kind: parallel`/`cpm-planner`, not a
-   new scheduler); the same `In`/`Out` contracts type its map/reduce boundaries.
+The HOP vocabulary is **one canonical JSON Schema file** — `schemas/hop.schema.json`
+— shipped in the binary and **enforced at runtime by jsonschema validation**, not
+by generated Rust types. A slot is a **first-class declared marker** (`hop_slot:`)
+on a transition; at load the engine **injects** that slot's canonical `In` schema
+as the transition's `inputSchema` and its canonical `Out` schema as the
+`$.context.<slot>` blackboard-slot schema, then resolves the concrete
+`cap.<slot>.<stack>`. Both contracts are then enforced by **per-transition seams
+that already exist** — so an LLM (or an LLM-authored flow) cannot produce or
+consume a slot HOP that dodges its contract. The only core codebase change is the
+one schema file plus the load-time injector/validator that wires it in; every
+per-stack variability lives in config.
 
 ---
 
-## 1. Engine grounding — the seams this design extends
+## 1. Engine grounding — the seams this design rides
 
-### 1.1 Verified seams (file:line)
+All claims verified firsthand against `/home/mc/working/mcp-flowgate`.
 
-| Seam | Where | What it establishes |
+### 1.1 Enforcement already exists per-transition (the key facts)
+
+| Seam | Where | What it gives us |
 |---|---|---|
-| Source-of-truth schemas | `/home/mc/working/mcp-flowgate/schemas/` — `transition-record.schema.json`, `workflow-response.schema.json`, `gateway-config.schema.json`, `praxec-repo.schema.json` | `transition-record.schema.json:1-47` is a flat object (camelCase fields, `blackboardDelta`, `executor {kind, ok, durationMs}`, no `$defs` yet). `workflow-response.schema.json:81-192` already uses same-file `#/$defs/...` refs and builds today — proof the `$defs` pattern works through the pipeline. |
-| typify build | `crates/praxec-schema/build.rs:13-17` | Fixed input list `["gateway-config.schema.json", "transition-record.schema.json", "workflow-response.schema.json"]`; each file goes through `add_root_schema` (`build.rs:22-33`) into one `TypeSpace`, emitted as `$OUT_DIR/types.rs`. |
-| Typed-view exposure | `crates/praxec-schema/src/lib.rs:1-16` | "The runtime in `praxec-core` operates on `serde_json::Value` for flexibility; these types are convenience for callers that want them." The HOP types follow the same stance. |
-| Workspace deps | `/home/mc/working/mcp-flowgate/Cargo.toml:49` `jsonschema = "0.46"`, `:71` `typify = "0.6"`, `:74` `schemars = "0.8"` | No new dependencies needed. |
-| Cap-output projection | `crates/praxec-core/src/use_binding.rs` — `resolve_use_inputs:68`, `project_use_outputs:117`, `validate_outputs_against_snippet:153` (jsonschema compile at `:183`), `SchemaViolation:49` | The **existing runtime jsonschema seam**: a capability's declared `snippet.outputs` fragments are validated against the projected output values, all violations collected, audit-ready. |
-| Load-time `use:` expansion | `crates/praxec-core/src/config.rs:406-414` (pass 7-sexies), `expand_use_bindings:480`, `_snippetOutputs` embed at `:578` | Snippet output schemas are resolved at **config load** and embedded on the executor config, "so the runtime executor has the schema in hand without doing a DefinitionStore lookup" (`config.rs:460-464`). |
-| Executor I/O | `crates/praxec-executors/src/workflow.rs:141-148` (`executor_config` is a `serde_json::Value`; `definitionId` read raw), `:176-184` (`use` block + `_snippetOutputs` read), `:445-451` (envelope validation call), `:483-492` (`ExecutorError::SchemaViolation` fail-fast with joined per-slot reasons) | The exact call site the SchemaBound inner validation extends. |
-| Context write path | `crates/praxec-core/src/mapping.rs:18` `merge_output` (call sites `runtime_submit.rs:939, 1076, 1183`), `read_in_scopes:215` | How a slot's output lands at `$.context.<key>`. |
-| HOP transience mechanic | `crates/praxec-core/src/runtime/runtime_chain.rs:1143-1200` `clear_state_local_slots_on_exit` — `slots: {<name>: {scope: state}}` context keys are auto-cleared on state exit, with a `workflow.slot.cleared` audit event | The HOP-vs-blackboard lifecycle split (§4.3 of Spec A) is **already mechanized**; no core change needed for it. |
-| Agent conformance loop | `crates/praxec-agents/src/rig_runner.rs` — `conforms:173` (keys + declared types), `final_answer` boundary check `:512-517`, retry-with-feedback `conformance_feedback:223`, text salvage `salvage_result:141` | The seam that runtime `SchemaBound`/HOP validation for **agent** producers extends to full jsonschema. |
-| Conformance config plumbing | `crates/praxec-agents/src/config.rs:63` `expected_output_keys`, `:72` `expected_output_types`; forwarded to the session at `executor.rs:197-198`; **composed at runtime** by auto-drive from the capability's `inputSchema.required` (`runtime_chain.rs:532-540`) into the agent config (`runtime_chain.rs:596-597`) | Where `expected_output_schema` (new) slots in beside the two existing fields. |
-| Escalation wiring | `crates/praxec-core/src/model_resolver/classify.rs:19-42` (`FailureClass`, closed enum), `from_executor_error:106-126` — `AGENT_NO_RESULT`/`AGENT_RESULT_FAILED` → `Capability`; **`SchemaViolation` → `ContentOther` (surfaces)**; `is_infrastructure:48-60` (Capability escalates); chain-walk `walk.rs:164` / `try_next:216`; classified in the agent executor at `executor.rs:318`; NoResult→Capability→escalate proven by tests `executor.rs:664-711` | Persistent agent nonconformance escalates up the model chain; deterministic-producer schema violations surface. §4.4 relies on this exact split. |
-| V22 closed-world pattern | `config.rs:2452-2476` `validate_workflow_refs_resolve` — walk merged config, `bail!` `UNRESOLVED_WORKFLOW_REF` with a fix-it message | The pattern the load-time `schema_ref` registry check (V24) copies. |
-| V23 override discipline | `config.rs:2227-2256` (`ANONYMOUS_OVERRIDE` / `STALE_OVERRIDE`) | Precedent for loud, explicit config-surface extension. |
-| Transition-record emission | `crates/praxec-core/src/runtime/runtime.rs:958-1075` `emit_transition_record` — record json built at `:1036-1053`; **additive-optional field precedent**: script `subject`/`hash` (`:983-1016`, "Fields are additive + optional"); `blackboardDelta` carries the full per-transition context diff (`:1021-1025`, computed at `runtime_submit.rs:1300`) | Where the `hop` summary attaches, and why the record does **not** duplicate the full payload. |
-| jsonschema registry API | `~/.cargo/.../jsonschema-0.46.10/src/options.rs:297` `with_registry(&referencing::Registry)`; usage `Registry::new().add(uri, json).prepare()` at `options.rs:1157-1174` | How config-authored `$ref`s into the shipped core schema resolve at validation time. |
-| Config surface is closed | `gateway-config.schema.json` and `praxec-repo.schema.json` both declare top-level `additionalProperties: false` (verified by parsing both files) | A new `schemas:` registry block **requires** a one-property extension of `gateway-config.schema.json` (§4.2). |
+| **Output validation, kind-agnostic** | `crates/praxec-core/src/runtime/runtime_records.rs:47` `validate_blackboard_writes` — called on **all five** output-merge paths (`runtime_submit.rs:958`, `:1190-1191`; `runtime_chain.rs:802`, `:878`, `:343`) | Validates a transition's `output:` writes against the typed `blackboard:` slot schema **regardless of executor kind**. A raw `kind:agent` writing `{status:"pass"}` into a typed slot is already rejected `BLACKBOARD_TYPE_ERROR` (`runtime_submit.rs:967`) before the transition advances. This is why "unbypassable at runtime" is *mostly already built*. |
+| Slot predicate constraints | `crates/praxec-core/src/slot/slot_constraint.rs:54` `evaluate_constraints`, called `runtime_submit.rs:984` | Non-JSON-Schema predicates at the same write site (`SLOT_CONSTRAINT_VIOLATED`). |
+| **Input validation, per-transition** | `crates/praxec-core/src/runtime/runtime_submit.rs:749-767` `validate_schema(transition.inputSchema)` + `apply_schema_defaults` | Every submit validates the actor's `arguments` against the transition `inputSchema`, rejecting `INPUT_SCHEMA_VIOLATION`. Input contracts need **no new validation machinery** — only that the transition's `inputSchema` *be* the canonical `<slot>In`. |
+| Injector precedent | `crates/praxec-core/src/config.rs:425` `synthesize_input_schema` (from an `inputs:` block); `:480` `expand_use_bindings` (synthesizes the `output:` mapping, embeds `_snippetOutputs`) | Direct precedent for the load-time move `hop_slot:` makes — synthesize/inject a schema onto a transition at load. |
+| Slot table | V13 (`crates/praxec-core/src/slot/slot_table.rs`) | The typed blackboard-slot table `validate_blackboard_writes` checks against. `hop_slot:` injects the slot's `Out` schema into this table for `$.context.<slot>`. |
+| `slots:` keyword is taken | `crates/praxec-core/src/runtime/runtime_chain.rs:1172` — `states.<name>.slots` are state-scoped blackboard decls (auto-clear) | The specialization marker must use a **distinct keyword**: `hop_slot:` (collision called out deliberately). |
+| Cap-output projection + envelope validation | `crates/praxec-core/src/use_binding.rs` — `project_use_outputs:117`, `validate_outputs_against_snippet:153` (jsonschema compile `:183`), `SchemaViolation:49` | The existing seam that validates a cap's `snippet.outputs` fragments against projected values — made registry-aware (§4.3) so a `$ref` into the shipped `hop.schema.json` resolves. |
+| Load-time `use:` expansion | `config.rs:406-414`, `expand_use_bindings:480`, `_snippetOutputs` embed `:578` | Snippet output schemas resolved at load and embedded on the executor config. |
+| Executor I/O | `crates/praxec-executors/src/workflow.rs:441-492` — envelope validation call `:445-451`, `ExecutorError::SchemaViolation` fail-fast `:483-492` | The call site the `SchemaBound` inner validation extends. |
+| Context write path | `crates/praxec-core/src/mapping.rs:18` `merge_output` (`runtime_submit.rs:939, 1076, 1183`), `read_in_scopes:215` | How a slot's output lands at `$.context.<key>` and how guards read it. |
+| HOP transience mechanic | `runtime_chain.rs:1143-1200` `clear_state_local_slots_on_exit` — `slots:{<name>:{scope:state}}` context keys auto-cleared on state exit (`workflow.slot.cleared` event) | The HOP/blackboard lifecycle split (§6) is **already mechanized**; no core change. |
+| Agent conformance loop | `crates/praxec-agents/src/rig_runner.rs` — `conforms:173` (keys + declared types), `final_answer` boundary `:512-517`, `conformance_feedback:223`, `salvage_result:141` | The seam runtime `SchemaBound`/HOP validation for **agent** producers extends to full jsonschema. praxec-agents already depends on praxec-core (`crates/praxec-agents/Cargo.toml:18`). |
+| Escalation wiring | `crates/praxec-core/src/model_resolver/classify.rs:19-42` (`FailureClass`), `from_executor_error:106-126` — `AGENT_NO_RESULT`/`AGENT_RESULT_FAILED` → `Capability`; `SchemaViolation` → `ContentOther`; `is_infrastructure:48-60` (Capability escalates); chain-walk `walk.rs:164`/`try_next:216`; test `executor.rs:664-711` | Persistent agent nonconformance escalates up the model chain; deterministic-producer schema violations surface (§4.4/§4.5). |
+| V22 closed-world pattern | `config.rs:2452-2476` `validate_workflow_refs_resolve` — walk merged config, `bail!` `UNRESOLVED_WORKFLOW_REF` | The pattern the load-time `$ref`/`schema_ref` check (V24) copies. |
+| V23 override discipline | `config.rs:2227-2256` (`ANONYMOUS_OVERRIDE`/`STALE_OVERRIDE`) | Precedent for loud, explicit config-surface extension. |
+| jsonschema registry API | `~/.cargo/.../jsonschema-0.46.10/src/options.rs:297` `with_registry(&referencing::Registry)`; `Registry::new().add(uri, json).prepare()` `:1157-1174` | How config-authored `$ref`s into the shipped schema resolve at validation time. Verified: an alias URI (`praxec://hop`) that differs from the document `$id` resolves correctly, and a resource is *also* addressable by its own `$id` — see the canonical-spelling guard (§4.2). |
+| Config surface is closed | `gateway-config.schema.json` top level is `additionalProperties: false` (verified) | A new `schemas:` registry block requires a one-property extension of `gateway-config.schema.json` (§4.2). |
 
-### 1.2 Two empirical findings that shaped the layout
+### 1.2 Why the vocabulary is a standalone file, not typed structs
 
-**E1 — typify 0.6.2 does not support cross-file `$ref`s.** A minimal
-reproduction (two root schemas added to one `TypeSpace`, the second referencing
-the first via `hop.schema.json#/$defs/gateStatus`) **panics** in
-`typify-impl-0.6.2/src/convert.rs:1344`:
-`external references are not supported`. Consequence: any type the
-`TransitionRecord` struct is to reference at compile time **must live in the
-same schema file**. A separate `hop.schema.json` would either fork the type set
-(record couldn't reference it — a parallel abstraction) or not exist. So:
-**all HOP defs go into `transition-record.schema.json`'s `$defs`** — which is
-also the most literal reading of the locked decision ("it EXTENDS
-`transition-record.schema.json`").
+The vocabulary ships as **bytes for runtime validation**, not as typify-generated
+Rust types. Two grounded reasons:
 
-**E2 — the exact schema in §2 generates cleanly through the real pipeline.**
-The full extended `transition-record.schema.json` below was run through a
-byte-equivalent copy of `build.rs` (same typify 0.6.2 / schemars 0.8 versions,
-alongside the real `gateway-config.schema.json` and
-`workflow-response.schema.json`). Generated, with **no name collisions**
-against the ~140 existing types:
+- **The runtime has no consumer for the types.** The spine branches on JSON via
+  the expression engine (`read_in_scopes`, `mapping.rs:215`); guards read
+  `$.context.verify.status == "pass"`; no crate depends on `praxec-schema`
+  (verified across `crates/*/Cargo.toml`). Generated structs would be inert. The
+  guarantee comes from **runtime jsonschema validation**, not from types.
+- **typify 0.6.2 cannot resolve cross-file `$ref`s** — `convert_reference`
+  unconditionally `panic!("external references are not supported")`
+  (`typify-impl-0.6.2/src/convert.rs:1343-1345`; identical in 0.7.0 at `:1357`),
+  reproduced in a harness. This *only* constrains type generation, which we do
+  not do — so a standalone `hop.schema.json` with internal `$ref`s is clean.
+  (Recorded as a **future guard**: if a typed view is ever wanted, the defs would
+  need to move into a single typify input file, and def names must then be unique
+  across input files — typify shares one bare-name def keyspace, `util.rs:551-561`.)
 
-```
-pub enum   GateStatus { Pass, Fail, NotEvaluated }        // serde-renamed pass|fail|not_evaluated
-pub enum   Severity   { Info, Warning, Error, Critical }
-pub struct SchemaBound { schema_ref: SchemaBoundSchemaRef, value: ::serde_json::Value }
-pub struct Finding, Criterion, StackProvenance (+ StackProvenanceSource)
-pub struct VerifyOut, DetectOut, ScaffoldOut (+ ScaffoldOutLayer), ImplementOut, LintFormatOut
-pub struct HopRecord (+ HopRecordSlot)
-pub struct TransitionRecord { …, hop: Option<HopRecord>, … }
-```
-
-Note in particular: `"value": true` maps to `::serde_json::Value` — exactly the
-`SchemaBound { schema_ref, value }` shape §4.1 of Spec A specifies, with the
-inner value opaque to the compile-time type.
+So `hop.schema.json` stays out of `build.rs`. It is loaded by `praxec-core` via
+`include_str!` and registered for runtime validation (§4.3).
 
 ---
 
-## 2. The typed-core schema set
+## 2. The typed-core schema set — `schemas/hop.schema.json`
 
-### 2.1 Design shape: the envelope IS the slot-out
+### 2.1 Structure: one file, per-activity contracts, shared building blocks
 
-Spec A §4.2: "**Metastructure = the typed envelope + declared extension
-points.** Instance = the inner validated value." The envelope is realized as
-**the slot-out object itself** — there is **no wrapper type** (`HopEnvelope {
-slot, payload }` union) in v1:
+`hop.schema.json` is a single JSON Schema document whose `$defs` hold:
 
-- The spine branches on `$.context.<slot>.status` — a wrapper adds a nesting
-  level every guard expression must traverse, for no consumer.
-- The one place a cross-slot discriminated view is needed — the audit record —
-  gets a flat typed **summary** (`hopRecord`, §2.3), not the payload: the full
-  payload is already in `blackboardDelta` (`runtime.rs:1021-1025`), so a full
-  envelope on the record would be pure duplication.
-- typify's untagged/const-tagged union output is the least ergonomic thing it
-  generates; nothing consumes it in v1. Cut per no-speculative-generality. If a
-  second consumer appears (e.g. a dashboard wanting `Vec<AnyHop>`), a
-  `oneOf`-over-five def is additive later.
+- **shared building blocks** — `severity`, `gateStatus`, `schemaBound`,
+  `stackProvenance`, `finding`, `criterion` — defined **once** and `$ref`'d by the
+  slot contracts (one `Severity`, one `GateStatus`, one `Finding` shape across all
+  slots), and
+- **a distinct `In` and `Out` contract per slot activity** — `verifyIn`/`verifyOut`,
+  `detectIn`/`detectOut`, `scaffoldIn`/`scaffoldOut`, `implementIn`/`implementOut`,
+  `lintFormatIn`/`lintFormatOut`.
 
-Shared vocabulary (`severity`, `gateStatus`, `schemaBound`, `finding`,
-`criterion`, `stackProvenance`) lives once in `$defs` and is `$ref`'d by every
-slot-out — one `Severity`, one `GateStatus`, exactly as §6.4/§6.5 pin.
+These are the **specialization-slot** contracts — the interop boundary between the
+generic spine and any stack's pack, which is exactly why they must be identical
+everywhere (hence core + un-forkable). Non-slot steps (design, FMECA, review) pass
+data through `$.context` too, but validated by ordinary per-flow config schemas,
+not this frozen vocabulary.
+
+**Anti-divergence (why one canonical file cannot drift).** There are no copies. A
+workflow holds a `hop_slot:` marker; a slot cap holds a `$ref` into
+`praxec://hop#/$defs/<def>`; the engine injects the single definition. A load-time
+check resolves every such `$ref` (§4.2, V24-style), canonical-spelling is enforced
+(§4.2), and contract-hash pinning (V15/V16) makes any change loud. One definition,
+referenced everywhere, un-forkable by a pack or a workflow.
 
 **Field naming.** Payload fields are `snake_case` (`rule_id`, `schema_ref`,
-`generated_from`) — they are **context-facing** vocabulary, and the engine's
-context keys are snake_case throughout (`$.context.vet_findings`
-`use_binding.rs:15-17`, `affinity_override` `runtime_chain.rs:567`). The
-existing record-level fields stay camelCase untouched; the new `hop` key is
-case-neutral and its innards adopt the payload vocabulary rather than
-translating at the audit boundary.
+`generated_from`) — the engine's context keys are snake_case throughout
+(`$.context.vet_findings` `use_binding.rs:15-17`).
 
-### 2.2 The extended `transition-record.schema.json` (verbatim, tested)
-
-Everything below the `hop` property line is **new**; everything above is the
-current file (`transition-record.schema.json:1-46`) unchanged.
+### 2.2 The vocabulary (`schemas/hop.schema.json`)
 
 ```json
 {
-  "$id": "https://praxec.dev/schemas/transition-record.schema.json",
+  "$id": "https://praxec.dev/schemas/hop.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "TransitionRecord",
-  "description": "One immutable record per applied workflow transition, emitted as a workflow.transition audit event.",
-  "type": "object",
-  "required": ["workflowId", "definitionId", "definitionVersion", "seq", "timestamp", "fromState", "toState", "transition", "actor"],
-  "additionalProperties": false,
-  "properties": {
-    "workflowId": { "type": "string" },
-    "…": "— existing properties :10-45 unchanged —",
-
-    "hop": {
-      "$ref": "#/$defs/hopRecord",
-      "description": "Present when this transition's executor produced a slot HOP (its snippet.outputs $ref one of the slot-out defs below). A typed, queryable summary — the full payload is in blackboardDelta. Additive + optional, same convention as the script executor's subject/hash fields."
-    }
-  },
+  "title": "PraxecHopVocabulary",
+  "description": "Canonical hand-off-point contracts for the specialization slots. Registered at runtime under alias praxec://hop; referenced by slot caps and injected by the hop_slot: primitive. Runtime-validated, not typify-generated.",
   "$defs": {
     "severity": {
       "type": "string",
       "enum": ["info", "warning", "error", "critical"],
-      "description": "The ONE shared severity vocabulary (Spec A §6.4). Order is semantic (info < warning < error < critical) for gate thresholds, but the SPINE never compares severities — producers compute gate status; severity appears core-side only on findings and in the hopRecord.severity_max observability field."
+      "description": "The ONE shared severity vocabulary (parent §6). Order is semantic (info < warning < error < critical) for config-side gate thresholds, but the SPINE never compares severities — producers compute gate status; severity appears core-side only on findings."
     },
     "gateStatus": {
       "type": "string",
       "enum": ["pass", "fail", "not_evaluated"],
-      "description": "Spec A §6.5 — typed tri-state. `not_evaluated` = 'I had nothing to check with', never a disguised pass. The spine branches on this and only this."
+      "description": "Parent §6 — typed tri-state. `not_evaluated` = 'I had nothing to check with', never a disguised pass. The spine branches on this and only this."
     },
     "schemaBound": {
       "type": "object",
@@ -222,7 +144,7 @@ current file (`transition-record.schema.json:1-46`) unchanged.
         },
         "value": true
       },
-      "description": "Spec A §4.1 — the compile-time-typed extension point. `value` is serde_json::Value in the generated type; validated at the HOP boundary against the pack schema named by schema_ref. v1 scope: exactly ONE designated use — finding.fix."
+      "description": "Parent §4 — the runtime-validated extension point. `value` is opaque JSON, validated at the HOP boundary against the pack schema named by schema_ref. v1 scope: exactly ONE designated use — finding.fix."
     },
     "stackProvenance": {
       "type": "object",
@@ -233,11 +155,11 @@ current file (`transition-record.schema.json:1-46`) unchanged.
         "source": {
           "type": "string",
           "enum": ["pack", "user-declared", "generic"],
-          "description": "Typed provenance, not prose (Spec A §3.1): `user-declared` marks the unaudited user-command fallback; `generic` marks the honest floor."
+          "description": "Typed provenance, not prose (parent §3.1): `user-declared` marks the unaudited user-command fallback; `generic` marks the honest floor."
         },
         "chain": { "type": "array", "items": { "type": "string" }, "default": [], "description": "The walked resolution chain, most-specific-first — mirrors MODEL_RESOLVER_WALK's walked_levels (walk.rs:169)." }
       },
-      "description": "Spec A §5.4 — every slot HOP carries stack provenance."
+      "description": "Parent §5.4 — every slot HOP carries stack provenance."
     },
     "finding": {
       "type": "object",
@@ -253,7 +175,7 @@ current file (`transition-record.schema.json:1-46`) unchanged.
         "message": { "type": "string" },
         "fix": {
           "$ref": "#/$defs/schemaBound",
-          "description": "THE v1 SchemaBound extension point. Optional: verify/lint findings may carry no remediation payload; detect producers SHOULD populate it (Spec B contract). All Spec-B variance confines here (FM13)."
+          "description": "THE v1 SchemaBound extension point. Optional: verify/lint findings may carry no remediation payload; detect producers SHOULD populate it (Spec B contract). All Spec-B variance confines here."
         }
       }
     },
@@ -264,7 +186,16 @@ current file (`transition-record.schema.json:1-46`) unchanged.
       "properties": {
         "id": { "type": "string" },
         "met": { "type": "boolean" },
-        "evidence": { "type": "string", "description": "Free-text in v1 (§7.1). met:true with empty evidence is a doctor WARNING (Spec A §3.1 FM4), deliberately not a schema failure." }
+        "evidence": { "type": "string", "description": "Free-text in v1 (§9). met:true with empty evidence is a doctor WARNING (parent §3.1), deliberately not a schema failure." }
+      }
+    },
+
+    "verifyIn": {
+      "type": "object", "required": ["cwd"], "additionalProperties": false,
+      "properties": {
+        "cwd": { "type": "string" },
+        "file_set": { "type": "array", "items": { "type": "string" } },
+        "changed_only": { "type": "boolean", "default": false }
       }
     },
     "verifyOut": {
@@ -279,15 +210,35 @@ current file (`transition-record.schema.json:1-46`) unchanged.
         "provenance": { "$ref": "#/$defs/stackProvenance" }
       }
     },
+    "detectIn": {
+      "type": "object", "required": ["cwd", "ruleset"], "additionalProperties": false,
+      "properties": {
+        "cwd": { "type": "string" },
+        "file_set": { "type": "array", "items": { "type": "string" } },
+        "changed_only": { "type": "boolean", "default": false },
+        "ruleset": { "type": "string" }
+      }
+    },
     "detectOut": {
       "type": "object",
       "required": ["status", "findings", "provenance"],
       "additionalProperties": false,
       "properties": {
-        "status": { "$ref": "#/$defs/gateStatus", "description": "not_evaluated when no ruleset exists for the stack — never pass (Spec A §3.3)." },
+        "status": { "$ref": "#/$defs/gateStatus", "description": "not_evaluated when no ruleset exists for the stack — never pass (parent §3.3)." },
         "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
         "ruleset": { "type": "string", "description": "Which ruleset ran (observability; optional)." },
         "provenance": { "$ref": "#/$defs/stackProvenance" }
+      }
+    },
+    "scaffoldIn": {
+      "type": "object", "required": ["cwd", "layer", "artifact_kind", "name"], "additionalProperties": false,
+      "properties": {
+        "cwd": { "type": "string" },
+        "layer": { "type": "string", "enum": ["contract", "solution", "implementation"] },
+        "artifact_kind": { "type": "string" },
+        "name": { "type": "string" },
+        "target_path": { "type": "string" },
+        "options": { "type": "object" }
       }
     },
     "scaffoldOut": {
@@ -297,10 +248,21 @@ current file (`transition-record.schema.json:1-46`) unchanged.
       "properties": {
         "created": { "type": "array", "items": { "type": "string" } },
         "wired": { "type": "array", "items": { "type": "string" } },
-        "layer": { "type": "string", "enum": ["contract", "solution", "implementation"], "description": "Closed set per Spec A §3.4 (poka-yoke: typed enum over string)." },
-        "generated_from": { "type": "string", "description": "Contract artifact this stub was generated from — marks a generated surface downstream steps must not hand-edit." },
+        "layer": { "type": "string", "enum": ["contract", "solution", "implementation"], "description": "Closed set per parent §3.4." },
+        "generated_from": { "type": "string", "description": "Contract artifact this stub was generated from — marks a surface downstream steps must not hand-edit." },
         "summary": { "type": "string" },
         "provenance": { "$ref": "#/$defs/stackProvenance" }
+      }
+    },
+    "implementIn": {
+      "type": "object", "required": ["cwd", "deliverable", "acceptance_criteria"], "additionalProperties": false,
+      "properties": {
+        "cwd": { "type": "string" },
+        "deliverable": { "type": "object" },
+        "acceptance_criteria": { "type": "array", "items": { "$ref": "#/$defs/criterion" } },
+        "skeleton_files": { "type": "array", "items": { "type": "string" } },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "idiom_lens": { "type": "string" }
       }
     },
     "implementOut": {
@@ -314,58 +276,40 @@ current file (`transition-record.schema.json:1-46`) unchanged.
         "provenance": { "$ref": "#/$defs/stackProvenance" }
       }
     },
+    "lintFormatIn": {
+      "type": "object", "required": ["cwd"], "additionalProperties": false,
+      "properties": {
+        "cwd": { "type": "string" },
+        "file_set": { "type": "array", "items": { "type": "string" } },
+        "changed_only": { "type": "boolean", "default": false },
+        "fix": { "type": "boolean", "default": true }
+      }
+    },
     "lintFormatOut": {
       "type": "object",
       "required": ["status", "findings", "fixed", "provenance"],
       "additionalProperties": false,
       "properties": {
         "status": { "$ref": "#/$defs/gateStatus" },
-        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" }, "description": "REMAINING findings after this pass — findings.length drives the loop's progress-monotonicity breaker (Spec A §3.2 FM5)." },
-        "fixed": { "type": "array", "items": { "type": "string" }, "description": "Files touched by auto-fix this pass (aligns with created/wired/changed convention; §7.4)." },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" }, "description": "REMAINING findings after this pass — findings.length drives the loop's progress-monotonicity breaker (parent §3.2)." },
+        "fixed": { "type": "array", "items": { "type": "string" }, "description": "Files touched by auto-fix this pass (aligns with created/wired/changed convention)." },
         "provenance": { "$ref": "#/$defs/stackProvenance" }
       }
-    },
-    "hopRecord": {
-      "type": "object",
-      "required": ["slot", "provenance"],
-      "additionalProperties": false,
-      "properties": {
-        "slot": { "type": "string", "enum": ["verify", "detect", "scaffold", "implement", "lint_format"] },
-        "status": { "$ref": "#/$defs/gateStatus", "description": "Present iff the slot is a gate (verify/detect/lint_format). Makes not_evaluated gates countable per run (Spec A §6 observability)." },
-        "severity_max": { "$ref": "#/$defs/severity" },
-        "finding_count": { "type": "integer", "minimum": 0 },
-        "schema_refs": { "type": "array", "items": { "type": "string" }, "default": [], "description": "The inner schemas that were resolved+validated on this HOP — audit trail for the SchemaBound boundary." },
-        "provenance": { "$ref": "#/$defs/stackProvenance" }
-      },
-      "description": "The record-level HOP summary. Full payload lives in blackboardDelta; this is the typed, queryable slice."
     }
   }
 }
 ```
 
-### 2.3 Wiring changes in `praxec-schema`
+**Cross-slot type links that make the composition check real (§5).**
+`implementIn.acceptance_criteria` reuses `#/$defs/criterion` — the same criteria
+whose `met` flags `verifyOut` reports — so the load-time composition check can
+prove `verify` consumes the criteria `implement` was given.
+`implementIn.findings` reuses `#/$defs/finding`, letting a `detect`/`verify` `Out`
+chain into a fix step through a validated mapping.
 
-**`build.rs`: zero change.** `transition-record.schema.json` is already in the
-fixed input list (`build.rs:14-16`); its `$defs` flow through the existing
-`add_root_schema` call (verified, §1.2 E2).
+### 2.3 What a pack-registered inner schema looks like (CONFIG, for contrast)
 
-**`src/lib.rs`: one addition** — export the raw schema text so `praxec-core`
-can build the runtime jsonschema registry (§4.3) from the same bytes typify
-consumed (single source of truth, no drift):
-
-```rust
-/// The raw transition-record schema (source of truth for the HOP typed core).
-/// praxec-core registers this under the alias URI `praxec://hop` so that
-/// config-authored `$ref`s into `#/$defs/*` resolve at validation time.
-pub const HOP_CORE_SCHEMA: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schemas/transition-record.schema.json"));
-```
-
-(Path mechanics identical to `build.rs:6-11`'s `../../schemas` resolution.)
-
-### 2.4 What a pack-registered inner schema looks like (CONFIG, shown for contrast)
-
-Not core — this is the content the `fix` SchemaBound points at, shipped by a
+Not core — this is the content the `fix` `SchemaBound` points at, shipped by a
 stack pack (Spec B owns its evolution):
 
 ```yaml
@@ -383,126 +327,97 @@ schemas:
 A detect producer then emits
 `fix: { schema_ref: "cogarch/fix.ts-codemod", value: { kind: "codemod", recipe: "…" } }`.
 
-### 2.5 The `<slot>In` contracts (v2 addition — makes input contracts real)
+---
 
-The v1 body defined only `*Out`. The frozen set adds the five `*In` defs so a
-slot's **input** is engine-injected and validated on entry
-(`validate_schema(transition.inputSchema)`, `runtime_submit.rs:749`). These live in
-the same standalone `hop.schema.json` `$defs` as the `*Out` defs. Shapes track
-parent §3:
+## 3. The `hop_slot` primitive — declared, injected, unbypassable
 
-```json
-"verifyIn":    { "type": "object", "required": ["cwd"],
-  "additionalProperties": false,
-  "properties": { "cwd": {"type":"string"},
-    "file_set": {"type":"array","items":{"type":"string"}},
-    "changed_only": {"type":"boolean","default": false} } },
+A slot is a **first-class declared transition marker**: `hop_slot: <name>` (the
+keyword avoids the taken `slots:`, `runtime_chain.rs:1172`). Declaring
+`hop_slot: verify` makes the engine, at **load time**:
 
-"detectIn":    { "type": "object", "required": ["cwd","ruleset"],
-  "additionalProperties": false,
-  "properties": { "cwd": {"type":"string"},
-    "file_set": {"type":"array","items":{"type":"string"}},
-    "changed_only": {"type":"boolean","default": false},
-    "ruleset": {"type":"string"} } },
+1. **Inject** the canonical `verifyIn` (from `hop.schema.json`) as the transition's
+   `inputSchema`, and `verifyOut` as the `$.context.verify` blackboard-slot schema
+   in the slot table (V13). The author cannot supply, omit, or diverge the
+   contract — the engine owns it. (Precedent: `synthesize_input_schema`
+   `config.rs:425`, `expand_use_bindings` `config.rs:480`.)
+2. **Resolve** the marker to the concrete `cap.verify.<stack>` (parent §2.3
+   mechanisms: additive repo layering + `overrides:`, or a dispatch flow).
 
-"scaffoldIn":  { "type": "object", "required": ["cwd","layer","artifact_kind","name"],
-  "additionalProperties": false,
-  "properties": { "cwd": {"type":"string"},
-    "layer": {"type":"string","enum":["contract","solution","implementation"]},
-    "artifact_kind": {"type":"string"}, "name": {"type":"string"},
-    "target_path": {"type":"string"}, "options": {"type":"object"} } },
+Both contracts are then enforced by seams **that already run on every transition**:
+input via `validate_schema(transition.inputSchema)` (`runtime_submit.rs:749` →
+`INPUT_SCHEMA_VIOLATION`), output via `validate_blackboard_writes`
+(`runtime_records.rs:47`, kind-agnostic, all five write paths). A raw `kind:agent`
+writing `{status:"pass"}` into `$.context.verify` is therefore already rejected at
+runtime before the transition advances.
 
-"implementIn": { "type": "object", "required": ["cwd","deliverable","acceptance_criteria"],
-  "additionalProperties": false,
-  "properties": { "cwd": {"type":"string"}, "deliverable": {"type":"object"},
-    "acceptance_criteria": {"type":"array","items":{"$ref":"#/$defs/criterion"}},
-    "skeleton_files": {"type":"array","items":{"type":"string"}},
-    "findings": {"type":"array","items":{"$ref":"#/$defs/finding"}},
-    "idiom_lens": {"type":"string"} } },
+**Why this is an allowlist, not a denylist.** Slot-ness is *declared* and the
+contract is *engine-owned*, so "a slot without its contract" is unrepresentable —
+there is no un-fenced convention to *detect* and no schema-identity to *match*.
+This eliminates the bypass class an earlier detect-heuristic approach had to hunt
+(a `kind:agent` slot write, a cap with no output schema, an inline-copied
+non-canonical schema, a dual `$ref` spelling). Those become moot; the load lints
+in §7 remain only as defense for **non-slot** writes to a slot-named key.
 
-"lintFormatIn":{ "type": "object", "required": ["cwd"],
-  "additionalProperties": false,
-  "properties": { "cwd": {"type":"string"},
-    "file_set": {"type":"array","items":{"type":"string"}},
-    "changed_only": {"type":"boolean","default": false},
-    "fix": {"type":"boolean","default": true} } }
-```
-
-Note `implementIn.acceptance_criteria` reuses `#/$defs/criterion` — the same
-criteria whose `met` flags `verifyOut` reports, so the **composition check**
-(parent §4.5) can prove the verify step consumes the criteria the implement step
-was given. (Field `implementIn.findings` reuses `#/$defs/finding`, letting a
-`detect`/`verify` `Out` chain into a fix step through a validated mapping.)
+**New engine work for the primitive:** the `hop_slot:` load-time expansion pass
+(inject `In`/`Out`, wire resolution) + one doctor rule. Runtime enforcement is
+reuse.
 
 ---
 
-## 3. Extends-vs-new map
+## 4. Boundary validation
 
-| Type / surface | Disposition | Grounding |
-|---|---|---|
-| `severity`, `gateStatus`, `schemaBound`, `stackProvenance`, `finding`, `criterion`, `verifyOut`, `detectOut`, `scaffoldOut`, `implementOut`, `lintFormatOut`, `hopRecord` | **Extend `transition-record.schema.json`** — new `$defs` entries | Forced by E1 (typify externals panic, `typify-impl-0.6.2/src/convert.rs:1344`) + the locked decision. `$defs` precedent: `workflow-response.schema.json:81-192` builds today. |
-| `TransitionRecord.hop` | **Extend `transition-record.schema.json`** — one new optional property | Additive-optional precedent: script `subject`/`hash` on the executor descriptor, `runtime.rs:983-1016`. Old records (no `hop`) stay valid — property is not in `required` (`transition-record.schema.json:7`). |
-| `schemas:` config block | **Extend `gateway-config.schema.json`** — one new optional top-level property (repo-file layout mirrors the existing `workflows:`/`skills:` blocks) | Required because the config surface is closed: `gateway-config.schema.json` top level is `additionalProperties: false` (verified). File is already in `build.rs:14`. |
-| `workflow-response.schema.json` | **Untouched** | The response's `context` is deliberately an untyped `object` (`workflow-response.schema.json:11`) — HOP payloads ride through it unchanged; `outcomes`/`result.status` are already typed (`:60-74`, `:94-110`). Typing the response's context would be a parallel abstraction. |
-| `praxec-repo.schema.json` | **Untouched** | It describes repo *metadata* (`name`/`namespace`/`layout`), not definition content. `schemas:` entries live in the repo's config files like every other definition block, namespaced by `load_repo` (V20, `config.rs:2209` region). |
-| New schema file | **None** | Rejected: E1 makes a referenced separate file impossible; an unreferenced one is a parallel abstraction. |
-| `build.rs` input list | **No change** | `transition-record.schema.json` and `gateway-config.schema.json` already listed (`build.rs:13-17`). |
-
----
-
-## 4. Boundary-validation design
-
-Four layers — one at load, three at runtime — every one an extension of a
-cited existing seam. No new abstraction.
-
-### 4.1 Overview
+Four layers — one at load, three at runtime — each an extension of a cited seam,
+no new abstraction.
 
 ```
-CONFIG LOAD                     RUNTIME (deterministic producer)          RUNTIME (agent producer)
-───────────                     ────────────────────────────────          ────────────────────────
-V24: schemas: compile           L1 envelope: snippet.outputs $refs        L3 in-session: conforms()
-     + schema_ref closed        → validate_outputs_against_snippet          upgraded to full jsonschema
-     world (extends V22)          (use_binding.rs:153, registry-aware)      (rig_runner.rs:173/512)
-                                L2 SchemaBound: finding.fix value          retry w/ iter_errors feedback
-                                → new validate_schema_bound_values         exhaustion → AGENT_NO_RESULT
-                                  (workflow.rs, after :445)                → Capability → chain-walk
-                                failure → ExecutorError::SchemaViolation    (classify.rs:106-126,
-                                → ContentOther → SURFACES                    walk.rs:216)
+CONFIG LOAD                         RUNTIME (deterministic producer)        RUNTIME (agent producer)
+───────────                         ────────────────────────────────        ────────────────────────
+V24: register hop.schema.json;      L1 envelope: snippet.outputs $refs      L3 in-session: conforms()
+     compile all `schemas:` +       → validate_outputs_against_snippet       upgraded to full jsonschema
+     `snippet.outputs` fragments;     (use_binding.rs:153, registry-aware)   (rig_runner.rs:173/512),
+     closed-world schema_ref;       L2 SchemaBound: findings[].fix value      retry w/ iter_errors feedback;
+     canonical-spelling check       → validate_schema_bound_values           exhaustion → AGENT_NO_RESULT
+                                       (workflow.rs, after :445)              → Capability → chain-walk
+                                     failure → SchemaViolation → ContentOther  (classify.rs, walk.rs:216)
+                                       → SURFACES
 ```
 
-### 4.2 Load time — V24, the closed-world schema registry (extends V22)
+### 4.1 Load time — V24 closed-world registry (extends V22)
 
 New load pass in `config.rs`, sibling to `validate_workflow_refs_resolve`
-(`config.rs:2452-2476`), running after repo merge:
+(`config.rs:2452-2476`), after repo merge:
 
-1. **Collect** the merged top-level `schemas:` map (entries already
-   namespace-prefixed by `load_repo`, exactly like definitionIds — V20).
-2. **Compile every entry** with `jsonschema::validator_for` (the compile-check
-   pattern already used at `use_binding.rs:183` and `runtime_schema.rs:38`).
-   A schema that fails to compile →
-   `bail!("V24 SCHEMA_INVALID: schemas entry '<ns>/<name>' does not compile: <err>")`.
-   **A bad pack fails at load, not mid-run** (Spec A FM6).
-3. **Closed-world `schema_ref` check**: walk the merged config for every
-   statically-declared `schema_ref` literal (today: Spec B ruleset blocks and
-   any cap-config `fix` defaults; the walk mirrors
-   `collect_unresolved_workflow_refs`, `config.rs:2478+`). Unresolved →
-   `bail!("V24 SCHEMA_REF_UNRESOLVED: '<ref>' … Unprefixed names resolve in the
-   declaring repo's OWN namespace; to reference another pack's schema, fully
-   qualify as <namespace>/<name>.")` — same fix-it voice as V22
-   (`config.rs:2468-2474`).
-4. The compiled validators are retained as
-   `Arc<HashMap<String, jsonschema::Validator>>` on the runtime (the
-   "compile at load, hand to runtime" move `_snippetOutputs` already makes at
-   `config.rs:578`).
+1. **Register** `praxec_core`'s bundled `hop.schema.json` bytes under alias
+   `praxec://hop`, and **collect** the merged top-level `schemas:` map (entries
+   namespace-prefixed by `load_repo`, V20).
+2. **Compile every `schemas:` entry** with the registry-aware `compile_validator`
+   (§4.2). Failure → `bail!("V24 SCHEMA_INVALID: schemas entry '<ns>/<name>' does not compile: <err>")`.
+   A bad pack fails at load, not mid-run.
+3. **Step 2b — compile every `snippet.outputs` fragment** the same way (the
+   `_snippetOutputs` embed pass already visits them all, `config.rs:571-578`). A
+   typo'd core `$ref` (`verifyOutt`) or unregistered scheme fails **at load**, not
+   at first execution.
+4. **Closed-world `schema_ref` check** — walk the merged config for every static
+   `schema_ref` literal (mirrors `collect_unresolved_workflow_refs`,
+   `config.rs:2478+`). Unresolved → `bail!("V24 SCHEMA_REF_UNRESOLVED: '<ref>' … fully qualify as <namespace>/<name>.")` — the V22 fix-it voice.
+5. **Canonical-spelling check** — any `$ref` into the shipped vocabulary must be
+   spelled `praxec://hop#/$defs/<def>`. The document is *also* resolvable by its
+   own `$id` URL (verified), and that spelling would satisfy L1 while evading the
+   L2 `SchemaBound` designation (which matches on the canonical fragment) — so a
+   non-canonical spelling into the shipped schema is rejected/normalized at load.
+6. Retain the compiled validators as `Arc<HashMap<String, jsonschema::Validator>>`
+   on the runtime (the "compile at load, hand to runtime" move `_snippetOutputs`
+   already makes, `config.rs:578`).
 
-*Honesty note:* until Spec B lands rulesets in config, step 3 has few static
-occurrences to check — the load-time guarantee is then mostly step 2 (all
-registered schemas compile) and the runtime defense-in-depth of §4.4. The walk
-is written once; Spec B's ruleset block makes it bite.
+*Honesty note:* until Spec B lands rulesets in config, step 4 has few static
+occurrences to check — the load-time guarantee is then mostly steps 2–3 (all
+registered schemas and all snippet fragments compile) plus the runtime
+defense-in-depth of §4.3. The walk is written once; Spec B's ruleset block makes
+it bite.
 
-### 4.3 Runtime L1 — envelope validation (existing seam, made registry-aware)
+### 4.2 Registry-aware `compile_validator`
 
-Slot caps declare their contract-out by `$ref` into the shipped core defs:
+Slot caps declare their contract-out by `$ref` into the shipped vocabulary:
 
 ```yaml
 # cap.verify.rust (pack config)
@@ -511,299 +426,308 @@ snippet:
     verify: { "$ref": "praxec://hop#/$defs/verifyOut" }
 ```
 
-The whole existing pipeline then applies unchanged: `expand_use_bindings`
-embeds it as `_snippetOutputs` at load (`config.rs:406-414, :578`); the
-workflow executor projects the child's context (`workflow.rs:443-444` →
-`project_use_outputs`, `use_binding.rs:117`) and validates
-(`validate_outputs_against_snippet`, `use_binding.rs:153`, called at
-`workflow.rs:445-451`); violations → audit `cap.output.schema_violation` +
-`ExecutorError::SchemaViolation` (`workflow.rs:460-492`).
-
-**The one change:** both jsonschema compile sites —
-`use_binding.rs:183` and `runtime_schema.rs:38` (`validate_schema`, also used
-for start-input validation, `runtime_schema.rs:29-46`) — switch from bare
-`jsonschema::validator_for(schema)` to a shared helper:
+The existing pipeline applies unchanged (`expand_use_bindings` embeds
+`_snippetOutputs`; the workflow executor projects and validates at
+`workflow.rs:445-451`). **The one change:** the two jsonschema compile sites —
+`use_binding.rs:183` and `runtime/runtime_schema.rs:38` (`validate_schema`, also
+start-input validation) — switch from bare `jsonschema::validator_for` to a shared
+registry-aware helper:
 
 ```rust
-// praxec-core: one process-wide registry, built once from praxec_schema::HOP_CORE_SCHEMA
+// praxec-core: one process-wide registry, built once from the bundled hop.schema.json bytes
 static HOP_REGISTRY: LazyLock<jsonschema::Registry> = LazyLock::new(|| {
     jsonschema::Registry::new()
-        .add("praxec://hop", serde_json::from_str(praxec_schema::HOP_CORE_SCHEMA).expect("shipped schema parses"))
+        .add("praxec://hop", serde_json::from_str(HOP_SCHEMA).expect("shipped hop schema parses"))
         .expect("valid URI")
         .prepare()
-        .expect("shipped schema is a valid registry resource")
+        .expect("shipped hop schema is a valid registry resource")
 });
+
+// bundled bytes, single-sourced (no praxec-core → praxec-schema dep edge)
+const HOP_SCHEMA: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../schemas/hop.schema.json"));
 
 pub(crate) fn compile_validator(schema: &Value) -> Result<jsonschema::Validator, jsonschema::ValidationError<'static>> {
     jsonschema::options().with_registry(&HOP_REGISTRY).build(schema)
 }
 ```
 
-API verified against `jsonschema-0.46.10/src/options.rs:297` (`with_registry`)
-and the crate's own test at `options.rs:1157-1174`
-(`Registry::new().add(uri, json).prepare()`). The alias URI `praxec://hop`
-keeps config-side refs short and stable even though the document's `$id` is
-the transition-record URL. Schemas containing no external ref behave exactly
-as before — the change is strictly widening.
+API verified against `jsonschema-0.46.10/src/options.rs:297` and the crate test
+`:1157-1174`. The alias URI keeps config-side refs short and stable. Schemas with
+no external `$ref` behave exactly as before — the change is strictly widening.
 
-### 4.4 Runtime L2 — `SchemaBound.value` validation (deterministic producers)
+**FM-1 mitigation:** the `LazyLock` `.expect()`s would otherwise panic on *first
+deref mid-run* if the shipped bytes were malformed. Force the registry at **serve
+init** (one deref) and add a unit test asserting it prepares — so a broken shipped
+schema is a boot failure, not a latent crash.
 
-New helper in `use_binding.rs` (the module that already owns
-`SchemaViolation:49`), called in `workflow.rs` immediately after the L1 call
-at `:445-451`, inside the same violation-handling block:
+### 4.3 `SchemaBound.value` validation (deterministic producers)
+
+New helper in `use_binding.rs` (which already owns `SchemaViolation:49`), called in
+`workflow.rs` right after the L1 call at `:445-451`, inside the same
+violation-handling block. **v1 designation is hardcoded** — the one extension point
+is `findings[].fix`, so a small explicit walk, not a path-DSL:
 
 ```rust
-/// v1 designation table — the ONE extension point (Spec A §4.1 scoping).
-/// Keyed by the core def the snippet output $refs; values are the paths at
-/// which SchemaBound instances live inside that payload. Closed const —
-/// extending it is a deliberate core change (poka-yoke, not a registry).
-const SCHEMA_BOUND_PATHS: &[(&str, &str)] = &[
-    ("verifyOut",     "findings[*].fix"),
-    ("detectOut",     "findings[*].fix"),
-    ("lintFormatOut", "findings[*].fix"),
-];
-
-pub fn validate_schema_bound_values(
-    snippet_outputs: &Value,                      // the embedded _snippetOutputs
-    projected: &Map<String, Value>,               // from project_use_outputs
-    registry: &HashMap<String, jsonschema::Validator>, // §4.2 step 4
-) -> Result<Vec<String> /* validated schema_refs, for hopRecord.schema_refs */, Vec<SchemaViolation>>
+// The ONE v1 extension point (parent §4 scoping): SchemaBound lives at findings[].fix
+// on verifyOut / detectOut / lintFormatOut. Extending this set is a deliberate core change.
 ```
 
-Semantics, fail-fast with rich diagnostics throughout:
+Semantics, fail-fast with rich diagnostics:
 
-- For each projected output whose snippet schema `$ref`s a designated def,
-  walk the designated paths. For each present `fix`:
-  - Deserialize the `{schema_ref, value}` envelope (already
-    envelope-validated by L1 — L2 never re-checks shape).
-  - `schema_ref` not in the registry →
-    `SchemaViolation { slot, reason: "finding[3].fix.schema_ref 'x/y' is not a registered schema; registered: [..]" }`.
-    This is defense-in-depth: V24 makes it unreachable for honest configs, but
-    the invariant must not depend on producer discipline (same rationale as
+- For each projected output whose snippet schema `$ref`s a designated slot-out,
+  walk its `findings[].fix`. For each present `fix` (already envelope-validated by
+  L1 — L2 never re-checks shape):
+  - `schema_ref` not in the registry → `SchemaViolation { slot, reason:
+    "finding[3].fix.schema_ref 'x/y' is not a registered schema; registered: [..]" }`
+    (defense-in-depth: V24 makes it unreachable for honest configs, but the
+    invariant must not depend on producer discipline — same rationale as
     `try_next`'s content-failure recheck, `walk.rs:210-215`).
-  - `value` invalid → violation carrying every `iter_errors` message (the
-    collection style of `use_binding.rs:198-207`).
-- Errors funnel into the **existing** violation path at `workflow.rs:452-492`:
-  `cap.output.schema_violation` audit event, `emit_cap_terminated`, then
-  `ExecutorError::SchemaViolation` (`error.rs:121`, `Permanent` class
-  `error.rs:329`).
+  - `value` invalid → violation carrying every `iter_errors` message
+    (`use_binding.rs:198-207` style).
+- Errors funnel into the **existing** path `workflow.rs:452-492`:
+  `cap.output.schema_violation` audit, `emit_cap_terminated`, then
+  `ExecutorError::SchemaViolation`.
 
-**Failure routing (deliberate):** `ExecutorError::SchemaViolation` classifies
-as `FailureClass::ContentOther` (`classify.rs:104-105, :125`), which
-**surfaces** (`is_infrastructure:48-60` excludes it) — correct, because a
-*deterministic* producer emitting a malformed fix payload is a tool/pack bug;
-walking the model chain cannot repair it. Escalation is reserved for agent
-producers (§4.5).
+**Failure routing (deliberate):** `SchemaViolation` classifies as
+`FailureClass::ContentOther` (`classify.rs:104-105, :125`), which **surfaces**
+(`is_infrastructure` excludes it) — correct, because a *deterministic* producer
+emitting a malformed `fix` is a tool/pack bug the model chain cannot repair.
 
-### 4.5 Runtime L3 — the agent conformance loop, extended to full jsonschema
+*Accepted residual (FM-9):* an inline-copied, structurally-identical slot-out
+schema (no `$ref`) passes L1 but evades L2 designation. The canonical-spelling
+check (§4.1 step 5) catches wrong-*spelling* refs; a full structural copy is a
+low-probability curated-pack authoring error, and L1 still enforces the full
+envelope shape — only the inner `fix.value` escapes. Accepted, given
+contract-hash pinning (V15/V16) keeps packs stable.
 
-This is the seam Spec A §4.2 names ("extends the existing `final_answer`
-conformance loop"). Today the loop enforces keys + scalar types:
-`conforms` (`rig_runner.rs:173`) at the `final_answer` boundary
-(`:512-517`), on salvaged text (`:141-156`), with re-prompt feedback
-(`conformance_feedback:223`). Extension:
+### 4.4 The agent conformance loop, extended to full jsonschema (agent producers)
 
-1. **`AgentExecConfig` gains** `expected_output_schema: Option<Value>`
-   (sibling of `expected_output_keys:63` / `expected_output_types:72` in
-   `agents/config.rs`; forwarded to the session like the others at
-   `executor.rs:197-198`).
-2. **Auto-drive composes it**: where the composer already lifts
-   `inputSchema.required` / property types (`runtime_chain.rs:521-540`) into
-   the agent config (`:596-597`), it now also passes the capability's full
-   output schema (the `_snippetOutputs` fragment, `$ref`s pre-resolved against
-   the `praxec://hop` registry at load so praxec-agents needs no registry —
-   praxec-agents stays registry-free).
-3. **`conforms` upgrade**: when a schema is present, the session compiles it
-   once and full-validates the candidate `output`; keys/types checks remain
-   the cheap fast path when no schema is declared. `SchemaBound.value`
-   validation for agent-emitted findings needs no special case: the composed
-   schema can only express the envelope, so the inner value is checked by L2
-   when the projection crosses the workflow executor — the agent loop's job is
-   to make the *envelope* conform in-session, cheaply.
-4. **Feedback gets richer, not different**: `conformance_feedback` includes
-   the validator's `iter_errors` lines, so a wrong-shape answer is corrected
-   in-session "instead of failing the post-run snippet contract and wasting
-   the whole run" (the existing rationale, `rig_runner.rs:507-511`).
-5. **Persistent nonconformance** exhausts `max_turns` → `AGENT_NO_RESULT` →
-   `FailureClass::Capability` (`classify.rs:96-112`; test
-   `executor.rs:664-711`) → `is_infrastructure() == true` (`classify.rs:57`)
-   → the chain-walk escalates to a stronger model (`walk.rs:164`,
-   `try_next:216`, classified at `executor.rs:318`). **No new wiring** —
-   FM7's requirement falls out of the existing path.
+Today the loop enforces keys + scalar types: `conforms` (`rig_runner.rs:173`) at
+the `final_answer` boundary (`:512-517`), with `conformance_feedback:223`.
+Extension:
 
-> Spec-wording reconciliation: Spec A §4.2 says "persistent nonconformance =
-> content `FailureClass`". In the engine's taxonomy the *escalatable* class is
-> `Capability` (a weak-model gap), not `ContentSchema`/`ContentOther` (which
-> deliberately surface, `classify.rs:34-36`). The behavior Spec A intends —
-> "→ existing model chain-walk escalation" — is exactly the `Capability`
-> routing above; this doc pins that reading (§7.6).
+1. **`AgentExecConfig` gains** `expected_output_schema: Option<Value>` (sibling of
+   `expected_output_keys`/`expected_output_types`, `agents/config.rs:63/72`;
+   forwarded like the others at `executor.rs:197-198`).
+2. **Auto-drive composes it** where it already lifts `inputSchema.required`
+   (`runtime_chain.rs:521-540`) into the agent config (`:596-597`). The schema is
+   the **child capability's own `/snippet/outputs`** fragment (in scope via the
+   child `definition` while the composer drives the child's transitions) — **not**
+   the host's `_snippetOutputs` (which is out of scope there). The join rule: a
+   key's schema is enforced iff the argument key equals the snippet output name,
+   else fall back to keys/types.
+3. **No bundler.** praxec-agents already depends on praxec-core
+   (`Cargo.toml:18`), so the session compiles the fragment with the shared
+   `compile_validator` (registry-aware). praxec-agents needs no registry of its
+   own and no ref-inlining pass.
+4. **`conforms` upgrade:** when a schema is present, full-validate the candidate
+   `output`; keys/types remain the fast path when none is declared. `SchemaBound`
+   inner values need no special case here — the composed schema expresses only the
+   envelope; the inner value is checked by L2 when the projection crosses the
+   workflow executor **for a use-bound slot cap** (the sanctioned path). A direct,
+   non-use-bound agent write is the FM-7 case handled by §7's lint.
+5. **Feedback is richer, not different:** `conformance_feedback` includes the
+   validator's `iter_errors` lines, correcting a wrong-shape answer in-session
+   rather than wasting the whole run.
+6. **Persistent nonconformance** exhausts `max_turns` → `AGENT_NO_RESULT` →
+   `FailureClass::Capability` (`classify.rs:96-112`; test `executor.rs:664-711`) →
+   `is_infrastructure()` → chain-walk escalation (`walk.rs:164`, `try_next:216`).
+   **No new wiring.**
 
----
-
-## 5. Context projection fit
-
-**No structural change to projection.** The typed HOPs are ordinary JSON in
-`$.context`; the whole path is existing code:
-
-1. A slot capability writes its slot-out to its own `$.context.<name>`; the
-   host's `use:` block binds it —
-   `use.outputs: { "$.context.verify": "verify" }`.
-2. Load time: `expand_use_bindings` synthesizes the transition `output:`
-   mapping and embeds `_snippetOutputs` (`config.rs:406-414, 480, 578`).
-3. Run time: `project_use_outputs` (`use_binding.rs:117`) pulls the child's
-   context values → L1/L2 validation (§4.3/§4.4) → `merge_output`
-   (`mapping.rs:18`; call sites `runtime_submit.rs:939, 1076, 1183`) writes
-   the host's `$.context.<key>`.
-4. **The spine branches on typed core fields only**: guard expressions read
-   `$.context.verify.status == "pass"` etc. via the same `read_in_scopes`
-   expression engine (`mapping.rs:215`). Nothing reads `fix.value`; nothing
-   reads prose. The boundary rule (Spec A §4.2) is enforced by *validated
-   shape at the write* + *review of dispatch flows at authoring* — the spine
-   cannot branch on what config never surfaces to it.
-
-**Conventions (config, not core):**
-
-- **Well-known context keys** — each slot lands at the key named by the slot
-  (`$.context.verify`, `.detect`, `.scaffold`, `.implement`, `.lint_format`).
-  Pure pack convention; dispatch flows and guards depend on it, core does not.
-- **HOP transience is declared, already mechanized** — spine states declare
-  the slot keys state-scoped: `slots: { verify: { scope: state } }` →
-  auto-cleared with a `workflow.slot.cleared` audit event on state exit
-  (`clear_state_local_slots_on_exit`, `runtime_chain.rs:1143-1200`). This is
-  the HOP/blackboard lifecycle split of Spec A §4.3 with **zero new code**.
-  Loop states (check→fix→check) exit only when the loop resolves, so
-  loop-carried findings persist exactly as long as the loop.
-
-**One addition (core, small):** the `hop` summary on the transition record.
-`emit_transition_record` (`runtime.rs:971`) attaches `record["hop"]` when the
-transition's executor carried a designated `_snippetOutputs` $ref — slot from
-the def name, `status`/`severity_max`/`finding_count` lifted from the
-already-validated payload, `schema_refs` returned by L2 (§4.4), `provenance`
-copied through. Same additive-optional style as the script `subject`/`hash`
-enrichment (`runtime.rs:983-1016`). The full payload is **not** duplicated:
-`blackboardDelta` already carries it (`runtime.rs:1021-1025`,
-`runtime_submit.rs:1300`).
+**FailureClass reconciliation (flag for the parent):** the parent's "persistent
+nonconformance = content `FailureClass`" is self-contradictory in engine terms —
+content classes never trigger chain-walk fall-through (`classify.rs:34-36`). The
+correct, engine-consistent reading, pinned here: **agent exhaustion →
+`Capability` (escalates); deterministic `SchemaViolation` → `ContentOther`
+(surfaces).** The parent should adopt this wording (its §4.1 `severity`-comment
+and §4.2 FailureClass phrasing).
 
 ---
 
-## 6. HOP-vs-blackboard edge classification (SDLC spine)
+## 5. Load-time validity layer (the "workflow typechecker")
 
-Mechanically both ride `$.context`; the classification is **lifecycle +
-write-discipline** (Spec A §4.3): HOPs are typed, point-to-point,
-state-scoped (auto-cleared, §5); blackboard entries are durable, multi-reader,
-workflow-scoped.
+Because slots are first-class and their `In`/`Out` are engine-known, more than
+per-step shape is provable at load. Each check converts a runtime failure class
+into a load failure a flow cannot even load with — especially valuable for
+LLM-authored flows (Spec D):
+
+- **Composition soundness** — every required `<B>In` field is *satisfiable* from an
+  upstream slot's `<Out>` or a declared input/blackboard source in the flow. A
+  mis-wired chain will not load. (The cross-slot `$ref` links in §2.2 — e.g.
+  `implementIn.acceptance_criteria` reusing `criterion` — are what make this
+  checkable.)
+- **Typed-mapping compatibility** — a mapping feeding a `string` context path into
+  an integer-typed field is a load error, not a runtime surprise.
+- **Slot-contract conformance** — a `hop_slot: X` resolves to a cap whose declared
+  I/O matches the injected `<X>In`/`<X>Out` (trivially true when the engine
+  injects, checked when a cap declares its own).
+- **Resolution coverage** — every stack a flow claims to support has a registered
+  slot cap or a generic default (no dead branch → warning-clean, parent §5.5).
+
+**Honest boundary.** These prove **structural** validity (shapes present, refs
+resolve, mappings compatible, chains satisfiable). They **cannot** prove
+**semantic correctness** (a shape-valid mapping of the *wrong* field) or **runtime
+behavior** (whether the verify command actually exercises the code). Those fall to
+runtime fail-fast + review. The principle: *prove at load everything structurally
+provable; runtime fail-fast everything else; nothing silent.*
+
+---
+
+## 6. Context projection + HOP-vs-blackboard
+
+### 6.1 Chaining is mappings, not schema identity
+
+HOPs flow through `$.context`; **A's `Out` is not B's `In`** — they are independent
+contracts joined by a **mapping** (the argument projection). A slot writes its
+`Out` to `$.context.<slot>` (validated on exit); the flow maps a slice of context
+into the next step's `arguments`; that step's `arguments` are validated against its
+`In` on entry. This allows fan-in (a step draws from several upstream outputs +
+the blackboard), fan-out, and transformation. Both ends are validated, so a
+wrong-*shape* mapping fails fast at entry; a shape-valid *wrong-field* mapping is
+the semantic limit §5 names.
+
+No structural change to projection is needed — the whole path is existing code
+(`project_use_outputs` `use_binding.rs:117` → L1/L2 → `merge_output` `mapping.rs:18`
+→ guards via `read_in_scopes` `mapping.rs:215`).
+
+### 6.2 Transience is already mechanized
+
+Spine states declare slot keys state-scoped — `slots: { verify: { scope: state } }`
+→ auto-cleared with a `workflow.slot.cleared` event on state exit
+(`clear_state_local_slots_on_exit`, `runtime_chain.rs:1143-1200`). This is the
+HOP/blackboard lifecycle split with **zero new code**. Loop states (check→fix→check)
+exit only when the loop resolves, so loop-carried findings persist exactly as long
+as the loop. (Note: `scope: state` is the state-scoped `slots:` decl; the
+specialization marker is the distinct `hop_slot:` — §3.)
+
+### 6.3 Edge classification (SDLC spine)
+
+HOPs are typed, point-to-point, state-scoped; blackboard entries are durable,
+multi-reader, workflow-scoped.
 
 | Edge | Class | Payload / key | Scope |
 |---|---|---|---|
-| CPM unit assignment → implement loop | HOP (shape = Spec A §11 open Q2; out of scope here) | per-unit deliverable + file-set | state (per unit) |
-| scaffold → implement | **HOP** | `scaffoldOut` at `$.context.scaffold` — `created`/`wired` seed the unit's file surface; `generated_from` marks no-hand-edit files | state |
-| implement → verify | **HOP** | `implementOut` at `$.context.implement` — `changed` scopes `changed_only` verify | state |
-| verify → loop controller (retry/advance) | **HOP** | `verifyOut` at `$.context.verify` — guard branches on `.status` | state |
-| detect → codemod fix loop | **HOP** | `detectOut` at `$.context.detect` — `findings[*].fix` (SchemaBound) pairs `kind: codemod` to the bounded loop | state (loop-carried) |
-| detect → implement / review (manual fixes) | **HOP** | same `detectOut`; `kind: manual` findings flow as located guidance | state |
-| lint check → lint fix (bounded loop) | **HOP** | `lintFormatOut` at `$.context.lint_format` — `findings.length` drives progress-monotonicity breaker | state (loop-carried) |
-| any gate → review (breaker exhaustion) | **HOP** | residual `findings` arrays, advisory | state |
-| deliverable spec / brief | **Blackboard** | seed `$.input` + durable context keys | workflow |
-| acceptance criteria | **Blackboard** | written once at design, read by implement + verify (criteria ids join `verifyOut.criteria[].id`) | workflow |
-| stack descriptor + resolution provenance | **Blackboard** | the resolved profile; per-HOP `provenance` snapshots it point-in-time | workflow |
-| decisions log / design artifacts | **Blackboard** | multi-reader | workflow |
-| mission outcomes / status | Neither — engine surface | `workflow-response.outcomes` (`workflow-response.schema.json:60-74`), ADR-0008 | engine |
-| loop counters (`_fire_count.*`, while-iters) | Neither — engine bookkeeping | scrubbed by the engine (`runtime_chain.rs:1162-1166, 1229-1249`), filtered from agent prompts (`render_agent_data_block`, `:1209`) | engine |
+| CPM unit assignment → implement loop | HOP (shape = parent §11 open Q2) | per-unit deliverable + file-set | state |
+| scaffold → implement | **HOP** | `scaffoldOut` @ `$.context.scaffold`; `created`/`wired` seed the file surface | state |
+| implement → verify | **HOP** | `implementOut` @ `$.context.implement`; `changed` scopes `changed_only` verify | state |
+| verify → loop controller | **HOP** | `verifyOut` @ `$.context.verify`; guard branches on `.status` | state |
+| detect → codemod fix loop | **HOP** | `detectOut`; `findings[].fix` (SchemaBound) pairs `kind:codemod` to the loop | state (loop-carried) |
+| lint check → lint fix | **HOP** | `lintFormatOut`; `findings.length` drives the breaker | state (loop-carried) |
+| any gate → review (breaker exhaustion) | **HOP** | residual `findings`, advisory | state |
+| deliverable spec / acceptance criteria | **Blackboard** | seed `$.input`; criteria ids join `verifyOut.criteria[].id` | workflow |
+| stack descriptor + resolution provenance | **Blackboard** | resolved profile; per-HOP `provenance` snapshots it | workflow |
+| mission outcomes / status | Engine surface | `workflow-response.outcomes` (`:60-74`) | engine |
 
-Rule of thumb an author can apply: **if two non-adjacent steps read it, it's
-blackboard; if exactly the next step (or the loop it gates) reads it, it's a
-HOP and gets `scope: state`.**
+Rule of thumb: **if two non-adjacent steps read it, it's blackboard; if exactly
+the next step (or the loop it gates) reads it, it's a HOP with `scope: state`.**
 
 ---
 
-## 7. Open / risky choices
+## 7. Poka-yoke lints (defense for non-slot writes)
 
-1. **`criterion.evidence`: free-text string in v1.** Structured evidence
-   (`{kind, uri, summary}` like the response `evidence` def,
-   `workflow-response.schema.json:159-169`) is strictly additive later
-   (greenfield, no deprecation windows). The FM4 guard ("met:true + empty
-   evidence") is a doctor **warning**, deliberately not schema-enforceable —
-   encoding it as a schema conditional would turn an honesty nudge into a
-   run-killer.
-2. **Finding location: `line` required, `end_line`/`column` optional.** Spec
-   B's tree-sitter matchers natively produce spans — certain, not
-   speculative — and adding the optional fields now spares a core rev in the
-   very next spec. Single-line producers simply omit them.
-3. **`severity` value set `info|warning|error|critical`, no `Ord` in core.**
-   The spine never compares severities; producers compute gate status against
-   the (config-side) threshold; `severity_max` is observability-only. If a
-   core-side comparison consumer ever appears, add a `rank()` helper then —
-   the enum order in the schema is already the semantic order.
-4. **`lintFormatOut.fixed` = file paths**, aligning with the
-   `created`/`wired`/`changed` file-list convention. The alternative (the
-   resolved findings themselves) is richer but duplicates what the round
-   telemetry (Spec A §6) already counts. Revisit if the fix loop needs
-   per-rule fix attribution.
-5. **`implementOut.notes` = `array<string>`** (the spec's prose says "notes",
-   plural; a single blob invites prose-branching).
-6. **"content FailureClass" wording**: pinned to `Capability` for
-   agent-producer exhaustion (escalatable) and `ContentOther` for
-   deterministic-producer violations (surfaces) — see §4.5 note. If Spec A's
-   author intended `ContentSchema` for the agent path, that class would
-   *surface* instead of escalate (`classify.rs:57` excludes it), contradicting
-   FM7's "→ chain-walk escalation"; flagged for the parent spec to absorb.
-7. **Versioning/migration: additive-only, no version field.** Transition
-   records are immutable history; the `hop` property is optional so all
-   existing records remain schema-valid. Policy: `$defs` evolve additively
-   (new optional fields, new defs); a breaking change is a **new def name**
-   (`verifyOut2`), not a mutation — and pack-side drift is already load-loud
-   via contract-hash pinning (V15/V16). No `hop_version` field: it would be a
-   knob with no reader (measurement must change a decision).
-8. **`hopRecord.status` optional** (absent for scaffold/implement). The
-   alternative — forcing `pass` on non-gates — would fabricate gate signals
-   and corrupt the `not_evaluated` count the observability section exists to
-   surface.
-9. **`schema_ref` grammar** (`^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)?$`)
-   assumes V20's `<namespace>/<name>` shape; confirm the exact namespace
-   charset against `load_repo`'s prefixer during implementation and tighten
-   the pattern to match — the pattern must never be *looser* than the loader.
-10. **V24's static `schema_ref` walk is thin until Spec B** (§4.2 honesty
-    note). The runtime unresolved-ref fail-fast (§4.4) carries the invariant
-    in the interim.
+With `hop_slot:` first-class, the bypass class largely evaporates. Two load-time
+lints remain as defense for authoring mistakes on **non-slot** paths:
+
+- **A transition that writes a slot-named key (`$.context.{verify,detect,scaffold,implement,lint_format}`)
+  without an injected `hop_slot` contract errors at load.** The core knows the five
+  slot names; a slot-named write with no contract is the FM-7/FM-13 hole. Slots
+  MUST be `hop_slot:`-declared. (Softens the earlier over-strong claim "the spine
+  cannot branch on what config never surfaces" — config *can* surface an
+  unvalidated write on a non-slot path; this lint closes it.)
+- **Gate guards must compare `== "pass"`.** A negative-form guard (`status != "fail"`)
+  reads `not_evaluated`/missing as pass, defeating the tri-state. A doctor lint on
+  dispatch-flow guards flags negative comparisons against `.status`.
 
 ---
 
-## 8. Minimality check (§0 audit)
+## 8. Deferred (optional — added when a consumer exists)
 
-The complete core diff, enumerated:
-
-| # | Change | Size | Why it cannot be config |
-|---|---|---|---|
-| 1 | `transition-record.schema.json`: 12 `$defs` + 1 optional property | 1 file, ~150 lines of schema | The whole point: compile-time types (typify is build-time; packs load at runtime — Spec A §0). |
-| 2 | `gateway-config.schema.json`: 1 optional `schemas:` property | ~10 lines | Top-level config surface is `additionalProperties: false`; opening a registry block is definitionally a schema change. |
-| 3 | `praxec-schema/src/lib.rs`: `HOP_CORE_SCHEMA` const | 2 lines | Single-sourcing the bytes typify consumed for the runtime registry. |
-| 4 | `build.rs` | **zero** | Both touched schema files already in the input list (`build.rs:13-17`). |
-| 5 | V24 load pass + compiled-validator map | 1 function + 1 walk, patterned on `config.rs:2452-2476` | Load-time fail-fast is a core guarantee config cannot self-enforce (FM6). |
-| 6 | Registry-aware `compile_validator` at 2 call sites (`use_binding.rs:183`, `runtime_schema.rs:38`) | ~15 lines | `$ref praxec://hop#…` cannot resolve without it; strictly widening. |
-| 7 | `validate_schema_bound_values` + `SCHEMA_BOUND_PATHS` const + 1 call after `workflow.rs:445` | 1 helper, 1 three-row const | The boundary map (`schema_ref → schema → validate`) is the SchemaBound contract itself (§4.1). The const is the *scope limiter* — v1's "fix only" lock made structural. |
-| 8 | `expected_output_schema` + `conforms` upgrade + feedback phrasing in praxec-agents | 1 field, ~30 lines | Extends the existing loop rather than adding a validator elsewhere — the no-parallel-abstraction requirement. |
-| 9 | `hop` summary lift in `emit_transition_record` | ~25 lines | The record is engine-emitted; only the engine can attach it. |
-
-**Deliberately pushed OUT of core (config / later):**
-- All inner `fix` schemas, rulesets, severity thresholds, slot registrations,
-  dispatch flows, stack profiles — pack config (Spec A §2.3/§8).
-- Well-known context keys and `scope: state` HOP declarations — pack YAML
-  conventions riding existing mechanics (§5).
-- The `HopEnvelope` discriminated-union type — cut, no v1 consumer (§2.1).
-- SchemaBound generalization to a registry of extension points — cut per the
-  v1 lock; `SCHEMA_BOUND_PATHS` is where a second consumer would land, loudly.
-- Severity ordering helper, `hop_version`, structured evidence, family
-  inheritance, manifest auto-detection — all additive later, none blocks v1.
-- `STACK_RESOLVED` audit events and per-unit resolution — Spec A resolver
-  work, not typed-core; the core only *carries* their result
-  (`stackProvenance`).
-
-Nothing in rows 1–9 varies per stack; everything that varies per stack has a
-config home. That is §0's boundary, held.
+- **typify Rust types** — zero runtime consumers today (§1.2). If a Rust-side
+  consumer (cockpit, a dashboard) ever wants typed views, generate then; the E1
+  cross-file constraint and the def-name-uniqueness guard (§1.2) apply at that
+  point, not now.
+- **`hopRecord` transition-record summary** — a typed, queryable per-transition
+  slice (`slot`/`status`/`severity_max`/`finding_count`/`provenance`). Deferred:
+  `blackboardDelta` (`runtime.rs:1021-1025`) already carries the full per-transition
+  payload, so `not_evaluated`/gate counts are derivable by a query. If built later,
+  it attaches additively to the transition record (script `subject`/`hash`
+  precedent, `runtime.rs:983-1016`) and **omits `schema_refs`** (that field alone
+  required cross-crate `ExecuteResult` plumbing and duplicated `blackboardDelta`).
+- **Observability vehicle — open, flagged for the parent.** Parent §6 pins gate
+  status surfaced in *mission outcomes*; this doc defers `hopRecord` and derives
+  counts from `blackboardDelta`. Reconcile with the parent (same treatment as the
+  §4.4 FailureClass flag): either wire gate status into `workflow-response.outcomes`
+  or accept the `blackboardDelta`-query path.
 
 ---
 
-*Grounding: all file:line references against `mcp-flowgate` @ branch
-`readme-repositioning` (a6537d8), 2026-07-08. Empirical checks (§1.2) ran
-typify 0.6.2 / schemars 0.8.22 / jsonschema 0.46.10 — the exact workspace
-versions.*
+## 9. Open / risky choices
+
+1. **`criterion.evidence`: free-text in v1.** Structured evidence (`{kind, uri,
+   summary}`) is additive later. The FM4 guard ("met:true + empty evidence") is a
+   doctor **warning**, deliberately not schema-enforceable (a schema conditional
+   would turn an honesty nudge into a run-killer).
+2. **Finding location:** `line` required, `end_line`/`column` optional — Spec B's
+   tree-sitter matchers produce spans natively; adding the optional fields now
+   spares a schema rev next spec. Single-line producers omit them.
+3. **`severity` set `info|warning|error|critical`, no `Ord` in core** — the spine
+   never compares; producers compute gate status against the config-side threshold.
+   If a core comparison consumer appears, add `rank()` then; the schema order is
+   already semantic.
+4. **`lintFormatOut.fixed` = file paths** — aligns with `created`/`wired`/`changed`.
+5. **`implementOut.notes` = `array<string>`** — plural, so a single blob doesn't
+   invite prose-branching.
+6. **Additive-only versioning, no version field** — `$defs` evolve additively; a
+   breaking change is a **new def name** (`verifyOut2`), not a mutation; pack drift
+   is load-loud via V15/V16. No `hop_version` (a knob with no reader).
+7. **`schema_ref` grammar** assumes V20's `<namespace>/<name>` shape; confirm the
+   exact namespace charset against `load_repo`'s prefixer during implementation and
+   tighten to match — never looser than the loader.
+
+---
+
+## 10. Minimality — the three buckets
+
+The premise, verified: the engine already provides transport (`project_use_outputs`
++ `merge_output`), transience (`clear_state_local_slots_on_exit`), and per-transition
+audit (`emit_transition_record` + `blackboardDelta`). This design re-implements
+none of them. The core change decomposes:
+
+**Bucket 1 — strictly required (no config path):**
+| Change | Why config can't do it |
+|---|---|
+| `schemas/hop.schema.json` (the vocabulary bytes) + `include_str!` in praxec-core | Shipped, un-forkable interop contract; runtime-registered. |
+| `gateway-config.schema.json`: one optional `schemas:` property | Top-level config is `additionalProperties:false`; opening the registry block is a schema change. |
+| Registry-aware `compile_validator` (2 sites) + `HOP_REGISTRY` (+ serve-init + test) | A `$ref praxec://hop#…` cannot resolve without it; strictly widening. |
+| V24 load pass (register + compile `schemas:` + step-2b fragments + closed-world + canonical-spelling) | Load-time fail-fast is a core guarantee config can't self-enforce. |
+| `validate_schema_bound_values` (hardcoded `findings[].fix` walk) + 1 call after `workflow.rs:445` | The `schema_ref → schema → validate(value)` step is engine behavior. |
+| `hop_slot:` load-time expansion (inject `In`/`Out`, wire resolution) + 1 doctor rule | Declared-slot injection — the primitive itself (§3). |
+| Two non-slot lints (§7) | Load-time structural guards. |
+
+**Bucket 2 — core-vs-config choice, resolved to CORE:** the vocabulary content.
+It *could* live as a config pack schema `$ref`'d via the existing seam, but a
+config-owned vocab is forkable/overridable (V23); a **core-shipped one is
+un-forkable and single-sourced**. The interop contract earns core-anchoring — the
+core value is un-forkable contract **bytes enforced at runtime**, not compile-time
+types.
+
+**Bucket 3 — optional / deferred:** typify Rust types (inert, no consumer),
+`hopRecord` + its emission lift (`blackboardDelta` serves the query), the
+observability-vehicle reconciliation (§8).
+
+**Agent-side (praxec-agents):** `expected_output_schema` field + `conforms`
+upgrade + feedback phrasing — extends the existing loop, no parallel abstraction,
+no bundler (§4.4).
+
+Nothing in Bucket 1 varies per stack; everything that varies per stack has a config
+home. That is parent §0's boundary, held. The parallel fan-out/fan-in edges reuse
+these same `In`/`Out` contracts to type their map/reduce boundaries — defined as a
+sequenced extension in parent §7.1, not a new mechanism here.
+
+---
+
+*Grounding: all file:line references against `mcp-flowgate` (2026-07-08). The
+jsonschema registry behavior (alias URI vs `$id` dual addressability), the typify
+cross-file-`$ref` panic, and the FailureClass routing were each reproduced/verified
+in a harness against the exact workspace versions (jsonschema 0.46.10, typify
+0.6.2, schemars 0.8).*
