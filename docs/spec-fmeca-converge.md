@@ -6,13 +6,23 @@ loop applies **poka-yoke + TRIZ** mitigations and **re-scores the full FMECA**,
 bounded by a round counter (the LoopGuard tenet), escalating to a human on
 exhaustion.
 
-## Why it's an inline pattern, not a sub-flow
+## Why it's an inline pattern (one option, no longer forced)
 
-The praxec engine forbids a flow from invoking another flow via
-`kind: workflow` — **flows may only invoke capabilities** (SPEC §3, V11), and
+> **Update (V11 relaxed).** The original rationale below assumed the engine
+> forbade a flow from invoking another flow. That constraint has since been
+> **relaxed**: flows may now invoke other flows via `kind: workflow`
+> (`crates/praxec-core/src/validate.rs:225`), bounded by `MAX_WORKFLOW_DEPTH`
+> (fail-fast `WORKFLOW_DEPTH_EXCEEDED`). So a convergence *loop* can now also be a
+> **reusable sub-flow** invoked by consumers — inlining is one choice, not the only
+> one. (Note V10 still holds: *capabilities* may not invoke workflows — only flows
+> may.) The inline pattern below remains valid and is still fine for small (≈3
+> state) loops; prefer a reusable sub-flow when the loop is larger or shared widely.
+
+Historical rationale (pre-relaxation): the engine forbade a flow from invoking
+another flow via `kind: workflow` — flows could only invoke capabilities — and
 flows cannot carry a `snippet:` block (V8). A convergence *loop* is inherently
-multi-state, so it must be a flow; therefore it cannot be nested. The reuse is
-carried by the **capabilities + skills + this documented state pattern**, which
+multi-state, so it must be a flow; therefore it could not be nested, and the reuse
+was carried by the **capabilities + skills + this documented state pattern**, which
 each consuming flow inlines (≈3 states).
 
 ## Reusable units (compose these)
