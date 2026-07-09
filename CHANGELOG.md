@@ -12,10 +12,22 @@ The library is pre-1.0 (`0.0.x`) and not yet publicly released.
 
 - **Two-tier composition** — typed `cap.*` capabilities composed by `flow.*`
   lifecycle orchestrators (`flow.add-feature`, `flow.bugfix-from-error-log`,
-  `flow.safe-refactor`, `flow.triage-issue`, `flow.evidence-driven-convergence`),
+  `flow.safe-refactor`, `flow.triage-issue`, `flow.audit-codebase`),
   exposed through a top-level `praxec.repo.yaml` manifest under the
   `cognitive` namespace. A capability runs in its own scoped blackboard; only
-  its declared outputs propagate back to the host orchestrator.
+  its declared outputs propagate back to the host orchestrator. Flows may now
+  nest other flows via `kind: workflow` (V11 relaxed, depth-capped), so the
+  reusable sub-flows (`flow.derisk`, `flow.harden.fmeca-converge`,
+  `flow.implement.deliverable`, `flow.execute-cohorts`) compose into larger
+  programs (`flow.loom`).
+- **`flow.audit-docs`** — governed doc-vs-code drift audit over the `corpus`
+  docs-RAG server: a freshness gate (`corpus_index`) + retrieval
+  (`corpus_search`) feed a governed agent that emits typed per-claim drift
+  findings, aggregated into a report whose blocking (wrong | superseded) count
+  is the code-computed definition of done. Ships with `cap.fetch.doc-corpus`,
+  `cap.inspect.repo-digest`, `cap.review.doc-drift`, the
+  `audit.drift.aggregate` script, and the `connections/corpus.yaml` reference
+  connection.
 - **`cap.plan.brainstorm`** — divergent-thinking primitive that generates
   genuinely-different candidate options for any goal, each with explicit
   assumptions, tradeoffs (as an array, not a string — countable for downstream
@@ -34,5 +46,6 @@ The library is pre-1.0 (`0.0.x`) and not yet publicly released.
 
 ### Compatibility
 
-- Requires **praxec 0.0.13 or later** (the capability/orchestrator
-  composition model, the curated-script surface, and parallel execution).
+- Requires **praxec 0.0.14 or later** (the capability/orchestrator
+  composition model, the curated-script surface, parallel execution, and
+  relaxed V11 flow-nesting).

@@ -13,9 +13,9 @@ own governed agent systems.
 ## Get up and running
 
 One command provisions this pack **and its MCP tools** (cpm-planner, fmeca,
-elicitation, scientific-process), sets up your provider keys, and leaves you ready to
-serve — assuming the [`praxec`](https://github.com/praxec/praxec) gateway is installed
-(`cargo install praxec`):
+elicitation, scientific-process, corpus), sets up your provider keys, and leaves you
+ready to serve — assuming the [`praxec`](https://github.com/praxec/praxec) gateway is
+installed (`cargo install praxec`):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/praxec/packs/main/setup.sh | bash -s -- cognitive-architectures
@@ -43,8 +43,8 @@ executors), and **how to audit it** (transition records).
 > typed-contract sub-workflows, and **orchestrators** (`flow.*`) are
 > the lifecycle workflows that compose them. The shipping
 > orchestrators — `flow.add-feature`, `flow.bugfix-from-error-log`,
-> `flow.safe-refactor`, `flow.triage-issue`, and
-> `flow.evidence-driven-convergence` — cover the main inbound
+> `flow.safe-refactor`, `flow.triage-issue`, `flow.audit-codebase`,
+> and `flow.audit-docs` — cover the main inbound
 > surfaces of an engineering team. The composition is the point: this
 > is where the library claims **composable parity**, not just per-skill
 > parity, with broader skills ecosystems.
@@ -76,10 +76,13 @@ section):
   the verbs. Each state declares a `delegate` (which agent does the
   work), a `goal`, surfaced skills, and a transition table with guards
   and executors.
-- **Agent** (`agents/*.toml`) — a provider/model binding for a named
-  role with a scoped system prompt. Workflow authors name roles
-  (`planning-agent`, `editing-agent`, etc.); operators bind those names
-  to actual models.
+- **Agent** (`agents/*.toml`) — a named role with a scoped system
+  prompt. Workflow authors name roles (`planning-agent`,
+  `editing-agent`, etc.); operators bind each role (or its `affinity`)
+  to a concrete `provider:model-id` in `.praxec/models.yaml` — the file
+  named by `gateway.models_yaml`, which a `kind: agent` step resolves
+  through at dispatch (`praxec check` errors if it declares an agent
+  step without that key set).
 - **Connection** (`connections/*.yaml`) — an executor definition for an
   external tool: an MCP server, a CLI, or a REST endpoint.
 - **Script** (`scripts-library/*.yaml`) — a curated, hash-pinned script
@@ -140,7 +143,17 @@ the two-tier model exists to enable.
 | `flow.bugfix-from-error-log` | Incident response | Error log / stack trace |
 | `flow.safe-refactor` | Code-health | Scope description (paths or component) |
 | `flow.triage-issue` | Intake | New issue / ticket |
-| `flow.evidence-driven-convergence` | Deterministic decision-gating | Most-fragile assumption + desk evidence |
+| `flow.audit-codebase` | Quality-gate audit | Repo path + audit focus |
+| `flow.audit-docs` | Doc-vs-code drift audit (over `corpus`) | Repo + doc topic |
+| `flow.greenfield-mcp` | Greenfield build with staged risk gates | New-project brief |
+| `flow.pressure-test.use-cases` | Decision-gating via falsification | Design + use cases to falsify |
+| `flow.loom` | Full elicit → design → plan → execute program | Intent brief |
+
+Reusable sub-flows (nested by the above via `kind: workflow`, V11 relaxed):
+`flow.derisk` (elicit → design → FMECA), `flow.harden.fmeca-converge`
+(FMECA → mitigate → re-FMECA convergence loop),
+`flow.implement.deliverable`, and `flow.execute-cohorts` (cpm-planner
+cohort driver).
 
 The repo manifest exposes `capabilities/`, `orchestrators/`, `skills/`,
 and `scripts-library/` — the gateway's capability, flow, skill, and
@@ -278,7 +291,7 @@ praxec serve --config examples/full-swe-pipeline.yaml
 
 You'll need:
 
-- `praxec` 0.0.13 or later
+- `praxec` 0.0.14 or later
   (`cargo install praxec`). It provides the scripts surface
   (SPEC §22), the verb taxonomy (SPEC §5/§22), the intent-layer
   invariant (SPEC §23), and parallel execution (SPEC §24) — the last is
@@ -309,9 +322,11 @@ We accept new architectures by PR. To keep the library coherent:
    `plan`, `implement`, `review`, `refactor`, `explain`, `compose`,
    `research`, `summarize`. There is no escape hatch; if your guidance
    doesn't fit, the workflow shape probably needs to split.
-3. **Use a blessed subject root.** `review.*`, `authoring.*`, `debug.*`,
-   `deploy.*`, `import.*`, `lifecycle.*`, `plan.*`, plus one of the
-   eight verb-mirror roots. Subjects outside these fail config-load.
+3. **Use a blessed subject root.** Five domain-themed roots
+   (`authoring.*`, `debug.*`, `deploy.*`, `import.*`, `lifecycle.*`)
+   plus the ten verb-mirror roots (`triage`, `diagnose`, `plan`,
+   `implement`, `review`, `refactor`, `explain`, `compose`, `research`,
+   `summarize`) — fifteen in all. Subjects outside these fail config-load.
 4. **`lifecycle:` honestly.** New, unproven guidance ships as
    `experimental`. Promote to `stable` only when at least one operator
    has run it in production for a quarter.

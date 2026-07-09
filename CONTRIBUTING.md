@@ -142,6 +142,6 @@ That surfaces every V1-V23 violation against the live tree.
 ## Versioning
 
 Cognitive-architectures is pre-1.0 (`0.0.x`) and follows praxec's
-spec. This library is only meaningful against **praxec 0.0.13 or
+spec. This library is only meaningful against **praxec 0.0.14 or
 later** — the manifest schema, snippet contract, and slot-table machinery
 all land together. CHANGELOG.md records the required praxec version.

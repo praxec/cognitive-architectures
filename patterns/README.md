@@ -69,4 +69,4 @@ for d in patterns/*/; do
 done
 ```
 
-Every pattern validates against praxec 0.0.13 or later.
+Every pattern validates against praxec 0.0.14 or later.

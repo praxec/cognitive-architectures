@@ -6,7 +6,7 @@ planning task with lexicon grounding + FMECA optimization.
 ## Setup
 
 ```bash
-# Build the praxec binary (0.0.13+)
+# Build the praxec binary (0.0.14+)
 cd ~/working/praxec
 cargo build --release -p praxec
 export PATH="$(pwd)/target/release:$PATH"

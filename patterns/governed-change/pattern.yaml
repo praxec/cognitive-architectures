@@ -18,7 +18,7 @@ connections:
     command: dotnet
 
 audit:
-  sink: stdout
+  sink: stderr
 
 workflows:
   engineering_change:

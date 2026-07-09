@@ -4,7 +4,8 @@
 # the agent runs the `plan.ux-design.expert` skill (cognitive science + HCI +
 # UX engineering + Jobs-to-be-Done) over a human-facing artifact and submits a
 # structured design whose weak assumptions are then vetted by the simulation
-# engine. Pair with a frontier model (set the affinity in models.yaml).
+# engine. Pair with a frontier model (set the affinity in .praxec/models.yaml,
+# the `gateway.models_yaml` file).
 
 workflows:
   cap.plan.ux-design:

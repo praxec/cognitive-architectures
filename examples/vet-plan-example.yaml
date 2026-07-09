@@ -23,7 +23,7 @@ include:
   - ../skills/review.code.adversarial.yaml
 
 audit:
-  sink: stdout
+  sink: stderr
 
 # Seed lexicon — example ubiquitous-language terms for the gateway
 # bounded context. Real operators replace this with their org's

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/validate.sh — runs `praxec check` against every example.
 #
-# Requires `praxec` v0.2.0 or later on PATH (the expanded 13-root
-# blessed subject namespace is required). Install with:
+# Requires `praxec` 0.0.14 or later on PATH (the 15-root blessed
+# subject namespace + 12-verb script cloud are required). Install with:
 #   cargo install praxec
 # or build from source at github.com/praxec/praxec.
 

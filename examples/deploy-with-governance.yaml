@@ -36,4 +36,4 @@ connections:
       production.
 
 audit:
-  sink: stdout
+  sink: stderr
