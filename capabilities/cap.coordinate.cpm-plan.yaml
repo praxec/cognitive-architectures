@@ -16,7 +16,7 @@ workflows:
       (critical path, bottlenecks, parallel cohorts).
     snippet:
       inputs:
-        tasks: { type: object, required: true }
+        graph: { type: object, required: true }
       outputs:
         schedule: { type: object }
     initialState: ready
@@ -33,9 +33,10 @@ workflows:
               tool: plan.submit
               # McpExecutor resolves `map:` (NOT `arguments:`) against
               # $.arguments / $.context / $.workflow.input. The cap input
-              # `tasks` lives in workflow.input, so bind graph from there.
+              # `graph` lives in workflow.input; bind the tool's `graph` param
+              # from it (name harmonized with cap.plan.build-graph + the tool).
               map:
-                graph: "$.workflow.input.tasks"
+                graph: "$.workflow.input.graph"
             output:
               schedule: "$.output"
       done: { terminal: true }

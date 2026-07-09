@@ -104,7 +104,7 @@ workflows:
               definitionId: cognitive/cap.coordinate.cpm-plan
               use:
                 inputs:
-                  tasks: "$.context.graph"
+                  graph: "$.context.graph"
                 outputs:
                   "$.context.schedule": schedule
 
