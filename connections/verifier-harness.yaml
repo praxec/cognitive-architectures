@@ -12,9 +12,7 @@
 connections:
   verifier_harness:
     kind: mcp
-    transport:
-      kind: streamable_http
-      url: "http://localhost:7200/mcp"
+    url: "http://localhost:7200/mcp"
     description: >
       Deterministic verifier harness (lint, type, test, sast, policy).
       Returns structured pass/fail per gate.

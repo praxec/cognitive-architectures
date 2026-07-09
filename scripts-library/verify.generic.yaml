@@ -1,0 +1,15 @@
+version: "1.0.0"
+scripts:
+  verify.generic:
+    verb: verify
+    lifecycle: stable
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # The honest generic verify FLOOR (Spec A §3.1 / §5.5). When no
+      # stack-specific `cap.verify.<stack>` is registered for a workflow's stack,
+      # hop_slot resolution falls back here. It emits `status: not_evaluated` —
+      # "I had nothing to check with" — NEVER a disguised pass. Emitted as the
+      # canonical HOP verifyOut (praxec://hop#/$defs/verifyOut).
+      set -uo pipefail
+      printf '{"status":"not_evaluated","summary":"no stack-specific verify cap is registered for this stack; the generic floor did not evaluate any acceptance criteria","criteria":[],"findings":[],"provenance":{"stack":"generic","source":"generic"}}\n'

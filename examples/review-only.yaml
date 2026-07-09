@@ -22,4 +22,4 @@ include:
   - ../skills/review.code.final-approval.yaml
 
 audit:
-  sink: stdout
+  sink: stderr

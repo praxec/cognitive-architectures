@@ -1,0 +1,143 @@
+# orchestrators/flow.audit-docs.yaml
+#
+# Audit a repo's DOCUMENTATION against its CODE and emit a typed drift report.
+# Reusable on any repo (praxec itself, the site, cog-arch) — parameterized by
+# `repo_path` + `topic` (the audit slice). Dogfoods the `corpus` docs-RAG MCP
+# server to vet praxec's own docs.
+#
+#   retrieving  → cap.fetch.doc-corpus: FRESHNESS-GATE the docs index
+#                 (corpus_index, incremental) then retrieve the ranked doc
+#                 passages for `topic` (corpus_search) — the CLAIMS under audit.
+#   digesting   → cap.inspect.repo-digest: a bounded structural digest of the
+#                 same repo (file tree, crate layout, risk markers) — the
+#                 NAVIGATION MAP the audit agent uses to target its file reads.
+#   auditing    → cap.review.doc-drift: a DELEGATE agent WITH tools (corpus_search
+#                 + repo file-read, wired via auto_drive_tools) retrieves the
+#                 ACTUAL source per claim and emits ONE typed finding per claim
+#                 (verdict aligned|drifted|wrong|superseded + severity +
+#                 suggested_fix). Retrieval + judgment — no rollup.
+#   aggregating → audit.drift.aggregate: fold findings into a drift report —
+#                 counts by verdict/severity + the BLOCKING total (wrong |
+#                 superseded) the outcome gates on. Code-computed verdict, not
+#                 an LLM one.
+#
+# The producers are wrapped in caps (fetch/inspect) so their `snippet.outputs`
+# seed the flow slot table (V13) and the audit step can consume doc_evidence +
+# code_digest via `use:.inputs` — an inline `output:` block would not (this is
+# why flow.execute-cohorts wraps its acquire in a cap). All steps are single-
+# transition (no branch states → no default needed, V23). Deterministic code
+# retrieves + aggregates; the LLM only judges (fmeca-style split). One topic per
+# run: audit a doc-set by running N instances with distinct topics, or widen `k`.
+# Advisory by default; the `docs_aligned` outcome makes the blocking count the
+# machine-checkable definition of done.
+#
+# Requires the `corpus` connection (reference: connections/corpus.yaml),
+# cognitive/cap.fetch.doc-corpus, cognitive/cap.inspect.repo-digest,
+# cognitive/cap.review.doc-drift, and the audit.drift.aggregate script.
+
+workflows:
+  flow.audit-docs:
+    lifecycle: experimental
+    description: >
+      Audit a repo's docs against its code for a topic: freshness-gate + retrieve
+      the claims (corpus), digest the code, have a governed agent emit typed
+      per-claim drift findings, and aggregate them into a drift report. Reusable
+      on any repo; the blocking (wrong | superseded) count is the code-computed
+      definition of done.
+    inputs:
+      repo_path: { type: string, required: true }
+      # The audit slice — becomes the corpus_search query (e.g. "executor kinds
+      # and governance", "configuration and defaults", "CLI commands").
+      topic:     { type: string, required: true }
+      # Retrieval breadth: how many doc chunks to put under audit this run.
+      k:         { type: integer, default: 12 }
+    outcomes:
+      - id: docs_aligned
+        statement: >
+          No documentation claim contradicts the code — zero blocking
+          (wrong | superseded) drift findings for this topic.
+        check: "$.context.drift_blocking == 0"
+    initialState: retrieving
+    states:
+
+      # FRESHNESS-GATE + retrieve the doc passages for the topic (the CLAIMS).
+      retrieving:
+        goal: Freshen the docs index, then retrieve the passages for the topic.
+        transitions:
+          retrieve:
+            target: digesting
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.fetch.doc-corpus
+              use:
+                inputs:
+                  repo_path: "$.workflow.input.repo_path"
+                  topic:     "$.workflow.input.topic"
+                  k:         "$.workflow.input.k"
+                outputs:
+                  "$.context.doc_evidence": doc_evidence
+                  "$.context.index_stats":  index_stats
+
+      # Deterministic code digest — CODE REALITY for the tool-less agent.
+      digesting:
+        goal: Gather bounded structural facts about the code (the reality side).
+        transitions:
+          digest:
+            target: auditing
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.inspect.repo-digest
+              use:
+                inputs:
+                  repo_path: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.repo_digest": code_digest
+
+      # The judgment gate: one typed drift finding per doc claim.
+      auditing:
+        goal: Judge each doc claim against code reality; emit typed findings.
+        transitions:
+          audit:
+            target: aggregating
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.doc-drift
+              use:
+                inputs:
+                  doc_evidence: "$.context.doc_evidence"
+                  code_digest:  "$.context.repo_digest"
+                  topic:        "$.workflow.input.topic"
+                  repo_path:    "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.findings": findings
+
+      # Deterministic rollup → the drift report + the scalar the outcome gates on.
+      aggregating:
+        goal: Aggregate findings into a drift report (counts + blocking total).
+        transitions:
+          aggregate:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: audit.drift.aggregate
+              args: ["$.context.findings"]
+            # Plain script-executor `output:` block — LEFT-hand keys are BARE
+            # slot names (unlike a cap's `use.outputs`, whose keys are
+            # `$.context.*` paths). Prefixing them here writes a context field
+            # literally named `$.context.drift_blocking` and leaves the real
+            # `drift_blocking` slot UNSET, so the `docs_aligned` outcome guard
+            # errors GUARD_UNSET_SLOT (found by the live dogfood run).
+            output:
+              drift_report:   "$.output.json"
+              drift_blocking: "$.output.json.blocking_count"
+              drift_detected: "$.output.json.drift_detected"
+
+      # Terminal: $.context.drift_report holds the full report; drift_blocking is
+      # the code-computed definition of done (0 ⇒ docs_aligned).
+      done:
+        terminal: true
+        outcome: success

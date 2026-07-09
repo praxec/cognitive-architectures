@@ -1,0 +1,99 @@
+# capabilities/cap.review.doc-drift.yaml
+#
+# Documentation drift gate (judgment half of a doc-vs-code audit). Cognitive cap:
+# a DELEGATE agent WITH retrieval tools sees the `review.doc-drift.critic` skill
+# and, from the retrieved doc passages (`doc_evidence`, from the corpus docs-RAG)
+# plus the code it pulls LIVE, emits ONE typed finding per doc claim —
+# `{ doc, heading_path, claim, code_reality, verdict, severity, confidence,
+# evidence, suggested_fix, needs_code_read }`. It does NOT roll up counts or a
+# pass/fail verdict — that deterministic aggregation is the `audit.drift.aggregate`
+# script's job (flow.audit-docs wires the two together).
+#
+# Verb `review` is cognitive (SPEC §4, V6). The `auditing` state is an
+# `actor: agent` leaf driven headlessly by auto-drive as a multi-turn, tool-using
+# session (the same delegate-with-tools shape as swe-agent.yaml's per-state
+# delegates). Its tools are wired by the driving gateway config's
+# `praxec.agents.auto_drive_tools`:
+#   - `corpus`                          -> corpus_search (widen doc context)
+#   - `file:{{ $.workflow.input.repo_path }}` -> read_file / read_range /
+#                                          search_file over the audited repo
+# so the critic retrieves the ACTUAL source for each claim rather than judging a
+# static digest. `code_digest` is passed only as a NAVIGATION MAP (which files
+# exist); the verdict rests on code the agent reads. Clean split: the agent
+# retrieves + judges, a downstream script aggregates. See examples/audit-docs-run.yaml
+# for the config that wires these tools + the corpus connection.
+
+workflows:
+  cap.review.doc-drift:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Audit documentation against code reality: given retrieved doc passages and
+      a code digest for a repo, emit one typed drift finding per claim (verdict
+      aligned|drifted|wrong|superseded + severity + suggested_fix), so a flow can
+      aggregate and branch on real, code-grounded documentation drift.
+    snippet:
+      inputs:
+        # Ranked doc chunks from corpus_search: [{ path, heading_path, snippet, score }].
+        doc_evidence: { type: array, required: true }
+        # Structural digest of the same repo (inspect.repo output) — a NAVIGATION
+        # MAP (which files exist) the agent uses to target its file reads.
+        code_digest:  { type: object, required: true }
+        # The audit slice / corpus_search query this batch covers.
+        topic:        { type: string, required: true }
+        # Repo root — roots the `file:` read tools + the corpus_search retarget.
+        repo_path:    { type: string, required: true }
+      outputs:
+        findings: { type: array }
+    skills: [review.doc-drift.critic]
+    initialState: auditing
+    states:
+      auditing:
+        # SENIOR reviewer tier (producer != evaluator): pick the model chain the
+        # driving models.yaml binds to `review`.
+        affinity: review
+        goal: >
+          You are auditing docs against code and you HAVE retrieval tools. Read
+          $.context — the doc passages ($.context.doc_evidence), the code-file map
+          ($.context.code_digest), the audit topic ($.context.topic), and the repo
+          root ($.context.repo_path). For each checkable claim in the doc passages:
+          (1) from code_digest's file tree pick the file(s) the claim is about;
+          (2) use search_file / read_range / read_file to retrieve the ACTUAL
+          source, and corpus_search to widen doc context when a claim spans more
+          than its chunk; (3) rule on the claim against the code you read. Emit one
+          typed finding per claim { doc, heading_path, claim, code_reality, verdict
+          (aligned|drifted|wrong|superseded), severity, confidence, evidence,
+          suggested_fix, needs_code_read }. Every wrong/drifted/superseded verdict
+          MUST quote the contradicting source line (path:line + text) you
+          retrieved; only where the code genuinely cannot resolve a claim after you
+          searched, keep it conservative (confidence low, needs_code_read true).
+          Submit `findings`.
+        transitions:
+          submit_findings:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [findings]
+              properties:
+                findings:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    required: [doc, claim, verdict, severity]
+                    properties:
+                      doc:             { type: string }
+                      heading_path:    { type: string }
+                      claim:           { type: string }
+                      code_reality:    { type: string }
+                      verdict:         { type: string, enum: [aligned, drifted, wrong, superseded] }
+                      severity:        { type: string, enum: [critical, high, medium, low] }
+                      confidence:      { type: string, enum: [high, medium, low] }
+                      evidence:        { type: string }
+                      suggested_fix:   { type: string }
+                      needs_code_read: { type: boolean }
+            executor: { kind: noop }
+            output:
+              findings: "$.arguments.findings"
+      done: { terminal: true }

@@ -67,7 +67,7 @@ workflows:
       # the model tier; when the TOP rung is still rejected, hand to a human —
       # never spin. The decision is computed by the deterministic
       # `escalate.qa-ladder` script (observation-only: code decides, gate routes).
-      # Rungs are affinity/tier keys (models.yaml); each leads with a more capable
+      # Rungs are affinity/tier keys (.praxec/models.yaml); each leads with a more capable
       # model: coding(deepseek) → coding-standard(glm-5.2) → coding-frontier(sonnet).
       qa_same_model_retries: 2
       qa_model_ladder:   "coding,coding-standard,coding-frontier"

@@ -1,0 +1,43 @@
+# capabilities/cap.inspect.repo-digest.yaml
+#
+# Deterministic repo digest as a reusable capability: bind the `inspect.repo`
+# script (bounded structural facts — file tree + line counts, crate layout, risk
+# markers) and surface it as a typed `code_digest` output. The in-process agent
+# has no file tools, so a downstream judgment leaf (FMECA enumeration, doc-drift
+# audit) works from this digest as its window into CODE REALITY.
+#
+# Verb `inspect` is deterministic (SPEC §4, V6 → primary executor `kind: script`
+# or `kind: mcp`); the leaf is `kind: script` over `inspect.repo`. Wrapping the
+# script in a cap (vs. calling it inline in the flow) is what lets the flow's
+# audit step consume `code_digest` via `use:.inputs` — the cap's `snippet.outputs`
+# seed the flow slot table (V13); an inline `output:` block would not.
+
+workflows:
+  cap.inspect.repo-digest:
+    verb: inspect
+    lifecycle: experimental
+    description: >
+      Gather a bounded structural digest of a repo (file tree + line counts,
+      crate layout, risk markers) via the inspect.repo script; surface it as a
+      typed code_digest for a downstream tool-less judgment leaf.
+    snippet:
+      inputs:
+        repo_path: { type: string, required: true }
+      outputs:
+        code_digest: { type: object }
+    initialState: ready
+    states:
+      ready:
+        goal: Digest the repo's structure into bounded facts (the code-reality side).
+        transitions:
+          digest:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.repo
+              args:
+                - "$.workflow.input.repo_path"
+            output:
+              code_digest: "$.output.json"
+      done: { terminal: true }

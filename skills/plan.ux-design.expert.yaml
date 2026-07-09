@@ -4,7 +4,7 @@
 # A model running this skill reasons as a PhD-level UX scientist-practitioner:
 # cognitive science + human-computer interaction + UX engineering, coupled to
 # Jobs-to-be-Done. Pairs best with a frontier model (set the affinity to a
-# frontier tier in models.yaml).
+# frontier tier in .praxec/models.yaml, the `gateway.models_yaml` file).
 
 skills:
   plan.ux-design.expert:
