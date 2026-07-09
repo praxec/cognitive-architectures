@@ -1,0 +1,67 @@
+# scripts-library/audit.drift.aggregate.yaml
+#
+# DETERMINISTIC aggregation for flow.audit-docs: fold the LLM's per-claim drift
+# findings into a report. The critic (cap.review.doc-drift) emits one typed
+# finding per claim; the pass/fail verdict must NOT be an LLM judgment — it is a
+# code-computed rollup ("deterministic tools over LLM math"). This script counts
+# findings by verdict + severity, computes the BLOCKING total (verdict wrong |
+# superseded — a reader following the docs would fail) and the aligned ratio, and
+# emits `drift_detected` (any non-aligned finding). A flow branches / an outcome
+# gates on the scalar `blocking_count`, never on prose.
+#
+# Arg $1 = the findings array as a JSON string (the mcp/script arg renderer
+# stringifies a `$.context.findings` array value). Emits JSON on stdout, read at
+# $.output.json.*. Subject root `audit` is a blessed script namespace (SPEC §22.3,
+# graded-findings verb — not a binary pass/fail; it is a report).
+version: "1.0.0"
+scripts:
+  audit.drift.aggregate:
+    verb: audit
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Aggregate typed doc-drift findings into a drift report.
+      #   $1 / FINDINGS_JSON — the findings array (JSON string). Defaults to [].
+      set -uo pipefail
+      FINDINGS="${1:-${FINDINGS_JSON:-[]}}"
+
+      # Guard: if the arg is not valid JSON array, emit an empty, well-formed
+      # report rather than crashing the flow (fail-soft on a malformed upstream
+      # payload; the report makes the emptiness visible).
+      if ! printf '%s' "$FINDINGS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        jq -n --arg raw "$FINDINGS" \
+          '{error: "findings arg was not a JSON array", total: 0, drift_detected: false,
+            blocking_count: 0, by_verdict: {}, by_severity: {}, blocking: [], raw: $raw}'
+        exit 0
+      fi
+
+      printf '%s' "$FINDINGS" | jq '
+        # Normalize: default any missing verdict/severity to safe buckets.
+        map(.verdict //= "aligned" | .severity //= "low") as $f
+        | ($f | length) as $total
+        | ($f | map(select(.verdict == "aligned")) | length) as $aligned
+        | ($f | map(select(.verdict == "wrong" or .verdict == "superseded"))) as $blocking
+        | {
+            total:          $total,
+            drift_detected: (($total - $aligned) > 0),
+            blocking_count: ($blocking | length),
+            aligned_ratio:  (if $total > 0 then (($aligned / $total) * 100 | floor) else 100 end),
+            by_verdict: {
+              aligned:    ($f | map(select(.verdict == "aligned"))    | length),
+              drifted:    ($f | map(select(.verdict == "drifted"))    | length),
+              wrong:      ($f | map(select(.verdict == "wrong"))      | length),
+              superseded: ($f | map(select(.verdict == "superseded")) | length)
+            },
+            by_severity: {
+              critical: ($f | map(select(.severity == "critical")) | length),
+              high:     ($f | map(select(.severity == "high"))     | length),
+              medium:   ($f | map(select(.severity == "medium"))   | length),
+              low:      ($f | map(select(.severity == "low"))      | length)
+            },
+            needs_code_read: ($f | map(select(.needs_code_read == true)) | length),
+            # The blocking findings, trimmed to what a maintainer acts on first.
+            blocking: ($blocking | map({doc, heading_path, claim, verdict, severity, suggested_fix})),
+            findings: $f
+          }
+      '

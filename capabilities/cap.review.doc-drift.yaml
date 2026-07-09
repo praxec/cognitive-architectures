@@ -1,0 +1,82 @@
+# capabilities/cap.review.doc-drift.yaml
+#
+# Documentation drift gate (judgment half of a doc-vs-code audit). Cognitive cap:
+# the agent driving the gateway sees the `review.doc-drift.critic` skill and, from
+# the retrieved doc passages (`doc_evidence`, from the corpus docs-RAG) plus a
+# deterministic code digest (`code_digest`), emits ONE typed finding per doc claim
+# — `{ doc, heading_path, claim, code_reality, verdict, severity, confidence,
+# evidence, suggested_fix, needs_code_read }`. It does NOT roll up counts or a
+# pass/fail verdict — that deterministic aggregation is the `audit.drift.aggregate`
+# script's job (flow.audit-docs wires the two together).
+#
+# Verb `review` is cognitive (SPEC §4, V6 → primary executor `kind: noop`
+# skill-surfacing or `kind: mcp`); the one-shot `actor: agent` + `kind: noop` +
+# `inputSchema` leaf is the same governed pattern as cap.review.completeness /
+# cap.research.context-assemble. The in-process agent has no file tools, so the
+# calling flow gathers evidence deterministically FIRST (corpus_search +
+# inspect.repo) and hands it in as context — clean split: deterministic code
+# retrieves, the LLM judges, a script aggregates.
+
+workflows:
+  cap.review.doc-drift:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Audit documentation against code reality: given retrieved doc passages and
+      a code digest for a repo, emit one typed drift finding per claim (verdict
+      aligned|drifted|wrong|superseded + severity + suggested_fix), so a flow can
+      aggregate and branch on real, code-grounded documentation drift.
+    snippet:
+      inputs:
+        # Ranked doc chunks from corpus_search: [{ path, heading_path, snippet, score }].
+        doc_evidence: { type: array, required: true }
+        # Deterministic structural digest of the same repo (inspect.repo output).
+        code_digest:  { type: object, required: true }
+        # The audit slice / corpus_search query this batch covers.
+        topic:        { type: string, required: true }
+      outputs:
+        findings: { type: array }
+    skills: [review.doc-drift.critic]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Read $.context — the doc passages ($.context.doc_evidence), the code
+          digest ($.context.code_digest), and the audit topic
+          ($.context.topic). For each checkable claim in the doc passages,
+          judge it against code reality and emit a typed finding
+          { doc, heading_path, claim, code_reality, verdict
+          (aligned|drifted|wrong|superseded), severity, confidence, evidence,
+          suggested_fix, needs_code_read }. Cite contradicting evidence for any
+          wrong/superseded verdict; where the digest cannot verify a claim, keep
+          it conservative (confidence low, needs_code_read true). Submit
+          `findings`.
+        transitions:
+          submit_findings:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [findings]
+              properties:
+                findings:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    required: [doc, claim, verdict, severity]
+                    properties:
+                      doc:             { type: string }
+                      heading_path:    { type: string }
+                      claim:           { type: string }
+                      code_reality:    { type: string }
+                      verdict:         { type: string, enum: [aligned, drifted, wrong, superseded] }
+                      severity:        { type: string, enum: [critical, high, medium, low] }
+                      confidence:      { type: string, enum: [high, medium, low] }
+                      evidence:        { type: string }
+                      suggested_fix:   { type: string }
+                      needs_code_read: { type: boolean }
+            executor: { kind: noop }
+            output:
+              findings: "$.arguments.findings"
+      done: { terminal: true }
