@@ -1,0 +1,72 @@
+# capabilities/cap.implement.resolve-conflicts.yaml
+#
+# Merge-conflict RESOLUTION — the high-stakes agent hop in flow.check-in.
+# When check-in's trial merge of the integration base conflicts, the merge is
+# left IN PROGRESS in the working tree (inspect.git.merge-conflicts) and this
+# cap's agent resolves it. The state pins `affinity: review` — the SENIOR
+# model tier (same escalation the build-loop uses for its QA reviewers), NOT
+# the cheap coding tier: a bad conflict resolution silently destroys one
+# side's work, so this is exactly where the more capable model earns its cost.
+#
+# Split of powers (agents get file tools, not shell): the agent only EDITS the
+# conflicted files to a semantically-correct merge and reports what it
+# resolved; the deterministic `run.git.merge-finish` script then verifies NO
+# markers remain and commits the merge — a half-resolved or hallucinated
+# resolution is never committed (it routes to check-in's needs_human instead).
+
+workflows:
+  cap.implement.resolve-conflicts:
+    verb: implement
+    lifecycle: experimental
+    description: >
+      Resolve an in-progress git merge's conflicts by editing the conflicted
+      files to a semantically-correct merge (senior `review` model tier —
+      conflict resolution is high-stakes). Deterministic verification and the
+      merge commit happen downstream; an incomplete resolution is never
+      committed.
+    snippet:
+      inputs:
+        # Repo root — roots the agent's `file:` read/write/search tools; the
+        # in-progress merge (with conflict markers) lives in this tree.
+        repo_path: { type: string, required: true }
+      outputs:
+        resolved_files:     { type: string }
+        resolution_summary: { type: string }
+    initialState: resolving
+    states:
+      resolving:
+        # ESCALATED tier: the model chain the driving models.yaml binds to
+        # `review` (senior/frontier), not the base coding tier.
+        affinity: review
+        goal: >
+          You are resolving GIT MERGE CONFLICTS and you HAVE file tools rooted
+          at the repo. An integration merge is IN PROGRESS in this working
+          tree: one or more files contain conflict markers (<<<<<<< /
+          ======= / >>>>>>>). Use your search tool to find every file
+          containing "<<<<<<<", read each conflict WITH ENOUGH SURROUNDING
+          CONTEXT to understand both sides, and edit the file to a
+          semantically-correct merge that preserves the INTENT OF BOTH SIDES —
+          never blindly keep one side, never invent new behavior, and remove
+          every marker you resolve. If a conflict genuinely cannot be resolved
+          with confidence, LEAVE ITS MARKERS IN PLACE and say so in
+          `resolution_summary` — a downstream deterministic check refuses to
+          commit while markers remain, and an honest partial resolution routes
+          to a human instead of shipping a broken merge. Submit
+          `resolved_files` (a single space-separated string of repo-relative
+          paths you fully resolved) and `resolution_summary` (what each
+          conflict was and how you merged it, or why you could not).
+        transitions:
+          submit_resolution:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [resolved_files]
+              properties:
+                resolved_files:     { type: string }
+                resolution_summary: { type: string }
+            executor: { kind: noop }
+            output:
+              resolved_files:     "$.arguments.resolved_files"
+              resolution_summary: "$.arguments.resolution_summary"
+      done: { terminal: true }

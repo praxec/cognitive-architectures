@@ -1,0 +1,62 @@
+# scripts-library/run.git.merge-finish.yaml
+#
+# Conflict-resolution VERIFIER + committer for flow.check-in. The resolver
+# agent only EDITS the conflicted files (agents get file tools, not shell);
+# this script is the deterministic half that decides whether the resolution is
+# actually complete and, only then, commits the merge:
+#   1. a merge must be in progress (MERGE_HEAD present)
+#   2. NO conflict marker (<<<<<<< / ======= / >>>>>>>) may remain in any
+#      previously-unmerged file — a half-resolved merge is NEVER committed
+#      (the merge is left in progress for a human instead)
+#   3. stage the resolved files, confirm the index has no unmerged entries,
+#      and commit the merge under a praxec identity
+# Every failure is reported as DATA (exit 0) so a workflow gate can branch.
+# Inputs — POSITIONAL ARGS:
+#   $1 / RESOLVED_FILES — space-separated repo-relative paths the resolver
+#                         claims to have resolved (informational; the marker
+#                         scan runs over ALL unmerged paths regardless)
+# Run with the leaf `workingDirectory: $.workflow.input.repo_path`.
+# Emits {resolved, sha, remaining, error} JSON on stdout.
+version: "1.0.0"
+scripts:
+  run.git.merge-finish:
+    verb: run
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      [ -n "${WORKDIR:-}" ] && cd "$WORKDIR" 2>/dev/null
+      jstr() { printf '%s' "${1:-}" | jq -Rs . 2>/dev/null || printf '""'; }
+      emit() { printf '{"resolved": %s, "sha": %s, "remaining": %s, "error": %s}\n' \
+                 "$1" "$2" "$3" "$4"; exit 0; }
+      fail() { emit false null "${2:-\"\"}" "$(jstr "$1")"; }
+
+      git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "not a git work tree"
+      [ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ] || fail "no merge in progress"
+
+      # Scan EVERY still-unmerged path plus the claimed set for leftover markers.
+      claimed="${1:-${RESOLVED_FILES:-}}"
+      unmerged="$(git diff --name-only --diff-filter=U 2>/dev/null)"
+      remaining=""
+      for f in $unmerged $claimed; do
+        [ -f "$f" ] || continue
+        if grep -qE '^(<{7}( |$)|={7}$|>{7}( |$))' "$f" 2>/dev/null; then
+          case " $remaining " in *" $f "*) ;; *) remaining="$remaining $f";; esac
+        fi
+      done
+      remaining="${remaining# }"
+      [ -n "$remaining" ] && fail "conflict markers remain — merge left in progress for a human" \
+                                  "$(jstr "$remaining")"
+
+      # Stage the resolution; the index must end with zero unmerged entries.
+      git add -A 2>/dev/null || fail "git add failed"
+      [ -n "$(git ls-files -u 2>/dev/null)" ] \
+        && fail "index still has unmerged entries after staging"
+
+      if ! git -c user.name="praxec" -c user.email="praxec@noreply.local" \
+            commit --no-edit >/dev/null 2>&1; then
+        fail "merge commit failed"
+      fi
+      emit true "$(jstr "$(git rev-parse HEAD 2>/dev/null)")" '""' null
