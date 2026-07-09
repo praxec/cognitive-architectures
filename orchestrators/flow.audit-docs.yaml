@@ -9,12 +9,13 @@
 #                 (corpus_index, incremental) then retrieve the ranked doc
 #                 passages for `topic` (corpus_search) — the CLAIMS under audit.
 #   digesting   → cap.inspect.repo-digest: a bounded structural digest of the
-#                 same repo (file tree, crate layout, risk markers) — CODE
-#                 REALITY for the in-process agent, which has no file tools.
-#   auditing    → cap.review.doc-drift: the LLM judges each claim against the
-#                 digest and emits ONE typed finding per claim (verdict
-#                 aligned|drifted|wrong|superseded + severity + suggested_fix).
-#                 Judgment only — no rollup.
+#                 same repo (file tree, crate layout, risk markers) — the
+#                 NAVIGATION MAP the audit agent uses to target its file reads.
+#   auditing    → cap.review.doc-drift: a DELEGATE agent WITH tools (corpus_search
+#                 + repo file-read, wired via auto_drive_tools) retrieves the
+#                 ACTUAL source per claim and emits ONE typed finding per claim
+#                 (verdict aligned|drifted|wrong|superseded + severity +
+#                 suggested_fix). Retrieval + judgment — no rollup.
 #   aggregating → audit.drift.aggregate: fold findings into a drift report —
 #                 counts by verdict/severity + the BLOCKING total (wrong |
 #                 superseded) the outcome gates on. Code-computed verdict, not
@@ -109,6 +110,7 @@ workflows:
                   doc_evidence: "$.context.doc_evidence"
                   code_digest:  "$.context.repo_digest"
                   topic:        "$.workflow.input.topic"
+                  repo_path:    "$.workflow.input.repo_path"
                 outputs:
                   "$.context.findings": findings
 
@@ -123,10 +125,16 @@ workflows:
               kind: script
               subject: audit.drift.aggregate
               args: ["$.context.findings"]
+            # Plain script-executor `output:` block — LEFT-hand keys are BARE
+            # slot names (unlike a cap's `use.outputs`, whose keys are
+            # `$.context.*` paths). Prefixing them here writes a context field
+            # literally named `$.context.drift_blocking` and leaves the real
+            # `drift_blocking` slot UNSET, so the `docs_aligned` outcome guard
+            # errors GUARD_UNSET_SLOT (found by the live dogfood run).
             output:
-              "$.context.drift_report":   "$.output.json"
-              "$.context.drift_blocking": "$.output.json.blocking_count"
-              "$.context.drift_detected": "$.output.json.drift_detected"
+              drift_report:   "$.output.json"
+              drift_blocking: "$.output.json.blocking_count"
+              drift_detected: "$.output.json.drift_detected"
 
       # Terminal: $.context.drift_report holds the full report; drift_blocking is
       # the code-computed definition of done (0 ⇒ docs_aligned).

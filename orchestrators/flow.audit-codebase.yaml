@@ -34,8 +34,10 @@ workflows:
               kind: script
               subject: inspect.repo
               args: ["$.workflow.input.repo_path"]
+            # Plain script-executor `output:` — BARE slot key (a `$.context.*`
+            # prefix here writes a mis-named field and leaves `repo_digest` unset).
             output:
-              "$.context.repo_digest": "$.output.json"
+              repo_digest: "$.output.json"
 
       # Deterministic stub / dead-code scan.
       stub_scanning:

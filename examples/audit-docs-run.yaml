@@ -1,0 +1,74 @@
+# examples/audit-docs-run.yaml
+#
+# Minimal gateway config that DRIVES cognitive/flow.audit-docs live — the config
+# that wires the delegate-with-tools doc-drift audit end to end. It is the
+# concrete answer to "what do I need to run this?":
+#
+#   1. a durable store (sqlite) so state persists across `command`/`orchestrate`
+#      calls;
+#   2. a model binding (gateway.models_yaml) + an OpenRouter key on the process
+#      env (or ~/.praxec/providers.env) so the agent leaf + orchestrator resolve
+#      a real model;
+#   3. the `corpus` MCP connection (docs-RAG) that the fetch cap indexes/searches
+#      AND that the audit agent calls as `corpus_search`;
+#   4. auto_drive ON with the audit agent's TOOLS in auto_drive_tools:
+#        - `corpus`                                -> corpus_search / corpus_index
+#        - `file:{{ $.workflow.input.repo_path }}` -> read_file / read_range /
+#                                                     search_file over the repo
+#      (the file root renders per-instance from the sub-workflow's repo_path);
+#   5. the cognitive-architectures repo, which supplies flow.audit-docs + its
+#      caps (cap.fetch.doc-corpus, cap.inspect.repo-digest, cap.review.doc-drift),
+#      the audit.drift.aggregate script, and the review.doc-drift.critic skill.
+#
+# Validate:
+#   praxec check --config examples/audit-docs-run.yaml
+#
+# Drive (start + auto-drive to the docs_aligned outcome, headless):
+#   set -a; . ~/.config/praxec/providers.env; set +a
+#   praxec orchestrate --config examples/audit-docs-run.yaml \
+#     --model openrouter:deepseek/deepseek-v4-pro \
+#     --definition cognitive/flow.audit-docs \
+#     --input '{"repo_path":"/path/to/target-repo","topic":"<audit slice>","k":5}'
+#
+# `repo_path` must hold BOTH the docs (corpus indexes markdown under it) and the
+# code (the digest + file tools read source under it) — e.g. the praxec repo.
+version: "1.0.0"
+
+gateway:
+  principal: { subject: operator, roles: [human] }
+  # Affinity/tier -> provider:model chains for the auto-driven agent leaf.
+  models_yaml: /home/mc/.config/praxec/models.yaml
+
+praxec:
+  # Free lexical discovery — no embedding endpoint spend for an audit.
+  embeddings:
+    enabled: false
+  agents:
+    auto_drive: true
+    # Default leaf affinity; the audit state overrides to `review` (senior tier).
+    auto_drive_affinity: reasoning
+    auto_drive_max_seconds: 600
+    # The audit agent's toolset. `corpus` -> corpus_search; the `file:` root is
+    # rendered per-instance and (by the absolute-root guard) only exposes file
+    # tools on leaves whose repo_path resolves to an absolute path.
+    auto_drive_tools:
+      - corpus
+      - "file:{{ $.workflow.input.repo_path }}"
+
+audit:
+  sink: stderr
+
+store:
+  kind: sqlite
+  path: /home/mc/.local/share/praxec/audit-docs-run.db
+
+# The docs-RAG server (binary `corpus`, MCP/stdio). Reference: connections/corpus.yaml.
+connections:
+  corpus:
+    kind: mcp
+    command: corpus
+
+# The cognitive-architectures resource repo: flow.audit-docs + its caps, the
+# audit.drift.aggregate script, and the review.doc-drift.critic skill.
+repos:
+  - path: /home/mc/working/cognitive-architectures
