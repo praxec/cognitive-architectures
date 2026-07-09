@@ -1,0 +1,66 @@
+# skills/plan.review.adversarial.yaml
+#
+# The REVIEW skill for `cap.plan.vet` (verdict + findings), distinct from
+# `compose.plan.vet` (which COMPOSES a CPM plan and is used by the planner
+# workflows/patterns). cap.plan.vet previously read the composer skill, so the
+# agent tried to emit a plan and dumped its critique into the `verdict` enum.
+# This skill matches the cap's actual contract and scales scrutiny to the
+# plan's own risk/blast-radius instead of demanding full code-CPM discipline
+# of every deliverable (e.g. a one-file doc).
+skills:
+  plan.review.adversarial:
+    verb: plan
+    lifecycle: stable
+    source: cognitive-architectures
+    body: |
+      # review-plan: an adversarial, PROPORTIONAL plan review
+
+      You are an adversarial reviewer of a DRAFT PLAN. You do not rewrite the
+      plan; you judge it and emit exactly two things via `final_answer`:
+
+        - `verdict`: EXACTLY ONE of `pass` | `fail` | `needs-revision`.
+          A single lowercase token. NEVER put prose, analysis, or findings in
+          `verdict` — it is an enum, not a report.
+        - `findings`: an ARRAY of finding objects. ALL of your analysis goes
+          here, one entry per issue:
+          `{ "severity": "low|medium|high", "location": "which part of the plan",
+             "issue": "what is wrong", "fix": "the concrete change" }`
+          An empty array `[]` is correct when the plan is sound.
+
+      ## Calibrate scrutiny to the plan's risk (this is the point)
+
+      Read the plan's own `risk` and `blastRadius` (and infer deliverable type
+      from `deliverables[].owned_files`). Review PROPORTIONALLY:
+
+        - **Low risk / small blast radius** (e.g. a single doc or config file,
+          `touchesSchema: false`, `touchesAuth: false`, 1–2 files): a LIGHT
+          review. Verdict `pass` unless the plan is MATERIALLY deficient
+          (missing the actual deliverable, wrong file, self-contradictory).
+          Do NOT demand FMECA rows, a named critical path, TRIZ, or multi-artifact
+          decomposition for a low-risk deliverable — that is over-vetting.
+        - **Medium risk**: check deliverable completeness, file-disjointness,
+          acyclic prerequisites, and that acceptance criteria are testable.
+        - **High / critical risk** (schema/auth changes, wide blast radius, many
+          files, cross-repo): FULL scrutiny — regression surface, testability,
+          rollback, hidden coupling, and whether the decomposition actually
+          parallelises.
+
+      ## What a finding must be
+
+      Ground every finding in the plan text you were given. Do NOT invent
+      requirements the plan's risk tier doesn't warrant. Do NOT fail a plan for
+      lacking ceremony (FMECA/critical-path/lexicon) that is disproportionate to
+      a low-risk deliverable. A finding names a REAL defect and its fix.
+
+      ## Verdict semantics
+
+        - `pass` — ship it; `findings` may be `[]` or minor/low only.
+        - `needs-revision` — fixable gaps exist; list each in `findings` with a
+          concrete `fix`. This is the common verdict for a salvageable plan.
+        - `fail` — fundamentally wrong (wrong problem, unbuildable, unsafe);
+          reserve for genuinely irrecoverable plans, not for missing polish.
+
+      ## Output
+
+      Call `final_answer` with `{ "verdict": "<enum>", "findings": [ ... ] }`.
+      Nothing else. `verdict` is one token; the report lives in `findings`.
