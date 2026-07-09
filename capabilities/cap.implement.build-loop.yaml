@@ -148,7 +148,7 @@ workflows:
                 - "$.context.prev_test_count"
                 - "$.context.build_iter"
                 - "$.context.build_cap"
-                - "$.workflow.input.cargo_scope"
+                - "--workspace"
                 - "$.context.test_files_written"
             output:
               verdict:           "$.output.json.verdict"
@@ -273,7 +273,7 @@ workflows:
                 - "$.context.prev_test_count"
                 - "$.context.build_iter"
                 - "$.context.build_cap"
-                - "$.workflow.input.cargo_scope"
+                - "--workspace"
                 - "$.context.files_written"
             output:
               verdict:           "$.output.json.verdict"
