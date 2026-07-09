@@ -34,6 +34,12 @@ workflows:
       inputs:
         plan:      { type: object, required: true }
         repo_path: { type: string, required: true }
+        # Optional `-p <crate>` scope for the cargo test/build steps. Cohort
+        # drivers (flow.implement.deliverable) don't thread it, so default to
+        # empty → the red/green scripts test the whole workspace. Without this
+        # default, `$.workflow.input.cargo_scope` was an unresolved-arg-path
+        # permanent error that killed every cohort-driven code deliverable.
+        cargo_scope: { type: string, default: "" }
       outputs:
         result:      { type: object }
         tests_added: { type: integer }
