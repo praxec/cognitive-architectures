@@ -1,0 +1,38 @@
+# capabilities/cap.verify.generic.yaml
+#
+# The generic `verify` slot FLOOR (Spec A §5.5). hop_slot resolution walks
+# `cap.verify.<stack>` then falls back to `cap.verify.generic`, so this cap is
+# what makes resolution ALWAYS succeed for any workflow that declares
+# `hop_slot: verify` — regardless of its `stack:`. It emits the honest
+# `status: not_evaluated` verifyOut (never a disguised pass) so an unknown stack
+# surfaces as "not done", not a false green (Spec A §3.1, tri-state poka-yoke).
+
+workflows:
+  cap.verify.generic:
+    verb: verify
+    lifecycle: experimental
+    description: >
+      Generic verify floor: emits verifyOut with status not_evaluated so
+      hop_slot resolution always succeeds without ever disguising an unrun gate
+      as a pass.
+    snippet:
+      inputs:
+        cwd: { type: string }
+      outputs:
+        verify: { $ref: "praxec://hop#/$defs/verifyOut" }
+    initialState: ready
+    states:
+      ready:
+        goal: Emit the honest not_evaluated verify floor.
+        transitions:
+          run:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.generic
+              args:
+                - "$.workflow.input.cwd"
+            output:
+              verify: "$.output.json"
+      done: { terminal: true }

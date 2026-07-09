@@ -1,0 +1,52 @@
+# capabilities/cap.verify.rust.yaml
+#
+# The `verify` specialization slot cap for `stack: rust` (Spec A §3.1). A
+# `hop_slot: verify` transition in a `stack: rust` workflow resolves to THIS cap
+# (`cap.verify.<stack>`), and the engine injects the canonical verifyIn/verifyOut
+# contracts around it (praxec://hop). Renamed from the former
+# `cap.verify.workspace-green` and re-shaped to emit the full verifyOut HOP.
+#
+# It binds to the `verify.workspace.green` script (cargo fmt + clippy + test),
+# which now emits the verifyOut shape on stdout. `treatNonZeroAsFailure: false`
+# lets a `status: fail` verdict be captured as output (so the spine can branch on
+# the tri-state) instead of collapsing to a transition error.
+
+workflows:
+  cap.verify.rust:
+    verb: verify
+    lifecycle: experimental
+    description: >
+      Rust correctness gate: cargo fmt + clippy + test, emitted as the canonical
+      HOP verifyOut (status/summary/criteria/findings/provenance). The verify
+      slot cap for stack: rust.
+    snippet:
+      # verifyIn requires `cwd`; the hop_slot resolver forwards it as the cap's
+      # `cwd` input. Kept OPTIONAL here so a deterministic slot call (no actor
+      # arguments) degrades to PWD rather than failing the sub-workflow start.
+      inputs:
+        cwd: { type: string }
+      # Convention (Spec A.1 §4.2): a cap.<slot>.<stack> names its HOP output
+      # after the slot. The engine maps this into $.context.verify.
+      outputs:
+        verify: { $ref: "praxec://hop#/$defs/verifyOut" }
+    initialState: ready
+    states:
+      ready:
+        goal: Run the rust workspace gate; emit verifyOut.
+        transitions:
+          run:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.workspace.green
+              # Capture a `status: fail` verifyOut instead of erroring the
+              # transition — the tri-state gate is expressed in the payload.
+              treatNonZeroAsFailure: false
+              args:
+                - "$.workflow.input.cwd"
+            # Script executor wraps stdout; the parsed JSON (the whole verifyOut
+            # object) is at $.output.json.
+            output:
+              verify: "$.output.json"
+      done: { terminal: true }
