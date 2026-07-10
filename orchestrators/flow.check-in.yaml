@@ -1,0 +1,298 @@
+# orchestrators/flow.check-in.yaml
+#
+# INTEGRATE a finished deliverable branch — signoff-free, reusable on any repo:
+#
+#   preparing   → run.git.ensure-committed: finalize in-progress work (commit
+#                 if dirty), resolve branch / base / PR title deterministically.
+#   opening     → run.git.push-pr: push the branch + ensure an open PR exists
+#                 (idempotent — an existing PR for the branch is reused).
+#   scanning    → inspect.git.merge-conflicts: trial-merge the base INTO the
+#                 branch locally (deterministic, unlike GitHub's async
+#                 `mergeable`). Clean → abort trial, report `opened`.
+#                 Conflicted → the merge is LEFT IN PROGRESS for the resolver.
+#   resolving   → cap.implement.resolve-conflicts: an agent on the ESCALATED
+#                 `review` model tier (conflict resolution is high-stakes —
+#                 never the cheap coding tier) edits the conflicted files to a
+#                 semantically-correct merge.
+#   finishing   → run.git.merge-finish: deterministic verifier — commits the
+#                 merge ONLY when zero conflict markers remain (a half-resolved
+#                 merge is never committed), then re-push → `conflicts_resolved`.
+#
+# Every deterministic step emits failures as DATA and each gate's unguarded
+# V23 default routes to `needs_human` — including a genuinely-unresolvable
+# conflict (the in-progress merge is preserved for the operator; we do NOT
+# auto-merge a broken resolution). `status` is SEEDED to "needs_human" in
+# initialContext and only the two success reporters overwrite it, so every
+# abort path terminates with an honest status without a writer on each edge.
+#
+# Emits top-level outputs { pr_url, status: opened|conflicts_resolved|
+# needs_human } — a `kind: workflow` parent (flow.drive-program) reads them
+# via `use.outputs`. Git/GitHub access piggybacks on the operator's own
+# git + `gh` auth (praxec manages no credentials).
+#
+# Requires (cognitive/*): cap.implement.resolve-conflicts + the
+# run.git.ensure-committed / run.git.push-pr / inspect.git.merge-conflicts /
+# run.git.merge-finish scripts. `gh` must be on PATH and authenticated.
+
+workflows:
+  flow.check-in:
+    lifecycle: experimental
+    description: >
+      Integrate a finished deliverable branch: commit residual work, push +
+      open (or reuse) a PR, detect merge conflicts against base via a local
+      trial merge, resolve them with a senior-tier agent when needed, and
+      report {pr_url, status}. Signoff-free; only a genuinely-unresolvable
+      conflict parks at needs_human.
+    inputs:
+      repo_path: { type: string, required: true }
+      # "" = the currently checked-out branch (the common case when chained
+      # after a build that already worked on the deliverable branch).
+      branch:    { type: string, default: "" }
+      # "" = the repo's default branch (origin/HEAD, falling back to main).
+      base:      { type: string, default: "" }
+      # "" = derive from the last commit subject.
+      pr_title:  { type: string, default: "" }
+      pr_body:   { type: string, default: "" }
+    # Top-level outputs (flows have no `snippet:`) — terminal context slots a
+    # `kind: workflow` parent reads via `use.outputs`.
+    outputs:
+      pr_url: { type: string }
+      status: { type: string }
+    # `status` starts pessimistic: every abort path lands on needs_human
+    # WITHOUT needing a status writer on each edge; only the two success
+    # reporters overwrite it. pr_url is seeded so the terminal read of an
+    # early abort (before the PR exists) resolves.
+    initialContext:
+      status: needs_human
+      pr_url: ""
+    initialState: preparing
+    states:
+
+      # Finalize the branch: commit residual work; resolve branch/base/title.
+      preparing:
+        goal: Ensure the branch is fully committed; resolve branch, base, title.
+        transitions:
+          prepare:
+            target: prep_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.ensure-committed
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.workflow.input.branch"
+                - "$.workflow.input.base"
+                - "$.workflow.input.pr_title"
+            output:
+              git_ok:        "$.output.json.ok"
+              branch_ref:    "$.output.json.branch"
+              base_ref:      "$.output.json.base"
+              title:         "$.output.json.title"
+              committed_now: "$.output.json.committed_now"
+              prep_error:    "$.output.json.error"
+
+      prep_gate:
+        transitions:
+          proceed:
+            target: opening
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.git_ok == true" } ]
+          # Default (V23) — prep refused (not a repo, default-branch check-in,
+          # commit failed): park for the operator, status stays needs_human.
+          halt_prep:
+            target: needs_human
+            actor: deterministic
+
+      # Push the branch + ensure an open PR (idempotent).
+      opening:
+        goal: Push the branch and open (or reuse) the PR against base.
+        transitions:
+          open:
+            target: open_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.push-pr
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.context.branch_ref"
+                - "$.context.base_ref"
+                - "$.context.title"
+                - "$.workflow.input.pr_body"
+            output:
+              pr_ok:      "$.output.json.ok"
+              pr_url:     "$.output.json.pr_url"
+              pr_number:  "$.output.json.pr_number"
+              open_error: "$.output.json.error"
+
+      open_gate:
+        transitions:
+          scan:
+            target: scanning
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.pr_ok == true" } ]
+          # Default (V23) — push/PR failed (no gh, no remote, auth): operator.
+          halt_open:
+            target: needs_human
+            actor: deterministic
+
+      # Deterministic conflict detection: trial-merge base INTO the branch.
+      scanning:
+        goal: Detect merge conflicts against base via a local trial merge.
+        transitions:
+          detect:
+            target: conflict_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.git.merge-conflicts
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.context.base_ref"
+            output:
+              scan_ok:        "$.output.json.ok"
+              conflicts:      "$.output.json.conflicts"
+              conflict_files: "$.output.json.conflict_files"
+              scan_error:     "$.output.json.error"
+
+      conflict_gate:
+        transitions:
+          clean:
+            target: reporting_opened
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.scan_ok == true" }
+              - { kind: expr, expr: "$.context.conflicts == false" }
+          conflicted:
+            target: resolving
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.scan_ok == true" }
+              - { kind: expr, expr: "$.context.conflicts == true" }
+          # Default (V23) — the scan itself failed: operator.
+          halt_scan:
+            target: needs_human
+            actor: deterministic
+
+      # No conflicts: the PR is integrable as-is.
+      reporting_opened:
+        transitions:
+          report:
+            target: done
+            actor: deterministic
+            executor: { kind: noop }
+            output:
+              status: { set: "opened" }
+
+      # ESCALATED agent hop (cap pins affinity: review — the senior tier):
+      # resolve the in-progress merge's conflicts by editing the files.
+      # The agent locates conflicted files itself (search for markers).
+      resolving:
+        goal: Resolve the in-progress merge's conflicts (senior model tier).
+        transitions:
+          resolve:
+            target: finishing
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.resolve-conflicts
+              use:
+                inputs:
+                  repo_path: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.resolved_files":     resolved_files
+                  "$.context.resolution_summary": resolution_summary
+
+      # Deterministic verify + merge commit: refuses while ANY marker remains
+      # (a broken resolution is never committed — it parks for the operator
+      # with the merge still in progress).
+      finishing:
+        goal: Verify zero conflict markers remain; commit the merge.
+        transitions:
+          finish:
+            target: finish_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.merge-finish
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.context.resolved_files"
+            output:
+              merge_resolved:    "$.output.json.resolved"
+              merge_sha:         "$.output.json.sha"
+              markers_remaining: "$.output.json.remaining"
+              finish_error:      "$.output.json.error"
+
+      finish_gate:
+        transitions:
+          repush:
+            target: repushing
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.merge_resolved == true" } ]
+          # Default (V23) — markers remain / commit failed: genuinely
+          # unresolvable; the in-progress merge is preserved for the operator.
+          halt_merge:
+            target: needs_human
+            actor: deterministic
+
+      # Push the resolution merge commit (same idempotent primitive; the
+      # existing PR is found and reused, pr_url is refreshed).
+      repushing:
+        goal: Push the resolution merge commit to the existing PR.
+        transitions:
+          push:
+            target: repush_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.push-pr
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.context.branch_ref"
+                - "$.context.base_ref"
+                - "$.context.title"
+                - "$.workflow.input.pr_body"
+            output:
+              repush_ok:    "$.output.json.ok"
+              pr_url:       "$.output.json.pr_url"
+              repush_error: "$.output.json.error"
+
+      repush_gate:
+        transitions:
+          report:
+            target: reporting_resolved
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.repush_ok == true" } ]
+          # Default (V23) — the re-push failed: operator.
+          halt_repush:
+            target: needs_human
+            actor: deterministic
+
+      reporting_resolved:
+        transitions:
+          report:
+            target: done
+            actor: deterministic
+            executor: { kind: noop }
+            output:
+              status: { set: "conflicts_resolved" }
+
+      # The ONLY human boundary in check-in: an unresolvable conflict (or a
+      # failed deterministic step) parks here with status=needs_human and the
+      # repo state preserved (in-progress merge kept for inspection). The
+      # operator finishes/aborts manually, then acknowledges to close out.
+      needs_human:
+        transitions:
+          acknowledge:
+            target: done
+            actor: human
+            inputSchema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string }
+            executor: { kind: noop }
+
+      done:
+        terminal: true

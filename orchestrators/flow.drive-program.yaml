@@ -1,0 +1,384 @@
+# orchestrators/flow.drive-program.yaml
+#
+# HETEROGENEOUS program driver — flow.execute-cohorts generalized so each
+# acquired deliverable is ROUTED to its leaf-appropriate executor instead of
+# always entering the code build-loop. The cohort lock + mark semantics are
+# preserved EXACTLY (same acquire cap, same CAS'd plan.mark_status under the
+# held caller_id lock, same scalar-`exhausted` termination):
+#
+#   acquiring   → cap.coordinate.acquire-cohort (max_count 1) — lease the next
+#                 READY deliverable or report `exhausted: true`.
+#   routing     → cap.inspect.deliverable-route — DETERMINISTIC normalization
+#                 of deliverable.metadata into {leaf, repo}: leaf validated
+#                 against the closed routable set (else the sentinel
+#                 "unknown"), repo = metadata.repo else this flow's repo_path.
+#                 Code decides, the gate routes — guarding directly on
+#                 `$.context.next_deliverable.leaf` would fail-fast on a
+#                 deliverable whose metadata omits `leaf`.
+#   leaf_gate   → BRANCH on the validated leaf token:
+#                   code     → flow.implement.deliverable  (build-loop + mark;
+#                              unchanged — the shared code leaf)
+#                   doc      → cap.implement.artifact (artifact_kind=doc)
+#                   author   → cap.implement.artifact (artifact_kind=pack-yaml)
+#                   vet      → cap.plan.vet
+#                   design   → cap.plan.technical-design
+#                   analysis → cap.review.analysis
+#                   unknown  → mark FAILED in cpm-planner (reason preserved,
+#                              lock released, dependents stay pending) and keep
+#                              driving the rest of the program — never
+#                              mis-route, never dead-stall (V23 default).
+#   marking_*   → non-code leaves mark complete/failed inline (kind: mcp,
+#                 CAS + lock enforced by cpm-planner) then LOOP to acquiring;
+#                 the code leaf marks inside flow.implement.deliverable as
+#                 before, then (when auto_check_in) chains flow.check-in so
+#                 INTEGRATION is part of the flow — push + PR + conflict
+#                 resolution on the escalated tier (idempotent per branch:
+#                 later code deliverables re-push onto the same PR).
+#
+# Slot discipline (V13): every value handed onward via `use.inputs` comes from
+# a snippet-typed cap output or a flow input — the route {leaf, repo} is
+# produced by a CAP (not an inline script) for exactly this reason, mirroring
+# cap.coordinate.acquire-cohort's rationale. Non-slot consumers (guards, mcp
+# `map:`, script args) read `$.context` by path as usual.
+#
+# flow.execute-cohorts stays as-is (the homogeneous all-code driver);
+# flow.loom can swap its executing step to this driver when its plans carry
+# heterogeneous leaves.
+#
+# Requires the `cpm-planner` connection (connections/cpm-planner.yaml) and
+# (cognitive/*): cap.coordinate.acquire-cohort, cap.inspect.deliverable-route,
+# flow.implement.deliverable, flow.check-in, cap.implement.artifact,
+# cap.plan.vet, cap.plan.technical-design, cap.review.analysis (+ their deps).
+
+workflows:
+  flow.drive-program:
+    lifecycle: experimental
+    description: >
+      Drive a heterogeneous cpm-planner plan to completion: repeatedly acquire
+      the next ready deliverable, route it by metadata.leaf to the right
+      executor (code build-loop, doc/pack authoring, vet, design, analysis),
+      mark it complete (or failed when unroutable), optionally chain
+      flow.check-in after code builds, and loop until exhausted.
+    inputs:
+      plan_id:   { type: string, required: true }
+      # Program-default repo; a deliverable's metadata.repo overrides per-leaf.
+      repo_path: { type: string, required: true }
+      # This driver's lock-holder identity (distinct per parallel driver so
+      # cpm-planner keeps cohorts file-disjoint). Held across acquire → mark.
+      caller_id: { type: string, required: true }
+      # Chain flow.check-in (push + PR + conflict resolution) after each
+      # successful code build. Idempotent per branch — the PR is reused.
+      auto_check_in: { type: boolean, default: true }
+    # `status` for plan.mark_status is an internally-tagged OBJECT; a map:
+    # binding can't build an object literal, so seed both variants here and
+    # bind them by path (same pattern as flow.implement.deliverable).
+    initialContext:
+      status_complete:   { status: complete }
+      status_unroutable: { status: failed, reason: "unroutable deliverable: metadata.leaf is not one of code|doc|vet|author|design|analysis" }
+    initialState: seeding
+    states:
+
+      # Seed the check-in toggle into $.context — a guard needs a reachable
+      # context writer, not an input (same reason flow.harden.fmeca-converge
+      # seeds check_codebase).
+      seeding:
+        goal: Seed guard-read configuration into context.
+        transitions:
+          seed:
+            target: acquiring
+            actor: deterministic
+            executor: { kind: noop }
+            output:
+              auto_check_in: "$.workflow.input.auto_check_in"
+
+      # Lease the next ready deliverable (typed outputs via the cap so the
+      # slot table recognizes them downstream) — identical to execute-cohorts.
+      acquiring:
+        goal: Acquire the next ready deliverable from cpm-planner (or detect exhaustion).
+        transitions:
+          acquire:
+            target: cohort_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.coordinate.acquire-cohort
+              use:
+                inputs:
+                  plan_id:   "$.workflow.input.plan_id"
+                  caller_id: "$.workflow.input.caller_id"
+                outputs:
+                  "$.context.cohort_exhausted":    exhausted
+                  "$.context.next_deliverable":    spec
+                  "$.context.next_deliverable_id": deliverable_id
+
+      # BRANCH on the scalar exhaustion flag; an out-of-domain flag halts
+      # loudly (terminal) rather than silently finishing or dead-stalling.
+      cohort_gate:
+        transitions:
+          finish:
+            target: done
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.cohort_exhausted == true" }
+          route_next:
+            target: routing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.cohort_exhausted == false" }
+          # Default (V23) — a non-boolean exhausted flag is a wire-shape bug.
+          unexpected_flag:
+            target: halted
+            actor: deterministic
+
+      # DETERMINISTIC route computation (cap-wrapped so leaf/repo are
+      # snippet-typed slots the leaf executors' use.inputs can consume).
+      routing:
+        goal: Compute the deliverable's route (validated leaf + resolved repo).
+        transitions:
+          route:
+            target: leaf_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.inspect.deliverable-route
+              use:
+                inputs:
+                  deliverable:  "$.context.next_deliverable"
+                  default_repo: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.route_leaf": leaf
+                  "$.context.route_repo": repo
+
+      # THE ROUTER — mutually exclusive over the validated leaf token;
+      # the unguarded default marks the deliverable failed (fail-fast, plan
+      # keeps draining) rather than mis-routing to a wrong executor.
+      leaf_gate:
+        transitions:
+          build_code:
+            target: implementing_code
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.route_leaf == 'code'" } ]
+          write_doc:
+            target: authoring_doc
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.route_leaf == 'doc'" } ]
+          author_pack:
+            target: authoring_pack
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.route_leaf == 'author'" } ]
+          vet_plan:
+            target: vetting
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.route_leaf == 'vet'" } ]
+          design:
+            target: designing
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.route_leaf == 'design'" } ]
+          analyze:
+            target: analyzing
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.route_leaf == 'analysis'" } ]
+          # Default (V23) — "unknown" (or anything out-of-domain): record the
+          # failure in the durable tracker and keep driving the program.
+          unroutable:
+            target: marking_unroutable
+            actor: deterministic
+
+      # ── code ── the existing single-deliverable sub-flow: build-loop →
+      # plan.mark_status complete (CAS; this driver holds the lock). Unchanged
+      # semantics from flow.execute-cohorts; only the follow-on differs.
+      implementing_code:
+        goal: Build + record the leased code deliverable via the build-loop.
+        transitions:
+          implement:
+            target: checkin_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.implement.deliverable
+              use:
+                inputs:
+                  deliverable:    "$.context.next_deliverable"
+                  repo_path:      "$.context.route_repo"
+                  plan_id:        "$.workflow.input.plan_id"
+                  deliverable_id: "$.context.next_deliverable_id"
+                  caller_id:      "$.workflow.input.caller_id"
+
+      # After a successful code build, optionally chain integration.
+      checkin_gate:
+        transitions:
+          integrate:
+            target: checking_in
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.auto_check_in == true" } ]
+          skip:
+            target: acquiring
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.auto_check_in == false" } ]
+          # Default (V23) — a non-boolean toggle skips integration (never the
+          # riskier path) and keeps the program draining.
+          skip_unexpected:
+            target: acquiring
+            actor: deterministic
+
+      # INTEGRATION as part of the flow: push + PR + conflict handling on the
+      # deliverable's repo. Branch/base/title derive inside check-in from the
+      # repo state; an unresolvable conflict parks THERE (its needs_human),
+      # not here — this driver resumes when check-in completes.
+      checking_in:
+        goal: Integrate the built deliverable branch (push, PR, conflicts).
+        transitions:
+          check_in:
+            target: acquiring
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.check-in
+              use:
+                inputs:
+                  repo_path: "$.context.route_repo"
+                outputs:
+                  "$.context.checkin_status": status
+                  "$.context.checkin_pr_url": pr_url
+
+      # ── doc ── prose documentation authored straight into the target repo.
+      authoring_doc:
+        goal: Author the doc deliverable into its repo; commit the files.
+        transitions:
+          author:
+            target: marking_complete
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.artifact
+              use:
+                inputs:
+                  deliverable:   "$.context.next_deliverable"
+                  repo_path:     "$.context.route_repo"
+                  artifact_kind: "doc"
+                outputs:
+                  "$.context.artifact_files":   files_written
+                  "$.context.artifact_summary": summary
+
+      # ── author ── praxec pack YAML authored into the target pack repo.
+      authoring_pack:
+        goal: Author the pack-YAML deliverable into its repo; commit the files.
+        transitions:
+          author:
+            target: marking_complete
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.artifact
+              use:
+                inputs:
+                  deliverable:   "$.context.next_deliverable"
+                  repo_path:     "$.context.route_repo"
+                  artifact_kind: "pack-yaml"
+                outputs:
+                  "$.context.artifact_files":   files_written
+                  "$.context.artifact_summary": summary
+
+      # ── vet ── adversarial review of the plan/design the deliverable names.
+      # The deliverable is complete when the vet has RUN; its verdict +
+      # findings are data for downstream deliverables (they ride in context
+      # and the audit trail), not a gate on this driver.
+      vetting:
+        goal: Run the adversarial vet the deliverable asks for.
+        transitions:
+          vet:
+            target: marking_complete
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.plan.vet
+              use:
+                inputs:
+                  plan: "$.context.next_deliverable"
+                outputs:
+                  "$.context.vet_verdict":  verdict
+                  "$.context.vet_findings": findings
+
+      # ── design ── technical design from the deliverable's spec.
+      designing:
+        goal: Produce the technical design the deliverable asks for.
+        transitions:
+          design:
+            target: marking_complete
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.plan.technical-design
+              use:
+                inputs:
+                  spec: "$.context.next_deliverable"
+                outputs:
+                  "$.context.design":           design
+                  "$.context.design_artifacts": artifacts
+
+      # ── analysis ── repo-grounded analysis; typed findings + summary.
+      analyzing:
+        goal: Perform the analysis the deliverable asks for.
+        transitions:
+          analyze:
+            target: marking_complete
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.analysis
+              use:
+                inputs:
+                  deliverable: "$.context.next_deliverable"
+                  repo_path:   "$.context.route_repo"
+                outputs:
+                  "$.context.analysis_findings": findings
+                  "$.context.analysis_summary":  summary
+
+      # Record the completed non-code deliverable in the durable tracker
+      # (CAS + lock-ownership enforced by cpm-planner), then LOOP. The code
+      # leaf marks inside flow.implement.deliverable, exactly as before.
+      marking_complete:
+        goal: Mark the deliverable complete in cpm-planner (earned value).
+        transitions:
+          mark:
+            target: acquiring
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.mark_status
+              map:
+                plan_id:        "$.workflow.input.plan_id"
+                deliverable_id: "$.context.next_deliverable_id"
+                caller_id:      "$.workflow.input.caller_id"
+                status:         "$.context.status_complete"
+            output:
+              mark_result: "$.output"
+
+      # Unroutable leaf: mark FAILED (reason preserved for audit/retry, lock
+      # released, dependents stay pending) and keep draining the program —
+      # fail-fast per deliverable, never a dead-stall of the whole drive.
+      marking_unroutable:
+        goal: Record the unroutable deliverable as failed; keep driving.
+        transitions:
+          mark_failed:
+            target: acquiring
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.mark_status
+              map:
+                plan_id:        "$.workflow.input.plan_id"
+                deliverable_id: "$.context.next_deliverable_id"
+                caller_id:      "$.workflow.input.caller_id"
+                status:         "$.context.status_unroutable"
+            output:
+              unroutable_mark: "$.output"
+
+      # Loud stop for a broken acquire wire shape (out-of-domain `exhausted`).
+      halted:
+        terminal: true
+
+      done:
+        terminal: true

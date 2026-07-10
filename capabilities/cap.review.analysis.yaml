@@ -1,0 +1,68 @@
+# capabilities/cap.review.analysis.yaml
+#
+# Analysis leaf — the execution leaf flow.drive-program routes `analysis`
+# deliverables to. Cognitive cap: the auto-driven agent reads the deliverable
+# spec, investigates (when `repo_path` is set it gets `file:` read tools over
+# that repo via the gateway's auto_drive_tools template; when empty, the
+# CompositeToolHost absolute-root guard wires no file tools and the analysis
+# runs on the spec + its own knowledge), and submits typed findings + a
+# summary. Producer/evaluator split as elsewhere in the pack: the agent
+# analyzes, downstream deterministic steps (or humans) decide.
+
+workflows:
+  cap.review.analysis:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Perform an analysis deliverable: investigate the subject described by the
+      deliverable spec (with repo read tools when a repo_path is given) and
+      emit typed findings + a summary. The execution leaf for `analysis`
+      deliverables in a driven program.
+    snippet:
+      inputs:
+        # The deliverable's plan-graph metadata ({leaf, repo, spec, plan,
+        # acceptance_criteria}) — the spec defines the analysis question.
+        deliverable: { type: object, required: true }
+        # Repo root for `file:` read tools ("" = no repo grounding).
+        repo_path:   { type: string, default: "" }
+      outputs:
+        findings: { type: array }
+        summary:  { type: string }
+    initialState: analyzing
+    states:
+      analyzing:
+        goal: >
+          You are performing an ANALYSIS deliverable. Read
+          $.context.deliverable — its `spec` states the question under
+          analysis and its `acceptance_criteria` state what the analysis must
+          settle. If you have file tools, ground every claim in the actual
+          repo content you read (quote paths + evidence); never speculate
+          where you can verify. Emit `findings` — an array of typed findings,
+          each { finding, evidence, severity (critical|high|medium|low),
+          recommendation } — covering every acceptance criterion, plus a short
+          `summary` of the overall conclusion. Submit findings and summary.
+        transitions:
+          submit_analysis:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [findings]
+              properties:
+                findings:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    required: [finding]
+                    properties:
+                      finding:        { type: string }
+                      evidence:       { type: string }
+                      severity:       { type: string, enum: [critical, high, medium, low] }
+                      recommendation: { type: string }
+                summary: { type: string }
+            executor: { kind: noop }
+            output:
+              findings: "$.arguments.findings"
+              summary:  "$.arguments.summary"
+      done: { terminal: true }

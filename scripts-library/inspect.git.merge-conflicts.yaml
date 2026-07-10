@@ -1,0 +1,66 @@
+# scripts-library/inspect.git.merge-conflicts.yaml
+#
+# Conflict DETECTION for flow.check-in: attempt a local
+# `git merge --no-commit --no-ff <base>` of the integration base INTO the
+# current branch — deterministic and immediate, unlike GitHub's async
+# `mergeable` computation.
+#   - CLEAN  → abort the trial merge (leave the branch untouched) and emit
+#              conflicts=false: the PR is integrable as-is.
+#   - CONFLICT → LEAVE THE MERGE IN PROGRESS (the working tree now carries the
+#              conflict markers) and emit conflicts=true + the conflicted file
+#              list; the resolver agent works directly on that in-progress
+#              merge and run.git.merge-finish completes it.
+# Every failure is reported as DATA (exit 0) so a workflow gate can branch.
+# Inputs — POSITIONAL ARGS:
+#   $1 / BASE — the integration base branch (required); origin/<base> is
+#               preferred when it exists (freshly fetched), else local <base>.
+# Run with the leaf `workingDirectory: $.workflow.input.repo_path`.
+# Emits {ok, conflicts, conflict_files, merge_ref, error} JSON on stdout
+# (conflict_files is a space-separated string, ready for script args).
+version: "1.0.0"
+scripts:
+  inspect.git.merge-conflicts:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      [ -n "${WORKDIR:-}" ] && cd "$WORKDIR" 2>/dev/null
+      jstr() { printf '%s' "${1:-}" | jq -Rs . 2>/dev/null || printf '""'; }
+      emit() { printf '{"ok": %s, "conflicts": %s, "conflict_files": %s, "merge_ref": %s, "error": %s}\n' \
+                 "$1" "$2" "$3" "$4" "$5"; exit 0; }
+      fail() { emit false false '""' null "$(jstr "$1")"; }
+
+      base="${1:-${BASE:-}}"
+      [ -z "${base// /}" ] && fail "empty base"
+      git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "not a git work tree"
+
+      # A trial merge needs a clean tree (prep committed everything already).
+      [ -n "$(git status --porcelain 2>/dev/null)" ] \
+        && fail "working tree dirty — run run.git.ensure-committed first"
+
+      # Prefer the freshly-fetched remote base; fall back to the local branch.
+      git fetch origin "$base" >/dev/null 2>&1
+      ref="origin/$base"
+      git rev-parse --verify --quiet "$ref" >/dev/null 2>&1 || ref="$base"
+      git rev-parse --verify --quiet "$ref" >/dev/null 2>&1 \
+        || fail "base '$base' not found locally or on origin"
+
+      if git merge --no-commit --no-ff "$ref" >/dev/null 2>&1; then
+        # Clean (or already up to date): undo the trial merge, report integrable.
+        if [ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]; then
+          git merge --abort >/dev/null 2>&1 || git reset --merge >/dev/null 2>&1
+        fi
+        emit true false '""' "$(jstr "$ref")" null
+      fi
+
+      files="$(git diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+      if [ -z "$files" ]; then
+        # Merge failed but nothing is marked unmerged — not a conflict; abort.
+        git merge --abort >/dev/null 2>&1 || git reset --merge >/dev/null 2>&1
+        fail "merge of '$ref' failed without unmerged paths"
+      fi
+      # Leave the conflicted merge IN PROGRESS for the resolver agent.
+      emit true true "$(jstr "$files")" "$(jstr "$ref")" null

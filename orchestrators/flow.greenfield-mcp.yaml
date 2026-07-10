@@ -472,3 +472,4 @@ workflows:
 
       failed:
         terminal: true
+        outcome: failure

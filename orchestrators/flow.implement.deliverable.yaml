@@ -58,6 +58,20 @@ workflows:
                 inputs:
                   plan:      "$.workflow.input.deliverable"
                   repo_path: "$.workflow.input.repo_path"
+                  # Pass an explicit (empty) cargo_scope so the build-loop's
+                  # `$.workflow.input.cargo_scope` RESOLVES — snippet-input
+                  # defaults are NOT merged into $.workflow.input for path
+                  # resolution when a sub-workflow is invoked via `use.inputs`,
+                  # so the caller must supply it. Empty → the tdd-verdict script
+                  # defaults to `--workspace`. (Fixes the unresolved-arg-path
+                  # permanent error that killed every cohort-driven code
+                  # deliverable at the cargo step.)
+                  cargo_scope: ""
+                  # Coverage floor for the completion check — MUST be passed
+                  # explicitly (snippet-input defaults don't merge into
+                  # $.workflow.input for path resolution), same as cargo_scope.
+                  # "1": a TDD build must add at least one test to count as done.
+                  min_tests: "1"
                 outputs:
                   "$.context.result": result
 

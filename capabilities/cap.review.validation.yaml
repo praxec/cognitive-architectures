@@ -1,0 +1,74 @@
+# capabilities/cap.review.validation.yaml
+#
+# VALIDATION gate ("built the RIGHT thing") — stage 9 of flow.sebok, and the
+# half of V&V the SDLC acceptance gate conflates with verification. Cognitive
+# cap: the agent judges the BUILT system against the ORIGINAL stakeholder
+# needs (NOT the derived requirements — those belong to verification), files
+# a per-need validation outcome with citable evidence, and emits a typed
+# verdict a flow can gate on. A single need without a validation outcome is
+# an UnvalidatedNeed → verdict=rejected (fail-fast, never a disguised pass).
+#
+# Verb `review`, not `verify`: `verify` caps are category-Deterministic
+# (primary executor must be script/mcp, SPEC §4.1/V6) — an agent-judged
+# validation is a cognitive review cap.
+
+workflows:
+  cap.review.validation:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Validation distinct from verification: judge the built system at
+      repo_path against the ORIGINAL stakeholder needs (not the derived
+      requirements); every need -> >=1 validation outcome with citable
+      evidence; verdict=validated only when no need is left unvalidated.
+    snippet:
+      inputs:
+        needs:     { type: object, required: true }
+        repo_path: { type: string, required: true }
+      outputs:
+        verdict:           { type: string, enum: [validated, rejected] }
+        need_results:      { type: array }
+        unvalidated_needs: { type: array }
+        # The COUNT of unvalidated needs — a scalar the gate can check
+        # deterministically (the expr language can't test array emptiness).
+        # Lets validation_gate catch a verdict='validated' that is inconsistent
+        # with a non-empty unvalidated set (deterministic-tools-over-LLM).
+        unvalidated_count: { type: integer }
+    skills: [review.acceptance.criteria-met]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          VALIDATION, not verification ("built the RIGHT thing", not "built it
+          right"): enumerate every stakeholder need in `needs`; for each, judge
+          whether the system as BUILT under repo_path actually satisfies the
+          need in the stakeholder's own terms, citing concrete evidence (an
+          observable behavior, a test name, or file:line). Emit need_results
+          (need -> validated/unvalidated + evidence), unvalidated_needs (the
+          needs with NO validation outcome), and verdict=validated ONLY when
+          every need has at least one validation outcome — one unvalidated
+          need is an UnvalidatedNeed and the verdict is rejected. Also emit
+          unvalidated_count = the number of entries in unvalidated_needs (the
+          gate checks it is 0; a verdict='validated' with count>0 is a
+          self-inconsistency the gate will reject).
+        transitions:
+          submit_validation:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [verdict, unvalidated_count]
+              properties:
+                verdict:           { type: string, enum: [validated, rejected] }
+                need_results:      { type: array, default: [] }
+                unvalidated_needs: { type: array, default: [] }
+                # Required: the agent must report the count of unvalidated needs
+                # (= unvalidated_needs.length). The gate checks it == 0.
+                unvalidated_count: { type: integer }
+            executor: { kind: noop }
+            output:
+              verdict:           "$.arguments.verdict"
+              need_results:      "$.arguments.need_results"
+              unvalidated_needs: "$.arguments.unvalidated_needs"
+              unvalidated_count: "$.arguments.unvalidated_count"
+      done: { terminal: true }
