@@ -385,13 +385,18 @@ workflows:
           review:
             target: review_gate
             actor: agent
+            # No required field: a reviewer that fumbles/omits its final_answer
+            # must NOT AGENT_NO_RESULT-discard a verified slice. qa_verdict
+            # defaults to `rejected` — the FAIL-SAFE direction: an absent/minimal
+            # review is treated as not-approved (routes to qa_fix → bounded by
+            # review_iter → needs_human), never a false approve. A real reviewer
+            # still supplies approved/rejected explicitly.
             inputSchema:
               type: object
-              required: [qa_verdict]
               properties:
-                qa_verdict:  { type: string, enum: [approved, rejected] }
-                qa_findings: { type: string }
-                qa_score:    { type: integer }
+                qa_verdict:  { type: string, enum: [approved, rejected], default: rejected }
+                qa_findings: { type: string, default: "review sign-off missing — treated as rejected" }
+                qa_score:    { type: integer, default: 0 }
             executor: { kind: noop }
             output:
               qa_verdict:  "$.arguments.qa_verdict"
@@ -587,12 +592,14 @@ workflows:
           plan_review:
             target: plan_review_gate
             actor: agent
+            # Fail-safe like the per-slice review: no required field, plan_qa_verdict
+            # defaults to `rejected` so a fumbled end-of-plan sign-off routes to
+            # remediation (never a false whole-plan approve).
             inputSchema:
               type: object
-              required: [plan_qa_verdict]
               properties:
-                plan_qa_verdict:  { type: string, enum: [approved, rejected] }
-                plan_qa_findings: { type: string }
+                plan_qa_verdict:  { type: string, enum: [approved, rejected], default: rejected }
+                plan_qa_findings: { type: string, default: "plan review sign-off missing — treated as rejected" }
             executor: { kind: noop }
             output:
               plan_qa_verdict:  "$.arguments.plan_qa_verdict"
