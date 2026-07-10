@@ -1,0 +1,93 @@
+# orchestrators/flow.onboard-tool.yaml
+#
+# Onboard an external tool end-to-end using the praxec v0.0.17 primitives:
+#   D1 tool-descriptor  →  D4a governed connection (add staged → operator grant)
+#   →  D2 tool-source executor (invoke a smoke operation).
+#
+# Governed shape (ADR-0008 outcomes + ADR-0009 human gate):
+#   receive → stage_connection → await_grant (HUMAN) → invoke (tool_source) → done
+#
+# The `await_grant` gate is load-bearing: `praxec connections add` writes a
+# connection UNGRANTED; only an explicit operator `praxec connections grant`
+# promotes it live (the D3 trust boundary). A headless drive parks at
+# `await_grant` until the operator grants — that parking IS correct, not a wedge.
+workflows:
+  flow.onboard-tool:
+    description: |
+      Onboard an external cli/mcp/rest tool: stage its connection, wait for the
+      operator to grant it, then invoke a smoke operation through the tool-source
+      executor. Reference implementation of the v0.0.17 tool-source ecosystem.
+    inputs:
+      descriptor_path: { type: string, required: false }
+
+    initialState: receive
+
+    outcomes:
+      - id: tool_invoked
+        statement: The onboarded tool was invoked via the tool-source executor.
+        check: "$.context.invoked == true"
+
+    blackboard:
+      invoked: { type: boolean }
+
+    states:
+      receive:
+        goal: Receive the tool descriptor to onboard.
+        transitions:
+          begin:
+            target: stage_connection
+            executor: { kind: noop }
+
+      # Real onboarding runs `praxec connections add <name> --kind <k> ...` here
+      # (kind: cli) — it writes the connection STAGED / ungranted. noop keeps this
+      # template driveable; swap for a cli executor when wiring a concrete tool.
+      stage_connection:
+        goal: Stage the tool's connection (written ungranted).
+        transitions:
+          stage:
+            target: await_grant
+            executor: { kind: noop }
+
+      # The D3 trust boundary as a human gate: the operator explicitly grants the
+      # staged connection (`praxec connections grant <name>`), then advances.
+      await_grant:
+        goal: Operator grants the staged connection.
+        actor: human
+        transitions:
+          grant:
+            target: invoke
+            actor: human
+            executor: { kind: noop }
+            output:
+              invoked: true
+
+      # Invoke a smoke operation through the D2 tool-source executor: the
+      # descriptor's operation delegates to the underlying transport over the
+      # (now granted) connection. Inline `printer` descriptor as a concrete example.
+      invoke:
+        goal: Invoke a smoke operation via the tool-source executor.
+        transitions:
+          run:
+            target: done
+            executor:
+              kind: tool_source
+              operation: print
+              descriptor:
+                schema_version: "praxec.tool/v1"
+                name: printer
+                version: "0.1.0"
+                kind: cli
+                reach:
+                  connection_name: printer
+                  grant_as: printer
+                  connection: { kind: cli, command: printf }
+                operations:
+                  - id: print
+                    verb: run
+                    input_schema: { type: object }
+                    output_schema: { type: object }
+                    cli: { args: ["onboarded\n"] }
+
+      done:
+        terminal: true
+        outcome: success
