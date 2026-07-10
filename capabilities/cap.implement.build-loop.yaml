@@ -159,7 +159,11 @@ workflows:
                 - "$.context.prev_test_count"
                 - "$.context.build_iter"
                 - "$.context.build_cap"
-                - "--workspace"
+                # Scope the RED measure to the deliverable's crate (fast inner
+                # loop) — threaded from deliverable.cargo_scope; "" ⇒ script
+                # defaults to --workspace. Full-workspace correctness is the
+                # per-deliverable gate before mark_status (flow.implement.deliverable).
+                - "$.workflow.input.cargo_scope"
                 - "$.context.test_files_written"
             output:
               verdict:           "$.output.json.verdict"
@@ -284,7 +288,10 @@ workflows:
                 - "$.context.prev_test_count"
                 - "$.context.build_iter"
                 - "$.context.build_cap"
-                - "--workspace"
+                # Scope the GREEN measure to the deliverable's crate (see RED note);
+                # "" ⇒ --workspace. The per-deliverable --workspace gate before
+                # mark_status is the cross-crate correctness backstop.
+                - "$.workflow.input.cargo_scope"
                 - "$.context.files_written"
             output:
               verdict:           "$.output.json.verdict"
