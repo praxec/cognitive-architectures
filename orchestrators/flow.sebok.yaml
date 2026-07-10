@@ -1,0 +1,398 @@
+# orchestrators/flow.sebok.yaml
+#
+# INCOSE/SEBoK-aligned Systems-Engineering Vee (docs/sebok-flow-design.md;
+# ISO/IEC/IEEE 15288 technical processes). Nine stages — left leg decomposes,
+# bottom implements, right leg recomposes; Verification and Validation are
+# DISTINCT and trace to DIFFERENT left-leg artifacts:
+#
+#   1 eliciting_needs        → cap.plan.elicit-spec      (StakeholderNeedsArtifact)
+#   2 defining_requirements  → cap.review.spec-ears      (RequirementsArtifact, EARS)
+#   3 architecting           → cap.plan.technical-design (ArchitectureArtifact)
+#     + arch_review          → cap.review.architecture   (dangling-interface detection)
+#   4 designing              → cap.plan.technical-design (DesignArtifact)
+#   5 implementing           → flow.shared.mini-vee      (micro-waterfall TDD atom)
+#   6 integrating            → cap.review.completeness   (IntegrationArtifact:
+#                                                         interface-gap critic)
+#   7 verifying              → cap.verify.rust           (VerificationReport — traces
+#                                                         to REQUIREMENTS, stage 2)
+#   8 transitioning          → gate-marker (collapsed per the design's cut list)
+#   9 validating             → cap.review.validation     (ValidationReport — traces
+#                                                         to STAKEHOLDER NEEDS, stage 1)
+#
+# Sits BESIDE flow.greenfield-mcp, not replacing it. The two gaps it closes vs
+# the existing SDLC: first-class stakeholder-needs elicitation (stage 1, the
+# trace source for validation) and validation distinct from verification
+# (stages 7 vs 9). Every stage is designed to be drivable by a commodity model
+# with one precise instruction; a stall on any stage is a decomposition signal
+# (split the stage — the mini-Vee is the atomic unit), not a bigger-model signal.
+#
+# Layout note: this is a FLOW (it invokes `kind: workflow`), so it lives in
+# orchestrators/ — the design doc's `capabilities/sebok-flow.yaml` naming
+# predates the blessed-roots rule. Likewise the doc's `shared.derisk` already
+# ships as cognitive/flow.derisk (elicit → design → FMECA-converge); per the
+# cut list it stays gated behind explicit invocation — an operator can run it
+# standalone against any stage artifact rather than this flow inlining it.
+#
+# TRACE OBLIGATIONS (design §Traceability): the deterministic
+# `artifact.trace-matrix` writer is NOT built yet. Until it is, trace
+# obligations are modeled as workflow context the right-leg gates CHECK:
+# stage 7 requires the stage-2 RequirementsArtifact accepted
+# ($.context.requirements_status == 'validated') alongside a passing verify;
+# stage 9 requires the stage-1 StakeholderNeedsArtifact accepted
+# ($.context.needs_ready == true) alongside a validated verdict, with the
+# per-need outcome list carried in $.context.validation_results. Missing
+# predecessor artifacts fail fast at the gate (GateBlocked-style guarded
+# branches). See the `TRACE-MATRIX GAP:` markers at verification_gate and
+# validation_gate for where the deterministic writer plugs in.
+#
+# Stage 1 note: elicitation is an OPERATOR-BOUNDARY activity — a headless
+# drive PARKS at the interview for human answers. cap.plan.elicit-spec is the
+# pack-level interface; the deterministic elicitation-mcp connection
+# (connections/elicitation-mcp.yaml, already wired in the gateway) is its
+# computed-readiness backend as that swap lands.
+#
+# Requires (cognitive/*): cap.plan.elicit-spec, cap.review.spec-ears,
+# cap.plan.technical-design, cap.review.architecture, flow.shared.mini-vee
+# (+ its deps), cap.review.completeness, cap.verify.rust, cap.review.validation.
+
+workflows:
+  flow.sebok:
+    lifecycle: experimental
+    description: >
+      INCOSE/SEBoK Vee (15288 technical processes), nine stages: stakeholder
+      needs → EARS requirements → architecture → design → mini-Vee TDD
+      implementation → integration → verification (traces to requirements) →
+      transition gate → validation (traces to stakeholder needs). Right-leg
+      gates fail fast on a missing predecessor artifact.
+    inputs:
+      brief:     { type: string, required: true }
+      repo_path: { type: string, required: true }
+    initialState: eliciting_needs
+    states:
+
+      # ── STAGE 1: STAKEHOLDER NEEDS (left leg, root of the validation trace).
+      # Interactive operator boundary — the interview parks a headless drive.
+      eliciting_needs:
+        goal: Elicit the stakeholder needs from the brief (operator interview).
+        transitions:
+          elicit:
+            target: needs_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.plan.elicit-spec
+              use:
+                inputs:
+                  brief: "$.workflow.input.brief"
+                outputs:
+                  "$.context.needs":          spec
+                  "$.context.needs_ready":    ready
+                  "$.context.open_questions": open_questions
+
+      # GateBlocked{stage: needs}: the StakeholderNeedsArtifact must be
+      # accepted (ready) before requirements may derive from it. Any non-true
+      # readiness falls through the unguarded default — never a silent proceed.
+      needs_gate:
+        transitions:
+          advance:
+            target: defining_requirements
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.needs_ready == true"
+          abort:
+            target: failed
+            actor: deterministic
+
+      # ── STAGE 2: SYSTEM/SW REQUIREMENTS (EARS). The needs artifact is
+      # refined into atomic, falsifiable EARS statements — the trace source
+      # for stage-7 verification. (The cap declares `spec` as a string; the
+      # pack's use.inputs typing is permissive — greenfield passes a string
+      # brief into technical-design's object spec the same way.)
+      defining_requirements:
+        goal: Derive atomic EARS requirements from the accepted needs.
+        transitions:
+          derive_requirements:
+            target: requirements_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.spec-ears
+              use:
+                inputs:
+                  spec: "$.context.needs"
+                outputs:
+                  "$.context.requirements_status":     status
+                  "$.context.requirements":            ears
+                  "$.context.requirement_defects":     defects
+                  "$.context.requirement_clarifications": clarifications
+
+      # GateBlocked{stage: requirements}: EARS-form conformance is the stage-2
+      # acceptance bar (detect-early, per the design's error strategy).
+      requirements_gate:
+        transitions:
+          advance:
+            target: architecting
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.requirements_status == 'validated'"
+          abort:
+            target: failed
+            actor: deterministic
+
+      # ── STAGE 3: ARCHITECTURE DEFINITION — traces FROM the requirements.
+      architecting:
+        goal: Define the system architecture from the EARS requirements.
+        transitions:
+          architect:
+            target: arch_review
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.plan.technical-design
+              use:
+                inputs:
+                  spec: "$.context.requirements"
+                outputs:
+                  "$.context.architecture": design
+
+      # Stage-3 detect-early check: architecture-validity review (should each
+      # component exist; dangling-interface detection).
+      arch_review:
+        transitions:
+          review_architecture:
+            target: architecture_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.architecture
+              use:
+                inputs:
+                  design: "$.context.architecture"
+                outputs:
+                  "$.context.architecture_verdict":    verdict
+                  "$.context.architecture_components": component_table
+
+      architecture_gate:
+        transitions:
+          advance:
+            target: designing
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.architecture_verdict == 'approved'"
+          abort:
+            target: failed
+            actor: deterministic
+
+      # ── STAGE 4: DESIGN DEFINITION — the buildable design, WITHIN the
+      # accepted architecture (spec = requirements, plan = architecture).
+      # Acceptance is the cap completing; the design is then hardened further
+      # only via an explicit operator flow.derisk run (cut list: Useful, gated).
+      designing:
+        goal: Produce the buildable design definition within the architecture.
+        transitions:
+          design:
+            target: implementing
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.plan.technical-design
+              use:
+                inputs:
+                  spec: "$.context.requirements"
+                  plan: "$.context.architecture"
+                outputs:
+                  "$.context.design": design
+
+      # ── STAGE 5: IMPLEMENTATION (bottom of the Vee) — the shared
+      # micro-waterfall atom. The design definition is the requirement object;
+      # the mini-vee sketches the increment, drives the engine-observed
+      # failing-test → minimal-impl loop (which iterates internally across the
+      # design's behaviors), and independently verifies. A commodity-model
+      # stall inside is the signal to decompose the design into smaller
+      # mini-vee calls (the core hypothesis this flow exists to test).
+      implementing:
+        goal: Build the design via the shared micro-waterfall (mini-Vee TDD atom).
+        transitions:
+          build:
+            target: implementation_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.shared.mini-vee
+              use:
+                inputs:
+                  requirement: "$.context.design"
+                  repo_path:   "$.workflow.input.repo_path"
+                  # Pass BOTH explicitly — snippet-input defaults are NOT
+                  # merged into $.workflow.input for path resolution when a
+                  # sub-workflow is invoked via use.inputs (the
+                  # unresolved-arg-path gotcha).
+                  cargo_scope: ""
+                  min_tests:   "1"
+                outputs:
+                  "$.context.implementation":        result
+                  "$.context.tests_added":           tests_added
+                  "$.context.implementation_verify": verify_report
+
+      # Belt-and-braces: the mini-vee only reaches done on a passing verify,
+      # but the meta-Vee re-checks the typed tri-state rather than trusting
+      # child terminal state (any non-pass falls through the unguarded default).
+      implementation_gate:
+        transitions:
+          advance:
+            target: integrating
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.implementation_verify.status == 'pass'"
+          abort:
+            target: failed
+            actor: deterministic
+
+      # ── STAGE 6: INTEGRATION (right leg) — traces from architecture+design.
+      # The completeness critic is the integration check: orphans, fragmented
+      # implementations, and INTERFACE GAPS are exactly what a failed
+      # recomposition looks like on disk.
+      integrating:
+        goal: Audit the integrated system for interface gaps and orphans.
+        transitions:
+          integrate:
+            target: integration_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.completeness
+              use:
+                inputs:
+                  repo_path: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.integration_verdict":  verdict
+                  "$.context.integration_findings": findings
+
+      integration_gate:
+        transitions:
+          advance:
+            target: verifying
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.integration_verdict == 'approved'"
+          abort:
+            target: failed
+            actor: deterministic
+
+      # ── STAGE 7: VERIFICATION ("built it RIGHT") — traces to the STAGE-2
+      # REQUIREMENTS. The canonical workspace gate emits the typed verifyOut
+      # that is this stage's VerificationReport.
+      verifying:
+        goal: Run the canonical verification gate (typed verifyOut).
+        transitions:
+          verify:
+            target: verification_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.rust
+              use:
+                inputs:
+                  cwd: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.verification": verify
+
+      # TRACE-MATRIX GAP: the deterministic `artifact.trace-matrix` writer
+      # (design §Traceability) plugs in HERE — it would enforce every
+      # requirement → ≥1 verification outcome and block on
+      # UnverifiedRequirement. Until it exists, this gate enforces the
+      # artifact-level obligation: the RequirementsArtifact must be accepted
+      # (trace_blocked = GateBlocked{stage: verification, missing_artifact:
+      # requirements}) AND the verification tri-state must be 'pass'; anything
+      # else falls through the unguarded default to failed.
+      verification_gate:
+        transitions:
+          advance:
+            target: transitioning
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.verification.status == 'pass'"
+              - kind: expr
+                expr: "$.context.requirements_status == 'validated'"
+          trace_blocked:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.requirements_status != 'validated'"
+          abort:
+            target: failed
+            actor: deterministic
+
+      # ── STAGE 8: TRANSITION — collapsed to a lightweight gate marker per the
+      # design's cut list (not a full model-prompted stage). Crossing it
+      # RECORDS that the verified system is released to validation; operational
+      # transition work (deploy/handover) is out of scope for this flow.
+      transitioning:
+        transitions:
+          mark_transition:
+            target: validating
+            actor: deterministic
+            executor: { kind: noop }
+
+      # ── STAGE 9: VALIDATION ("built the RIGHT thing") — traces to the
+      # STAGE-1 STAKEHOLDER NEEDS, not the requirements. This is the stage the
+      # existing SDLC's acceptance gate conflates with verification.
+      validating:
+        goal: Validate the built system against the original stakeholder needs.
+        transitions:
+          validate:
+            target: validation_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.validation
+              use:
+                inputs:
+                  needs:     "$.context.needs"
+                  repo_path: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.validation_verdict": verdict
+                  "$.context.validation_results": need_results
+                  "$.context.unvalidated_needs":  unvalidated_needs
+
+      # TRACE-MATRIX GAP: the deterministic `artifact.trace-matrix` writer
+      # plugs in HERE for the other half of the obligation — every need → ≥1
+      # validation outcome, blocking on UnvalidatedNeed. Until it exists, the
+      # per-need outcomes live in $.context.validation_results (agent-reported)
+      # and this gate enforces the artifact-level obligation: the
+      # StakeholderNeedsArtifact must be accepted (trace_blocked =
+      # GateBlocked{stage: validation, missing_artifact: needs}) AND the
+      # validation verdict must be 'validated'; anything else falls through
+      # the unguarded default to failed.
+      validation_gate:
+        transitions:
+          advance:
+            target: done
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.validation_verdict == 'validated'"
+              - kind: expr
+                expr: "$.context.needs_ready == true"
+          trace_blocked:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.needs_ready != true"
+          abort:
+            target: failed
+            actor: deterministic
+
+      done:
+        terminal: true
+
+      failed:
+        terminal: true

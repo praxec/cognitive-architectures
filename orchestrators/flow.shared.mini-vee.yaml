@@ -1,0 +1,141 @@
+# orchestrators/flow.shared.mini-vee.yaml
+#
+# Shared MICRO-WATERFALL (the mini-Vee TDD atom, docs/sebok-flow-design.md):
+#
+#   sketching  → cap.plan.technical-design  (requirement → increment design sketch)
+#   building   → cap.implement.build-loop   (engine-OBSERVED failing-test →
+#                                            minimal-impl red/green loop + QA + commit)
+#   verifying  → cap.verify.rust            (independent recomposition check;
+#                                            canonical verifyOut)
+#   verify_gate→ tri-state gate on $.context.verify_report.status
+#
+# This is the atomic decomposition unit of the commodity-model hypothesis: if a
+# commodity model can't drive a step, split the step — don't reach for a bigger
+# model. It is reusable by BOTH flow.sebok (stage 5, Implementation) and the
+# existing SDLC flows (a drop-in for a raw cap.implement.build-loop call when
+# the caller wants the sketch + independent-verify bookends).
+#
+# This is a FLOW (not a capability): it invokes other workflows via
+# `kind: workflow`, and capabilities are composition leaves — so it lives in
+# orchestrators/ (the design doc's `capabilities/_shared.mini-vee.yaml` naming
+# predates that rule).
+#
+# Requires (cognitive/*): cap.plan.technical-design, cap.implement.build-loop,
+# cap.verify.rust.
+
+workflows:
+  flow.shared.mini-vee:
+    lifecycle: experimental
+    description: >
+      Shared micro-waterfall (mini-Vee TDD atom): requirement → increment
+      design sketch → engine-enforced failing-test/minimal-impl build loop →
+      independent verify (canonical verifyOut) → tri-state gate. The atomic
+      unit both flow.sebok and the SDLC flows decompose implementation into.
+    inputs:
+      # The increment's requirement/spec object (what to build + why; ideally
+      # carries acceptance criteria for the build-loop's end-of-plan review).
+      requirement: { type: object, required: true }
+      repo_path:   { type: string, required: true }
+      # Threaded through to cap.implement.build-loop. Declared here AND passed
+      # explicitly below — a snippet-input default is NOT merged into
+      # `$.workflow.input` for path resolution when a sub-workflow is invoked
+      # via `use.inputs`, so the CALLER of this flow must also pass both.
+      cargo_scope: { type: string, default: "" }
+      min_tests:   { type: string, default: "1" }
+    # Top-level outputs (flows have no `snippet:`) — the terminal context slots
+    # a `kind: workflow` parent reads via `use.outputs`.
+    outputs:
+      sketch:        { type: object }
+      result:        { type: object }
+      tests_added:   { type: integer }
+      # Named verify_report (NOT `verify`): $.context.verify is an ENGINE-OWNED
+      # slot key reserved for hop_slot-declared transitions, so a plain
+      # kind:workflow verify invocation must land on a non-slot key.
+      verify_report: { type: object }
+    initialState: sketching
+    states:
+
+      # LEFT LEG (increment scale): sketch the increment's design from the
+      # requirement — the trace record requirement → design-sketch. The sketch
+      # is the plan the build consumes (each mini-Vee artifact feeds the next).
+      sketching:
+        goal: Sketch the increment's technical design from the requirement.
+        transitions:
+          sketch:
+            target: building
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.plan.technical-design
+              use:
+                inputs:
+                  spec: "$.workflow.input.requirement"
+                outputs:
+                  "$.context.sketch": design
+
+      # BOTTOM: failing test → minimal impl, ENGINE-OBSERVED (red must compile
+      # and fail; green = fmt+clippy+test; QA-reviewed; committed per slice).
+      # The build-loop iterates internally until the sketch's behaviors are
+      # built, so one mini-vee call covers a multi-slice increment.
+      building:
+        goal: Build the sketched increment to green via the structural TDD loop.
+        transitions:
+          build:
+            target: verifying
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.build-loop
+              use:
+                inputs:
+                  plan:      "$.context.sketch"
+                  repo_path: "$.workflow.input.repo_path"
+                  # Pass BOTH explicitly — snippet-input defaults are NOT merged
+                  # into $.workflow.input for path resolution when invoked via
+                  # use.inputs (the unresolved-arg-path gotcha), so this flow
+                  # declares them as inputs and threads them through.
+                  cargo_scope: "$.workflow.input.cargo_scope"
+                  min_tests:   "$.workflow.input.min_tests"
+                outputs:
+                  "$.context.result":      result
+                  "$.context.tests_added": tests_added
+
+      # RIGHT LEG (increment scale): INDEPENDENT recomposition check — rerun
+      # the workspace gate outside the build loop and capture the canonical
+      # verifyOut. This typed record is the increment's verification outcome
+      # (what a trace matrix would file against the requirement).
+      verifying:
+        goal: Independently verify the workspace (canonical verifyOut).
+        transitions:
+          verify:
+            target: verify_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.rust
+              use:
+                inputs:
+                  cwd: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.verify_report": verify
+
+      # Gate on the typed tri-state: `== 'pass'` is the ONLY positive arm; any
+      # non-pass status (fail | not_evaluated) falls through the unguarded
+      # `abort` default — never silently treated as a pass.
+      verify_gate:
+        transitions:
+          advance:
+            target: done
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.verify_report.status == 'pass'"
+          abort:
+            target: failed
+            actor: deterministic
+
+      done:
+        terminal: true
+
+      failed:
+        terminal: true
