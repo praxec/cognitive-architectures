@@ -1,0 +1,56 @@
+# capabilities/cap.inspect.deliverable-route.yaml
+#
+# Inspection cap (verb `inspect` — the script-primary verb, V6; `coordinate`
+# requires an mcp primary): normalize one acquired deliverable's plan-graph
+# `metadata` into the ROUTE the heterogeneous driver (flow.drive-program)
+# branches on —
+# a validated `leaf` token (code|doc|vet|author|design|analysis, else the
+# sentinel "unknown") and the resolved `repo` path (metadata.repo, else the
+# program's default repo_path).
+#
+# Why a cap (not an inline script in the flow): the same V13 reason as
+# cap.coordinate.acquire-cohort — a transition `output:` block does NOT seed a
+# slot usable by a later `use.inputs`, only a child's snippet-typed
+# `use.outputs` does. The driver must hand `repo` onward into
+# flow.implement.deliverable / flow.check-in `use.inputs`, so the route values
+# need to be first-class slots. The normalization itself is the deterministic
+# `inspect.deliverable-route` script (code decides, the gate routes) —
+# guarding directly on `$.context.next_deliverable.leaf` would fail-fast on a
+# deliverable whose metadata omits `leaf`.
+
+workflows:
+  cap.inspect.deliverable-route:
+    verb: inspect
+    lifecycle: experimental
+    description: >
+      Normalize a deliverable's metadata into a typed route: a validated leaf
+      token (code|doc|vet|author|design|analysis|unknown) and the resolved
+      repo path (metadata.repo, else the caller's default).
+    snippet:
+      inputs:
+        # The acquired deliverable's plan-graph metadata
+        # ({leaf, repo, spec, plan, acceptance_criteria}).
+        deliverable:  { type: object, required: true }
+        # Fallback repo path when metadata.repo is absent/empty.
+        default_repo: { type: string, required: true }
+      outputs:
+        leaf: { type: string }
+        repo: { type: string }
+    initialState: ready
+    states:
+      ready:
+        goal: Compute the deliverable's route (leaf + repo) deterministically.
+        transitions:
+          route:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.deliverable-route
+              args:
+                - "$.workflow.input.deliverable"
+                - "$.workflow.input.default_repo"
+            output:
+              leaf: "$.output.json.leaf"
+              repo: "$.output.json.repo"
+      done: { terminal: true }

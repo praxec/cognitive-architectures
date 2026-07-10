@@ -3,7 +3,7 @@
 # Deterministic cap: bind to the `run.scaffold.cargo-mcp` script to
 # create a brand-new greenfield Rust MCP-server repo skeleton. Verb
 # `run` (the deterministic catch-all in the closed CapVerb set) → V6
-# requires a `kind: script` executor, like cap.verify.workspace-green.
+# requires a `kind: script` executor, like cap.verify.rust.
 
 workflows:
   cap.run.scaffold-repo:

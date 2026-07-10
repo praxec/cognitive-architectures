@@ -6,18 +6,47 @@ scripts:
     source: cognitive-architectures
     body: |
       #!/usr/bin/env bash
-      # Composed check: format, lint, test must all pass. The "green workspace"
-      # gate — workflows use this on a `verifying` state to gate a critique.
-      # Exits 0 only if all three pass; emits a JSON summary on stdout.
-      set -euo pipefail
+      # Rust workspace correctness gate (cargo fmt + clippy + test), emitted as
+      # the canonical HOP `verifyOut` shape (praxec://hop#/$defs/verifyOut):
+      #   { status, summary, criteria[], findings[], provenance }
+      # `status` = "pass" iff every criterion.met is true, else "fail". The exit
+      # code mirrors status (0 = pass, 1 = fail) so exit-code consumers keep
+      # their gate semantics (e.g. swe-agent's `$.output.success`); slot
+      # consumers (cap.verify.rust via hop_slot) read the full verifyOut from
+      # `$.output.json` (that cap sets `treatNonZeroAsFailure: false` so a
+      # `status: fail` verdict is CAPTURED, not turned into a transition error).
+      #
+      # Optional positional $1 = working directory to verify (the verifyIn `cwd`
+      # the slot forwards); defaults to the process PWD when absent.
+      set -uo pipefail
 
-      stage_fail() {
-        echo "{\"passed\": false, \"failed_stage\": \"$1\", \"subject\": \"$PRAXEC_SCRIPT_SUBJECT\"}"
-        exit 1
-      }
+      cwd="${1:-$PWD}"
+      cd "$cwd" 2>/dev/null || true
 
-      cargo fmt --all -- --check >&2 || stage_fail "format"
-      cargo clippy --workspace --all-targets -- -D warnings >&2 || stage_fail "lint"
-      cargo test --workspace >&2 || stage_fail "test"
+      # Build one verifyOut `criterion` object; met is a JSON bool literal.
+      crit() { printf '{"id":"%s","met":%s,"evidence":"%s"}' "$1" "$2" "$3"; }
 
-      echo "{\"passed\": true, \"stages\": [\"format\", \"lint\", \"test\"], \"subject\": \"$PRAXEC_SCRIPT_SUBJECT\"}"
+      STATUS="pass"
+
+      if cargo fmt --all -- --check >&2; then
+        c_fmt=$(crit format true "cargo fmt --all -- --check clean")
+      else
+        c_fmt=$(crit format false "cargo fmt reported formatting violations"); STATUS="fail"
+      fi
+
+      if cargo clippy --workspace --all-targets -- -D warnings >&2; then
+        c_lint=$(crit lint true "cargo clippy -D warnings clean")
+      else
+        c_lint=$(crit lint false "cargo clippy reported warnings/errors"); STATUS="fail"
+      fi
+
+      if cargo test --workspace >&2; then
+        c_test=$(crit test true "cargo test --workspace green")
+      else
+        c_test=$(crit test false "cargo test --workspace failed"); STATUS="fail"
+      fi
+
+      printf '{"status":"%s","summary":"cargo fmt + clippy + test: %s","criteria":[%s,%s,%s],"findings":[],"provenance":{"stack":"language:rust","source":"pack"}}\n' \
+        "$STATUS" "$STATUS" "$c_fmt" "$c_lint" "$c_test"
+
+      [ "$STATUS" = "pass" ] && exit 0 || exit 1

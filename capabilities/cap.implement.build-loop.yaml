@@ -34,6 +34,23 @@ workflows:
       inputs:
         plan:      { type: object, required: true }
         repo_path: { type: string, required: true }
+        # Optional `-p <crate>` scope for the cargo test/build steps. Cohort
+        # drivers (flow.implement.deliverable) don't thread it, so default to
+        # empty → the red/green scripts test the whole workspace. Without this
+        # default, `$.workflow.input.cargo_scope` was an unresolved-arg-path
+        # permanent error that killed every cohort-driven code deliverable.
+        cargo_scope: { type: string, default: "" }
+        # Coverage floor for the deterministic completion check
+        # (inspect.plan-complete arg 6): a code deliverable that added fewer than
+        # `min_tests` tests is NOT complete — this catches premature/stubbed
+        # "done". Same resolution rule as cargo_scope: the caller
+        # (flow.implement.deliverable) must ALSO pass it explicitly, because a
+        # snippet-input default is not merged into `$.workflow.input` for path
+        # resolution — without both the declaration AND the explicit pass,
+        # `$.workflow.input.min_tests` is an unresolved-arg permanent error that
+        # kills the deliverable at the completion check. Default "1": a TDD build
+        # must add at least one test.
+        min_tests:   { type: string, default: "1" }
       outputs:
         result:      { type: object }
         tests_added: { type: integer }
@@ -67,7 +84,7 @@ workflows:
       # the model tier; when the TOP rung is still rejected, hand to a human —
       # never spin. The decision is computed by the deterministic
       # `escalate.qa-ladder` script (observation-only: code decides, gate routes).
-      # Rungs are affinity/tier keys (models.yaml); each leads with a more capable
+      # Rungs are affinity/tier keys (.praxec/models.yaml); each leads with a more capable
       # model: coding(deepseek) → coding-standard(glm-5.2) → coding-frontier(sonnet).
       qa_same_model_retries: 2
       qa_model_ladder:   "coding,coding-standard,coding-frontier"
@@ -107,7 +124,11 @@ workflows:
           compile errors so the test builds and goes red. Report
           `test_files_written` (space-separated repo-relative paths), `done=true`
           ONLY when every plan behavior now has a test, and a one-line
-          `commit_message` for THIS slice.
+          `commit_message` for THIS slice. EVERY report field is OPTIONAL — the
+          loop derives changed files from git and the verdict from cargo, so
+          once the files are written ALWAYS call final_answer to sign off, even
+          with an empty object; never withhold the sign-off because a field is
+          unknown.
         skills: [implement.tdd.discipline]
         transitions:
           write_test:
@@ -115,11 +136,21 @@ workflows:
             actor: agent
             inputSchema:
               type: object
-              required: [done]
+              # ZERO hard-required fields (ceremony-proof sign-off). The agent's
+              # structured report was the #1 discard surface: models WROTE a
+              # correct red test but fumbled the sign-off → AGENT_NO_RESULT →
+              # verified work thrown away. Everything an omitted field would
+              # have carried is derived deterministically instead: changed files
+              # from git (tdd-verdict scan fallback + the staging override),
+              # completion from inspect.plan-complete (done defaults false →
+              # keep building), commit message from the default below. The
+              # engine fills these defaults into missing arguments BEFORE
+              # validation and output-mapping, so an EMPTY final_answer is a
+              # valid sign-off and can never null-clobber context.
               properties:
-                done:               { type: boolean }
-                test_files_written: { type: string }
-                commit_message:     { type: string }
+                done:               { type: boolean, default: false }
+                test_files_written: { type: string, default: "" }
+                commit_message:     { type: string, default: "praxec tdd-loop: verified slice" }
             executor: { kind: noop }
             output:
               coding_done:        "$.arguments.done"
@@ -142,6 +173,10 @@ workflows:
                 - "$.context.prev_test_count"
                 - "$.context.build_iter"
                 - "$.context.build_cap"
+                # Scope the RED measure to the deliverable's crate (fast inner
+                # loop) — threaded from deliverable.cargo_scope; "" ⇒ script
+                # defaults to --workspace. Full-workspace correctness is the
+                # per-deliverable gate before mark_status (flow.implement.deliverable).
                 - "$.workflow.input.cargo_scope"
                 - "$.context.test_files_written"
             output:
@@ -210,7 +245,11 @@ workflows:
           behavior, REMOVE its stub/unfinished-work markers (TODO/FIXME/
           `todo!()`/`unimplemented!()`/SCAFFOLD/"not yet implemented") — the
           deterministic completion check treats any remaining marker as an
-          unbuilt deliverable.
+          unbuilt deliverable. EVERY report field is OPTIONAL — git and the
+          verdict script are the source of truth for what changed and whether
+          it is green, so once the files are written ALWAYS call final_answer
+          to sign off, even with an empty object; never withhold the sign-off
+          because a field is unknown.
         skills: [implement.tdd.discipline]
         transitions:
           write_code:
@@ -218,12 +257,16 @@ workflows:
             actor: agent
             inputSchema:
               type: object
-              required: [done]
+              # ZERO hard-required fields — see write_test: an empty
+              # final_answer is a valid sign-off. The agent's report is a hint;
+              # git (staging + tdd-verdict scan fallback) and cargo (the green
+              # verdict) are the source of truth, and the defaults below stop a
+              # missing field from null-clobbering context.
               properties:
-                done:          { type: boolean }
-                result:        { type: object }
-                tests_added:   { type: integer }
-                files_written: { type: string }
+                done:          { type: boolean, default: false }
+                result:        { type: object, default: {} }
+                tests_added:   { type: integer, default: 0 }
+                files_written: { type: string, default: "" }
             executor: { kind: noop }
             output:
               coding_done:   "$.arguments.done"
@@ -267,6 +310,9 @@ workflows:
                 - "$.context.prev_test_count"
                 - "$.context.build_iter"
                 - "$.context.build_cap"
+                # Scope the GREEN measure to the deliverable's crate (see RED note);
+                # "" ⇒ --workspace. The per-deliverable --workspace gate before
+                # mark_status is the cross-crate correctness backstop.
                 - "$.workflow.input.cargo_scope"
                 - "$.context.files_written"
             output:
@@ -339,13 +385,18 @@ workflows:
           review:
             target: review_gate
             actor: agent
+            # No required field: a reviewer that fumbles/omits its final_answer
+            # must NOT AGENT_NO_RESULT-discard a verified slice. qa_verdict
+            # defaults to `rejected` — the FAIL-SAFE direction: an absent/minimal
+            # review is treated as not-approved (routes to qa_fix → bounded by
+            # review_iter → needs_human), never a false approve. A real reviewer
+            # still supplies approved/rejected explicitly.
             inputSchema:
               type: object
-              required: [qa_verdict]
               properties:
-                qa_verdict:  { type: string, enum: [approved, rejected] }
-                qa_findings: { type: string }
-                qa_score:    { type: integer }
+                qa_verdict:  { type: string, enum: [approved, rejected], default: rejected }
+                qa_findings: { type: string, default: "review sign-off missing — treated as rejected" }
+                qa_score:    { type: integer, default: 0 }
             executor: { kind: noop }
             output:
               qa_verdict:  "$.arguments.qa_verdict"
@@ -541,12 +592,14 @@ workflows:
           plan_review:
             target: plan_review_gate
             actor: agent
+            # Fail-safe like the per-slice review: no required field, plan_qa_verdict
+            # defaults to `rejected` so a fumbled end-of-plan sign-off routes to
+            # remediation (never a false whole-plan approve).
             inputSchema:
               type: object
-              required: [plan_qa_verdict]
               properties:
-                plan_qa_verdict:  { type: string, enum: [approved, rejected] }
-                plan_qa_findings: { type: string }
+                plan_qa_verdict:  { type: string, enum: [approved, rejected], default: rejected }
+                plan_qa_findings: { type: string, default: "plan review sign-off missing — treated as rejected" }
             executor: { kind: noop }
             output:
               plan_qa_verdict:  "$.arguments.plan_qa_verdict"

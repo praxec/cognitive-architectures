@@ -42,10 +42,28 @@ scripts:
       # NULL verdict (the dead-stall); scoping to the crate under build avoids it.
       CARGO_SCOPE="${6:-${CARGO_SCOPE:---workspace}}"
       # $7 SCAN_TARGET — files/dirs the atomic scan checks (the slice's changed
-      # files: test_files_written in RED, files_written in GREEN). Empty/absent →
-      # the whole REPO_PATH (greenfield). Scoping keeps the one-assertion-per-test
-      # rule on the NEW tests only, never a host repo's existing conventions.
+      # files: test_files_written in RED, files_written in GREEN). The agent's
+      # report is OPTIONAL (ceremony-proof sign-off): empty/absent/"null" →
+      # derive the slice's changed files from git (tracked mods + untracked
+      # non-ignored; skip deletions — same source of truth as the staging
+      # step's inspect.changed-files), so an unreported slice is still scanned
+      # at slice scope. Only a clean tree (greenfield first run / non-git)
+      # falls back to the whole REPO_PATH. Scoping keeps the
+      # one-assertion-per-test rule on the NEW tests only, never a host repo's
+      # existing conventions.
       SCAN_TARGET="${7:-}"
+      [ "$SCAN_TARGET" = "null" ] && SCAN_TARGET=""
+      if [ -z "${SCAN_TARGET// /}" ]; then
+        SCAN_TARGET="$(cd "$REPO_PATH" 2>/dev/null && git status --porcelain --untracked-files=all 2>/dev/null \
+          | while IFS= read -r line; do
+              xy="${line:0:2}"; rest="${line:3}"
+              case "$xy" in *D*) continue ;; esac
+              case "$rest" in
+                *" -> "*) printf '%s ' "${rest##* -> }" ;;
+                *)        printf '%s ' "$rest" ;;
+              esac
+            done)"
+      fi
       [ -z "${SCAN_TARGET// /}" ] && SCAN_TARGET="$REPO_PATH"
       # Bound cargo so a slow/hung build can NEVER kill the script before it emits
       # a verdict (null-safety: the gate must always receive a valid token).

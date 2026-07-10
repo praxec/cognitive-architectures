@@ -75,19 +75,23 @@ workflows:
             actor: agent
             inputSchema:
               type: object
-              # Minimal required contract (commodity-friendly): only `done`.
-              # files_written + commit_message are OPTIONAL — a commodity model
-              # that omits them must NOT fail the transition (that would cascade
-              # to the expensive ceiling). commit-slice degrades gracefully:
-              # empty message → default; empty files → skip the commit (the
-              # milestone gate captures it later).
-              required: [done]
+              # ZERO hard-required fields (ceremony-proof sign-off, matches
+              # cap.implement.build-loop): a commodity model that fumbles the
+              # structured report must NOT fail the transition — that discarded
+              # verified work across the whole model chain (AGENT_NO_RESULT).
+              # The engine fills the defaults below into missing arguments
+              # BEFORE validation and output-mapping, so an EMPTY final_answer
+              # is a valid sign-off and a missing field can never null-clobber
+              # context (a nulled slot renders as the literal string "null" in
+              # script args). commit-slice degrades gracefully: empty message →
+              # default; empty files → skip the commit (the milestone gate
+              # captures it later).
               properties:
-                done:           { type: boolean }
-                result:         { type: object }
-                tests_added:    { type: integer }
-                files_written:  { type: string }
-                commit_message: { type: string }
+                done:           { type: boolean, default: false }
+                result:         { type: object, default: {} }
+                tests_added:    { type: integer, default: 0 }
+                files_written:  { type: string, default: "" }
+                commit_message: { type: string, default: "praxec build-loop: verified slice" }
             executor: { kind: noop }
             output:
               coding_done:    "$.arguments.done"
@@ -230,6 +234,9 @@ workflows:
             guards:
               - { kind: expr, expr: "$.context.qa_verdict == 'rejected'" }
               - { kind: expr, expr: "$.context.review_iter >= 3" }
+          unexpected:
+            target: needs_human
+            actor: deterministic
 
       # COMMIT the verified slice (best-effort, NEVER blocks): stage ONLY the
       # files the agent reported writing, then commit. run.git.commit-slice exits

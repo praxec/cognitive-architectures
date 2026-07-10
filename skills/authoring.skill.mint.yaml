@@ -1,0 +1,97 @@
+# skills/authoring.skill.mint.yaml
+#
+# Guidance for an LLM authoring a NEW praxec skill — the optimal prompt layout
+# for a skill body that a COMMODITY model can execute reliably. Pairs with
+# authoring.skill.script-shape (scripts) and plan.design.technical (designs).
+#
+# Why this exists: praxec's leverage thesis is "maximum utility for minimal
+# cost" — a skill is static, hash-pinned instructions (the agent's system
+# message) shared across every mission that composes it, so an hour spent making
+# the layout crisp pays off on every commodity-model run forever. A vague skill
+# forces model escalation; a precise skill lets a cheap model do the work. This
+# skill encodes the layout that makes that true.
+skills:
+  authoring.skill.mint:
+    verb: compose
+    lifecycle: stable
+    source: cognitive-architectures
+    body: |
+      # Minting a new skill — optimal prompt layout
+
+      You are authoring the BODY of a new praxec skill: static, hash-pinned
+      instructions that become an agent's system message wherever a capability
+      lists the skill in its `skills:` array. The model reading your body is
+      often a COMMODITY model with one shot and no memory of this conversation.
+      Your job is to lay the instructions out so that model succeeds without
+      escalation. Optimize for that.
+
+      ## What a skill IS (and is not)
+
+      - A skill is INSTRUCTIONS (the *how* — method, standard, discipline). It is
+        NOT the task (that rides in the prompt_template / user message) and NOT
+        the model (that is the `agent` binding). Keep those three separate: if
+        your body names a specific ticket, repo, or model, it belongs in the
+        task, not the skill.
+      - A skill is REUSED across many missions and hash-pinned — write it to be
+        true for every invocation, not just today's. No instance-specific detail.
+
+      ## The layout (in this order — it mirrors how a model reads)
+
+      1. **Role + boundary (1-2 sentences).** Name the role the model is playing
+         and the ONE outcome it owns. State the boundary explicitly ("you review;
+         you do not edit"). A model that knows its lane doesn't wander.
+      2. **The method, as ordered steps.** Decompose the work into the smallest
+         steps that still each carry meaning. A commodity model executes a
+         5-step checklist far better than a paragraph describing the same work.
+         If a step is conditional, say the condition first ("if X, then …").
+      3. **The decision rule / acceptance bar, stated as code-checkable
+         predicates.** Don't say "make sure quality is good" — say "reject if any
+         public fn lacks a doc comment." Prefer predicates a later deterministic
+         gate could also check (deterministic-tools-over-LLM): the model and the
+         gate should agree on what "done" means.
+      4. **The output contract.** State EXACTLY what to emit and in what shape —
+         the fields, their types, and what each means. If the capability has an
+         inputSchema, your body must describe every required field so the model
+         fills it. One malformed field fails the whole hop; spell it out.
+      5. **Worked example (one, short).** A single concrete input→output example
+         calibrates a commodity model more than three paragraphs of prose. Keep
+         it minimal and representative, not exhaustive.
+      6. **Anti-patterns / failure modes (bulleted).** List the 2-4 ways models
+         actually get this wrong ("don't put an essay in a verdict enum"; "don't
+         claim done while stubs remain"). Naming the trap prevents it.
+
+      ## Rules that make a skill cheap to run
+
+      - **One instruction per sentence.** Compound sentences hide steps a model
+        skips. Split them.
+      - **Bound everything.** Max lengths, max iterations, "at most 3". Unbounded
+        instructions produce unbounded (and expensive) output.
+      - **Fail loud, never fake.** Tell the model to STOP and report a blocker
+        rather than fabricate a plausible answer — a fabricated pass is worse than
+        an honest block (it poisons everything downstream). If it can't verify a
+        claim, it must say so.
+      - **No hedging in outputs.** If the contract is an enum, the model emits the
+        enum value and nothing else. Reserve prose for the fields meant for prose.
+      - **Prefer showing the shape over describing it.** A 4-line example schema
+        beats a sentence about the schema.
+
+      ## Metadata to set (outside the body)
+
+      - `verb`: a blessed root that matches the skill's intent (inspect, plan,
+        implement, compose, review, verify, coordinate). The verb scopes where
+        the skill is discoverable.
+      - `lifecycle`: `experimental` for a new skill until it has driven a real
+        mission; promote to `stable` once proven.
+      - `source`: the repo that owns it.
+
+      ## Before you finish — self-check
+
+      - Could a commodity model with NO extra context execute this in one pass?
+      - Is every "good/appropriate/reasonable" replaced by a checkable predicate?
+      - Does the output contract name every field the capability's inputSchema
+        requires?
+      - Is there exactly one worked example, and is it minimal?
+      - Did you keep task-specific and model-specific detail OUT?
+
+      If any answer is no, tighten before pinning. The skill is read far more
+      often than it is written — the layout is the leverage.

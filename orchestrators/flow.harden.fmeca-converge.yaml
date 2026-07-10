@@ -234,6 +234,9 @@ workflows:
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.harden_decision == 'rejected'" }
+          unexpected:
+            target: failed
+            actor: deterministic
 
       hardened:
         terminal: true
@@ -241,3 +244,4 @@ workflows:
 
       failed:
         terminal: true
+        outcome: failure

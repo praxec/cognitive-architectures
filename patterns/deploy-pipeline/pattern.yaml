@@ -1,7 +1,7 @@
 version: "1.0.0"
 
 audit:
-  sink: stdout
+  sink: stderr
 
 workflows:
   deploy_pipeline:

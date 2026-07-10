@@ -49,7 +49,7 @@ workflows:
         goal: Build the deliverable to green via the recoverable build-loop.
         transitions:
           build:
-            target: marking_complete
+            target: workspace_gate
             actor: deterministic
             executor:
               kind: workflow
@@ -58,8 +58,60 @@ workflows:
                 inputs:
                   plan:      "$.workflow.input.deliverable"
                   repo_path: "$.workflow.input.repo_path"
+                  # SCOPED inner loop: cargo_scope rides in the deliverable spec
+                  # (deliverable.cargo_scope) so a single-crate slice tests only
+                  # its crate (fast RED/GREEN) instead of the whole workspace.
+                  # MUST be passed explicitly — snippet-input defaults are NOT
+                  # merged into $.workflow.input for path resolution (the caller
+                  # supplies it). "" ⇒ the tdd-verdict script defaults to
+                  # --workspace. The planning step must ALWAYS emit cargo_scope
+                  # in each deliverable's metadata (empty string when genuinely
+                  # workspace-wide) — a missing key is an unresolved-arg-path
+                  # permanent error. Full-workspace correctness is enforced by
+                  # workspace_gate below BEFORE mark_status, so a deliverable is
+                  # never marked complete on scoped evidence alone.
+                  cargo_scope: "$.workflow.input.deliverable.cargo_scope"
+                  # Coverage floor for the completion check — MUST be passed
+                  # explicitly (snippet-input defaults don't merge into
+                  # $.workflow.input for path resolution), same as cargo_scope.
+                  # "1": a TDD build must add at least one test to count as done.
+                  min_tests: "1"
                 outputs:
                   "$.context.result": result
+
+      # CROSS-CRATE CORRECTNESS BACKSTOP (the "milestone" build): the inner loop
+      # verified the deliverable's OWN crate; scoped `-p crate` can miss
+      # reverse-dependency breakage. Run ONE full `cargo test --workspace`
+      # (+ fmt + clippy) here before marking complete. Pass ⇒ mark; fail ⇒
+      # `failed` (never a silent complete on scoped evidence). This is the staged
+      # verdict: fast scoped slices in the loop, full workspace once per
+      # deliverable at the mark boundary.
+      workspace_gate:
+        goal: Full-workspace verify (cross-crate backstop) before marking complete.
+        transitions:
+          verify:
+            target: verified_decision
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.rust
+              use:
+                inputs:
+                  cwd: "$.workflow.input.repo_path"
+                outputs:
+                  "$.context.ws_verify": verify
+
+      # Branch on the workspace verifyOut status (exhaustive: pass | anything else).
+      verified_decision:
+        transitions:
+          pass:
+            target: marking_complete
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.ws_verify.status == 'pass'" }
+          fail:
+            target: failed
+            actor: deterministic
 
       # Record the verified deliverable as complete in the durable tracker.
       # CAS + lock-ownership are enforced by cpm-planner (fail-fast on conflict).
@@ -83,3 +135,13 @@ workflows:
 
       done:
         terminal: true
+        outcome: success
+
+      # workspace_gate rejected: the deliverable built green on its OWN crate but
+      # broke the workspace. Fail (outcome: failure) rather than silently mark —
+      # the deliverable reverts to ready and is re-driven (or circuit-breaks at
+      # MAX_ATTEMPTS). A targeted fix-feedback loop (route findings back into the
+      # build loop) is a follow-up; failing loud is the correct v1.
+      failed:
+        terminal: true
+        outcome: failure

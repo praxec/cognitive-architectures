@@ -1,0 +1,125 @@
+# capabilities/cap.implement.artifact.yaml
+#
+# Non-code artifact producer — the execution leaf flow.drive-program routes
+# `doc` and `author` deliverables to (code goes to the full build-loop; this
+# cap is for artifacts with no compiler to gate on: prose docs, pack YAML).
+# Cognitive cap: the auto-driven agent gets `file:` tools rooted at
+# `repo_path` (the gateway's auto_drive_tools template keys off the leaf's
+# `$.workflow.input.repo_path`), writes the artifact file(s) per the
+# deliverable spec, and signs off (the report fields are optional); a
+# deterministic `inspect.changed-files` staging step derives the changed file
+# set from git, then `run.git.commit-slice` commits EXACTLY those files
+# (stage-by-name, never -A; best-effort — commit refusals surface as data,
+# not failures).
+#
+# `artifact_kind` steers the authoring conventions:
+#   doc       — prose documentation (Markdown unless the spec says otherwise)
+#   pack-yaml — praxec pack definitions (workflows/caps/skills/scripts YAML,
+#               matching the surrounding pack's authoring conventions exactly)
+
+workflows:
+  cap.implement.artifact:
+    verb: implement
+    lifecycle: experimental
+    description: >
+      Author a non-code deliverable (doc or pack YAML) into the target repo per
+      the deliverable spec, then commit exactly the written files. The
+      execution leaf for `doc` / `author` deliverables in a driven program.
+    snippet:
+      inputs:
+        # The deliverable's plan-graph metadata ({leaf, repo, spec, plan,
+        # acceptance_criteria}) — the spec + acceptance drive the authoring.
+        deliverable:   { type: object, required: true }
+        # Repo root — roots the agent's `file:` write/read tools and the
+        # commit step's working directory.
+        repo_path:     { type: string, required: true }
+        # doc | pack-yaml (see header).
+        artifact_kind: { type: string, default: doc }
+      outputs:
+        files_written: { type: string }
+        summary:       { type: string }
+    initialState: authoring
+    states:
+
+      # The agent writes the artifact file(s) with its file tools, then submits
+      # what it wrote. Judgment + writing here; committing is deterministic.
+      authoring:
+        goal: >
+          You are authoring a NON-CODE deliverable and you HAVE file tools
+          rooted at the target repo. Read $.context.deliverable — its `spec`
+          and `acceptance_criteria` define the artifact; $.context.artifact_kind
+          says what you are writing ("doc" = prose documentation, "pack-yaml" =
+          praxec pack YAML definitions). FIRST read the neighboring files in
+          the repo to match their exact conventions (structure, tone, front
+          matter, authoring syntax) — never invent syntax; THEN write the
+          artifact file(s) with your file tools, satisfying every acceptance
+          criterion. Keep it minimal-but-sufficient: exactly what the spec
+          asks, no speculative extras. Submit `files_written` (a single
+          space-separated string of repo-relative paths you wrote), a one-line
+          `commit_message` for this artifact, and a short `summary` of what
+          was produced. EVERY report field is OPTIONAL — the commit step
+          derives the changed files from git, so once the artifact is written
+          ALWAYS call final_answer to sign off, even with an empty object;
+          never withhold the sign-off because a field is unknown.
+        transitions:
+          submit_artifact:
+            target: staging
+            actor: agent
+            inputSchema:
+              type: object
+              # ZERO hard-required fields (ceremony-proof sign-off, matches the
+              # build-loop): an agent that WROTE the artifact but fumbles the
+              # structured report must not fail the transition — the staging
+              # step derives the file set from git. The engine fills these
+              # defaults into missing arguments BEFORE validation and
+              # output-mapping, so an EMPTY final_answer is valid and a missing
+              # field can never null-clobber context.
+              properties:
+                files_written:  { type: string, default: "" }
+                commit_message: { type: string, default: "praxec artifact: authored deliverable" }
+                summary:        { type: string, default: "" }
+            executor: { kind: noop }
+            output:
+              files_written:  "$.arguments.files_written"
+              commit_message: "$.arguments.commit_message"
+              summary:        "$.arguments.summary"
+
+      # DETERMINISTIC staging (matches the build-loop): compute the changed
+      # files from git (tracked mods + untracked non-ignored) and OVERRIDE
+      # files_written — the commit no longer depends on the agent's
+      # self-report (which was hard-required → the ceremony-failure discard).
+      staging:
+        transitions:
+          stage:
+            target: committing
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.changed-files
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.workflow.input.repo_path"
+            output:
+              files_written: "$.output.json.files"
+
+      # Deterministic commit of the git-observed changed files (best-effort: a
+      # refusal — default branch, nothing staged — is data in commit_result,
+      # visible in the audit trail, never a stall).
+      committing:
+        transitions:
+          commit:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.commit-slice
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.context.commit_message"
+                - "$.context.files_written"
+                - "cognitive/cap.implement.artifact"
+            output:
+              commit_result: "$.output.json"
+
+      done:
+        terminal: true

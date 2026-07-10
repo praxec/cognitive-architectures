@@ -6,9 +6,9 @@
 #                 READY deliverable (respecting prerequisites + file-disjoint
 #                 locks), or report `exhausted: true` when none are ready.
 #   cohort_gate → exhausted? → done : build the leased deliverable.
-#   building    → cap.implement.build-loop on the deliverable spec (builder →
-#                 cargo → QA reviewer → commit-slice).
-#   marking     → plan.mark_status complete (CAS; this driver holds the lock),
+#   implementing→ cognitive/flow.implement.deliverable on the deliverable spec:
+#                 build-loop (builder → cargo → QA reviewer → commit-slice) then
+#                 plan.mark_status complete (CAS; this driver holds the lock),
 #                 then LOOP back to acquiring for the next now-unblocked one.
 #
 # The loop terminates on the SCALAR `exhausted` flag (cpm-planner emits it
@@ -21,19 +21,22 @@
 # reads `$.output.deliverables.0.metadata` and hands it straight to the build
 # loop — no separate id→spec lookup needed.
 #
-# Acquire + build are sub-CAPABILITY calls (flow→cap, legal; flow→flow is not —
-# SPEC §3, V11). The acquire is wrapped in cap.coordinate.acquire-cohort so its
-# outputs are snippet-typed slots the slot table (V13) recognizes — a transition
-# `output:` block does NOT seed a slot usable by a later `use.inputs`, only
-# `inputs:` and a child's `use.outputs` do. Build is cap.implement.build-loop;
-# mark_status is a direct kind:mcp call (its map is not slot-table-checked).
+# Acquire is a sub-CAPABILITY call (flow→cap); build is a sub-FLOW call
+# (flow→flow — legal now that V11 is RELAXED; recursion is bounded by the
+# runtime sub-workflow max_depth cap). The acquire is wrapped in
+# cap.coordinate.acquire-cohort so its outputs are snippet-typed slots the slot
+# table (V13) recognizes — a transition `output:` block does NOT seed a slot
+# usable by a later `use.inputs`, only `inputs:` and a child's `use.outputs` do.
+# Build nests cognitive/flow.implement.deliverable (build-loop → mark_status),
+# so the two flows share one definition of "execute a deliverable".
 #
 # max_count is 1 (serial-per-driver): N parallel cohorts come from running N
 # instances of THIS flow with distinct caller_ids (cpm-planner's locks keep them
 # file-disjoint). flow.loom composes elicit→design→plan→execute-cohorts on top.
 #
 # Requires the `cpm-planner` connection (connections/cpm-planner.yaml),
-# cognitive/cap.coordinate.acquire-cohort, and cognitive/cap.implement.build-loop.
+# cognitive/cap.coordinate.acquire-cohort, and cognitive/flow.implement.deliverable
+# (which itself nests cognitive/cap.implement.build-loop).
 
 workflows:
   flow.execute-cohorts:

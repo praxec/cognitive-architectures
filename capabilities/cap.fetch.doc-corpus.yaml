@@ -1,0 +1,72 @@
+# capabilities/cap.fetch.doc-corpus.yaml
+#
+# Fresh doc retrieval from the `corpus` docs-RAG server, in one reusable leaf:
+#   1. indexing  (FRESHNESS GATE) — corpus_index rebuilds the per-repo docs index
+#      incrementally (blake3 content-hash → unchanged docs skipped, cheap). Runs
+#      every call so retrieval never hits a stale snapshot.
+#   2. retrieving — corpus_search returns the ranked doc passages for `topic`
+#      ({ path, heading_path, snippet, score }).
+#
+# Verb `fetch` is deterministic (SPEC §4, V6 → primary executor `kind: script`
+# or `kind: mcp`); both leaves are `kind: mcp` against the `corpus` connection.
+# Wrapping the freshness-gate + retrieval in a CAPABILITY (not inline in the
+# flow) is deliberate: a cap's `snippet.outputs` seed the flow's slot table
+# (V13), so the audit step can consume `doc_evidence` via `use:.inputs` — an
+# inline `output:` block would not (see flow.execute-cohorts' acquire wrapper).
+#
+# Reusable by any flow that wants fresh, topic-scoped doc retrieval. Requires the
+# `corpus` connection in the gateway config (reference: connections/corpus.yaml).
+
+workflows:
+  cap.fetch.doc-corpus:
+    verb: fetch
+    lifecycle: experimental
+    description: >
+      Freshness-gate a repo's docs index (corpus_index, incremental) then
+      retrieve the ranked doc passages for a topic (corpus_search). Emits
+      doc_evidence [{ path, heading_path, snippet, score }] + index_stats.
+    snippet:
+      inputs:
+        repo_path: { type: string, required: true }
+        topic:     { type: string, required: true }
+        k:         { type: integer, default: 12 }
+      outputs:
+        doc_evidence: { type: array }
+        index_stats:  { type: object }
+    initialState: indexing
+    states:
+
+      # FRESHNESS GATE — never retrieve against a stale index.
+      indexing:
+        goal: Rebuild the docs index incrementally (content-hashed; cheap).
+        transitions:
+          index:
+            target: retrieving
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: corpus
+              tool: corpus_index
+              map:
+                repo_path: "$.workflow.input.repo_path"
+            output:
+              index_stats: "$.output"
+
+      # Retrieve the ranked doc passages for the topic.
+      retrieving:
+        goal: Retrieve the ranked doc passages for the topic.
+        transitions:
+          retrieve:
+            target: done
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: corpus
+              tool: corpus_search
+              map:
+                query:     "$.workflow.input.topic"
+                repo_path: "$.workflow.input.repo_path"
+                k:         "$.workflow.input.k"
+            output:
+              doc_evidence: "$.output"
+      done: { terminal: true }

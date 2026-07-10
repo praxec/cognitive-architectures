@@ -20,13 +20,16 @@ scripts:
       REPO="${1:-.}"
       if [ ! -d "$REPO" ]; then printf '{"error":"repo not found: %s"}\n' "$REPO"; exit 0; fi
       cd "$REPO" || { printf '{"error":"cannot cd"}\n'; exit 0; }
-      # Bounded structural facts (no full file dumps).
-      tree=$(find . \( -path ./target -o -path ./.git -o -path ./node_modules \) -prune -o \
+      # Bounded structural facts (no full file dumps). Prune build/vendor dirs
+      # AND nested repo copies — `.claude/worktrees/` holds full duplicate
+      # checkouts that otherwise flood the file_tree (crowding the real crates out
+      # of the head cap) and leave a tool-using consumer no usable navigation map.
+      tree=$(find . \( -path ./target -o -path ./.git -o -path ./node_modules -o -path ./.claude \) -prune -o \
                   -name '*.rs' -print 2>/dev/null | head -300 | while read -r f; do
                 printf '%s (%s lines)\n' "$f" "$(wc -l < "$f" 2>/dev/null || echo 0)"; done)
       markers=$(grep -rnE 'TODO|FIXME|unimplemented!\(|todo!\(|\.unwrap\(\)|\.expect\(|panic!\(' \
-                  --include='*.rs' . 2>/dev/null | grep -v '/target/' | head -120)
-      crates=$(find . -name Cargo.toml -not -path './target/*' 2>/dev/null | head -50)
-      rs_count=$(find . -path ./target -prune -o -name '*.rs' -print 2>/dev/null | grep -vc '/target/')
+                  --include='*.rs' . 2>/dev/null | grep -vE '/target/|/\.claude/' | head -120)
+      crates=$(find . -name Cargo.toml -not -path './target/*' -not -path './.claude/*' 2>/dev/null | head -50)
+      rs_count=$(find . \( -path ./target -o -path ./.claude \) -prune -o -name '*.rs' -print 2>/dev/null | grep -vE '/target/|/\.claude/' | grep -c '\.rs$')
       jq -n --arg tree "$tree" --arg markers "$markers" --arg crates "$crates" --arg n "$rs_count" \
         '{rs_file_count: ($n|tonumber? // 0), crates: $crates, file_tree: $tree, risk_markers: $markers}'

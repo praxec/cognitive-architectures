@@ -11,9 +11,7 @@
 connections:
   codebase_graph:
     kind: mcp
-    transport:
-      kind: streamable_http
-      url: "http://localhost:7100/mcp"
+    url: "http://localhost:7100/mcp"
     description: >
       Code graph (SCIP or equivalent): symbol search, dependency
       resolution, test discovery, ownership lookup.

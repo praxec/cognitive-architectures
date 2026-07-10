@@ -1,0 +1,53 @@
+# scripts-library/inspect.deliverable-route.yaml
+#
+# DETERMINISTIC routing normalizer for flow.drive-program: given one acquired
+# deliverable's plan-graph `metadata` ({leaf, repo, spec, plan,
+# acceptance_criteria}), emit the ROUTE the driver branches on — a validated
+# `leaf` token and the resolved `repo` path. Code decides, the gate routes
+# ("deterministic tools over LLM math"; same split as verify.test.tdd-verdict).
+#
+# Poka-yoke (this pack's unresolved-arg-path failure class): a guard expr
+# FAILS-FAST on a missing context path, so the flow must never guard directly on
+# `$.context.next_deliverable.leaf` (leaf may be absent). This script coalesces:
+#   - leaf   → metadata.leaf when it is one of the CLOSED routable set
+#              code|doc|vet|author|design|analysis; otherwise the sentinel
+#              "unknown" (the flow's unguarded V23 default marks the deliverable
+#              failed in cpm-planner rather than mis-routing or dead-stalling).
+#   - repo   → metadata.repo when present/non-empty, else $2 (the driving
+#              flow's own repo_path — the program default).
+# Args:
+#   $1 / DELIVERABLE_JSON — the deliverable metadata object (JSON string; the
+#                           script-arg renderer stringifies object values)
+#   $2 / DEFAULT_REPO     — fallback repo path
+# Emits {leaf, repo, error} JSON on stdout, read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  inspect.deliverable-route:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      META="${1:-${DELIVERABLE_JSON:-}}"
+      DEFAULT_REPO="${2:-${DEFAULT_REPO:-}}"
+
+      # Malformed / non-object metadata → the "unknown" route (the flow's
+      # default transition marks the deliverable failed; nothing mis-routes).
+      if ! printf '%s' "$META" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        jq -n --arg repo "$DEFAULT_REPO" \
+          '{leaf: "unknown", repo: $repo, error: "deliverable metadata was not a JSON object"}'
+        exit 0
+      fi
+
+      printf '%s' "$META" | jq --arg repo "$DEFAULT_REPO" '
+        (.leaf // "" | tostring) as $raw
+        | (if ($raw | IN("code","doc","vet","author","design","analysis"))
+             then $raw else "unknown" end) as $leaf
+        | ((.repo // "") | tostring) as $mrepo
+        | { leaf: $leaf,
+            repo: (if ($mrepo | length) > 0 then $mrepo else $repo end),
+            error: (if $leaf == "unknown"
+                      then "metadata.leaf \(.leaf // null | tojson) is not a routable leaf"
+                      else null end) }'

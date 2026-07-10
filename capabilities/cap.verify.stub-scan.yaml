@@ -5,7 +5,7 @@
 # unreachable!/panic!/TODO/FIXME). The deterministic complement to the
 # `cap.review.completeness` judgment gate. Verb `verify` (the deterministic
 # script gate) -> V6 requires a `kind: script` executor, like
-# cap.verify.workspace-green. The script needs the repo dir, so the cap passes
+# cap.verify.rust. The script needs the repo dir, so the cap passes
 # it from $.workflow.input.repo_path as a positional arg (like
 # cap.run.scaffold-repo).
 

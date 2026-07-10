@@ -1,0 +1,86 @@
+# scripts-library/run.git.ensure-committed.yaml
+#
+# Check-in PREP primitive for flow.check-in: make the deliverable branch ready
+# to push. Deterministic, autonomous, and (like run.git.commit-slice) every
+# failure is reported as DATA (exit 0) so a workflow gate can branch on it.
+#   1. optionally checkout the named branch (must already exist — check-in
+#      integrates finished work; it never invents branches)
+#   2. refuse to check-in FROM the default branch or when branch == base
+#      (a PR from main to main is always a mistake)
+#   3. if the tree is dirty, commit EVERYTHING under a praxec identity
+#      ("finalize in-progress work" — check-in is the end of the line, nothing
+#      may be silently left behind)
+#   4. resolve the base (input, else origin/HEAD's target, else main) and the
+#      PR title (input, else the last commit subject)
+# Inputs — POSITIONAL ARGS (kind:script `args:` are scope-rendered):
+#   $1 / BRANCH — branch to check in ("" = the currently checked-out branch)
+#   $2 / BASE   — integration base ("" = the repo's default branch)
+#   $3 / TITLE  — PR title ("" = last commit subject)
+# Run with the leaf `workingDirectory: $.workflow.input.repo_path`.
+# Emits {ok, branch, base, title, committed_now, error} JSON on stdout.
+version: "1.0.0"
+scripts:
+  run.git.ensure-committed:
+    verb: run
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      [ -n "${WORKDIR:-}" ] && cd "$WORKDIR" 2>/dev/null
+      jstr() { printf '%s' "${1:-}" | jq -Rs . 2>/dev/null || printf '""'; }
+      emit() { printf '{"ok": %s, "branch": %s, "base": %s, "title": %s, "committed_now": %s, "error": %s}\n' \
+                 "$1" "$2" "$3" "$4" "$5" "$6"; exit 0; }
+      fail() { emit false null null null false "$(jstr "$1")"; }
+
+      want_branch="${1:-${BRANCH:-}}"
+      want_base="${2:-${BASE:-}}"
+      want_title="${3:-${TITLE:-}}"
+
+      git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "not a git work tree"
+
+      # Poka-yoke: a leftover in-progress merge must be finished or aborted by
+      # an operator first — `git add -A` here would commit conflict MARKERS as
+      # real content and the later trial-merge scan would never see them.
+      [ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ] \
+        && fail "a merge is already in progress — resolve or abort it before check-in"
+
+      # Checkout the requested branch when it differs from the current one.
+      current="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+      if [ -n "${want_branch// /}" ] && [ "$want_branch" != "$current" ]; then
+        git checkout "$want_branch" >/dev/null 2>&1 \
+          || fail "branch '$want_branch' does not exist or checkout failed"
+        current="$want_branch"
+      fi
+
+      # Resolve base: input → origin/HEAD's target → main.
+      base="$want_base"
+      if [ -z "${base// /}" ]; then
+        base="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+        [ -z "$base" ] && base="main"
+      fi
+
+      # Poka-yoke: never check-in the default branch onto itself.
+      case "$current" in
+        main|master) fail "refusing check-in from default branch '$current' — branch first";;
+      esac
+      [ "$current" = "$base" ] && fail "branch '$current' equals base '$base'"
+
+      # Finalize any in-progress work: check-in is the end of the line.
+      committed_now=false
+      if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        git add -A 2>/dev/null || fail "git add failed"
+        if ! git -c user.name="praxec" -c user.email="praxec@noreply.local" \
+              commit -m "praxec check-in: finalize in-progress work" \
+                     -m "Co-Authored-By: praxec <praxec@noreply.local>" >/dev/null 2>&1; then
+          fail "git commit of in-progress work failed"
+        fi
+        committed_now=true
+      fi
+
+      title="$want_title"
+      [ -z "${title// /}" ] && title="$(git log -1 --pretty=%s 2>/dev/null)"
+      [ -z "${title// /}" ] && title="praxec check-in: $current"
+
+      emit true "$(jstr "$current")" "$(jstr "$base")" "$(jstr "$title")" "$committed_now" null

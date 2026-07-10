@@ -17,10 +17,37 @@ workflows:
     description: |
       Plan-driven feature delivery: draft → vet → signoff →
       TDD implementation → gap reconciliation → verify → review → PR.
+    # Spec A §5 — this SWE lifecycle targets a rust workspace, so its
+    # `hop_slot:` transitions resolve against `cap.<slot>.rust` (falling back to
+    # `cap.<slot>.generic`). The `verifying` state's verify gate is now a
+    # first-class `hop_slot: verify`, so the engine injects the verifyIn/verifyOut
+    # contracts and wires `cap.verify.rust` — no hard-coded verify executor.
+    stack: rust
     inputs:
       feature_brief: { type: string, required: true }
       base_ref:      { type: string, default: main }
       lexicon:       { type: object, default: {} }
+    # Declaring the `verify` HOP slot (via hop_slot injection) puts this flow in
+    # strict-blackboard mode, so every $.context slot a guard READS must be
+    # declared here (SPEC §11). The engine additionally injects `verify` with the
+    # canonical verifyOut $ref. Slots are permissive fragments — the point is
+    # declaration, not constraint.
+    blackboard:
+      feature_brief:         { type: string }
+      base_ref:              { type: string }
+      lexicon:               { type: object }
+      draft_plan:            {}
+      draft_artifacts:       {}
+      vet_verdict:           { type: string }
+      vet_findings:          {}
+      signoff_decision:      { type: string }
+      implementation_result: {}
+      tests_added:           {}
+      gap_report:            {}
+      review_verdict:        { type: string }
+      review_findings:       {}
+      pr_number:             {}
+      pr_url:                { type: string }
     initialState: drafting_plan
     states:
       drafting_plan:
@@ -69,6 +96,9 @@ workflows:
             guards:
               - kind: expr
                 expr: "$.context.vet_verdict == 'fail'"
+          unexpected:
+            target: failed
+            actor: deterministic
 
       awaiting_signoff:
         transitions:
@@ -99,6 +129,9 @@ workflows:
             guards:
               - kind: expr
                 expr: "$.context.signoff_decision == 'rejected'"
+          unexpected:
+            target: failed
+            actor: deterministic
 
       implementing:
         transitions:
@@ -138,32 +171,31 @@ workflows:
 
       verifying:
         transitions:
+          # First-class specialization slot (Spec A §3.1). No executor: the
+          # engine injects verifyIn as this transition's inputSchema, verifyOut
+          # as the $.context.verify blackboard slot, and wires the resolved
+          # cap.verify.rust (stack: rust). The full verifyOut lands at
+          # $.context.verify.
           verify:
             target: verified
             actor: deterministic
-            executor:
-              kind: workflow
-              definitionId: cap.verify.workspace-green
-              use:
-                inputs:  {}
-                outputs:
-                  "$.context.verify_ok":      ok
-                  "$.context.verify_summary": summary
+            hop_slot: verify
 
       verified:
         transitions:
+          # Gate on the typed tri-state (Spec A §6). `== 'pass'` is the ONLY
+          # positive arm; any non-pass status (fail | not_evaluated) falls
+          # through the unguarded `abort` default — never silently treated as a
+          # pass (the never-disguised-pass poka-yoke, §7).
           advance:
             target: reviewing
             actor: deterministic
             guards:
               - kind: expr
-                expr: "$.context.verify_ok == true"
+                expr: "$.context.verify.status == 'pass'"
           abort:
             target: failed
             actor: deterministic
-            guards:
-              - kind: expr
-                expr: "$.context.verify_ok == false"
 
       reviewing:
         transitions:
@@ -194,6 +226,9 @@ workflows:
             guards:
               - kind: expr
                 expr: "$.context.review_verdict == 'rejected'"
+          unexpected:
+            target: failed
+            actor: deterministic
 
       opening_pr:
         transitions:
@@ -217,3 +252,4 @@ workflows:
 
       failed:
         terminal: true
+        outcome: failure

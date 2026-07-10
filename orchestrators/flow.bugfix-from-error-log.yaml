@@ -147,6 +147,9 @@ workflows:
             guards:
               - kind: expr
                 expr: "$.context.review_verdict == 'rejected'"
+          unexpected:
+            target: failed
+            actor: deterministic
 
       opening_pr:
         transitions:
@@ -170,3 +173,4 @@ workflows:
 
       failed:
         terminal: true
+        outcome: failure

@@ -1,0 +1,35 @@
+# connections/corpus.yaml
+#
+# REFERENCE connection (operators copy into their gateway config; the
+# manifest deliberately leaves connections/ out of its load layout).
+#
+# MCP connection to `corpus` — a minimal docs-RAG server. Point it at a repo
+# and it indexes the documentation (markdown/txt/mdx/adoc), then serves ranked
+# retrieval: always-on BM25 (tantivy) plus an optional, opt-in semantic lane
+# (rig embeddings + cosine KNN). Incremental by blake3 content hash — the index
+# is cheap to keep fresh, so an audit can re-index on every run and never read a
+# stale snapshot. State lives in a per-repo `.corpus/` dir; no vector DB, no
+# background service.
+#
+# Install: `cargo install --path /path/to/corpus` (binary `corpus`, MCP/stdio;
+# logs to stderr). Provider keys for the semantic lane come from the process env
+# or `~/.praxec/providers.env` (embeddings are OFF by default — no spend unless
+# you index with `embeddings: true`).
+#
+# Tools:
+#   corpus_index  { repo_path, include?, embeddings? }
+#                 -> { indexed, skipped_unchanged, removed, chunks, embedded }
+#   corpus_search { query, repo_path, k?, mode? (hybrid|text|semantic) }
+#                 -> [{ path, heading_path, snippet, score }]
+#
+# Backs `cognitive/flow.audit-docs`: the freshness gate calls corpus_index, the
+# retrieval step calls corpus_search to pull the doc claims for a topic.
+
+connections:
+  corpus:
+    kind: mcp
+    command: corpus
+    description: >
+      Docs-RAG retrieval server. corpus_index keeps a per-repo index fresh
+      (incremental, content-hashed); corpus_search returns ranked doc chunks
+      { path, heading_path, snippet, score }. Backs flow.audit-docs.

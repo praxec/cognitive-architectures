@@ -6,7 +6,7 @@ Self-loop with retry cap + escalation. Use for: 'try N times, then human handles
 Promoted from `github.com/praxec/praxec/examples/` (see SOURCE-README.md if present for the original walkthrough). This copy is the CA-library reference; the upstream is the canonical test substrate.
 
 ## Validates with
-`praxec` 0.0.13+ — `praxec check --config pattern.yaml`.
+`praxec` 0.0.14+ — `praxec check --config pattern.yaml`.
 
 ## Composition
 

@@ -2,7 +2,7 @@ schema: praxec.repo/v1
 name: cognitive-architectures
 namespace: cognitive
 version: 0.0.1
-# Compatibility: requires praxec 0.0.13 or later (the
+# Compatibility: requires praxec 0.0.14 or later (the
 # capability/orchestrator composition model, SPEC §9).
 description: |
   The canonical first resource repo for the praxec
