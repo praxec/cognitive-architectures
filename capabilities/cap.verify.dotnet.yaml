@@ -1,0 +1,53 @@
+# capabilities/cap.verify.dotnet.yaml
+#
+# The `verify` specialization slot cap for `stack: dotnet` (Spec A §3.1). A
+# `hop_slot: verify` transition in a `stack: dotnet` workflow resolves to THIS
+# cap (`cap.verify.<stack>`), and the engine injects the canonical
+# verifyIn/verifyOut contracts around it (praxec://hop). Mirrors cap.verify.rust:
+# it binds to the `verify.dotnet.green` script (dotnet build + test) which emits
+# the verifyOut shape on stdout, and sets `treatNonZeroAsFailure: false` so a
+# `status: fail` verdict is CAPTURED as output (tri-state gate in the payload)
+# rather than collapsing to a transition error.
+#
+# Without this cap, a `stack: dotnet` workflow's verify slot falls back to
+# cap.verify.generic (honest `not_evaluated`) — i.e. no real .NET gate. This cap
+# is what makes praxec actually verify C#/.NET work.
+
+workflows:
+  cap.verify.dotnet:
+    verb: verify
+    lifecycle: experimental
+    description: >
+      .NET correctness gate: dotnet build + dotnet test (Category!=IntegrationTest
+      by default), emitted as the canonical HOP verifyOut
+      (status/summary/criteria/findings/provenance). The verify slot cap for
+      stack: dotnet.
+    snippet:
+      # verifyIn requires `cwd`; the hop_slot resolver forwards it as the cap's
+      # `cwd` input. OPTIONAL here so a deterministic slot call (no actor
+      # arguments) degrades to PWD rather than failing the sub-workflow start.
+      inputs:
+        cwd: { type: string }
+      # Convention (Spec A.1 §4.2): a cap.<slot>.<stack> names its HOP output
+      # after the slot. The engine maps this into $.context.verify.
+      outputs:
+        verify: { $ref: "praxec://hop#/$defs/verifyOut" }
+    initialState: ready
+    states:
+      ready:
+        goal: Run the .NET build+test gate; emit verifyOut.
+        transitions:
+          run:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.dotnet.green
+              # Capture a `status: fail` verifyOut instead of erroring the
+              # transition — the tri-state gate is expressed in the payload.
+              treatNonZeroAsFailure: false
+              args:
+                - "$.workflow.input.cwd"
+            output:
+              verify: "$.output.json"
+      done: { terminal: true }

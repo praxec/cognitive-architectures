@@ -1,0 +1,72 @@
+version: "1.0.0"
+scripts:
+  verify.dotnet.green:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # .NET correctness gate (dotnet build + dotnet test), emitted as the
+      # canonical HOP `verifyOut` shape (praxec://hop#/$defs/verifyOut):
+      #   { status, summary, criteria[], findings[], provenance }
+      # `status` = "pass" iff every criterion.met is true, else "fail". Exit code
+      # mirrors status (0 = pass, 1 = fail); slot consumers (cap.verify.dotnet via
+      # hop_slot, which sets treatNonZeroAsFailure:false) read the full verifyOut
+      # from $.output.json.
+      #
+      # Test filter matches a common CI gate: everything EXCEPT integration tests
+      # (`Category!=IntegrationTest`). Override with $DOTNET_TEST_FILTER.
+      #
+      # Optional positional $1 = working directory (a .sln or project dir); the
+      # verifyIn `cwd` the slot forwards. Defaults to PWD.
+      #
+      # PORTABILITY: uses `dotnet` when it is on PATH. If it is NOT (e.g. praxec
+      # hosted under WSL where the SDK lives on the Windows side), it falls back
+      # to `powershell.exe -Command "dotnet ..."`, translating a /mnt/<drive>
+      # cwd to a Windows path. Set $DOTNET_CMD to force a specific invocation.
+      set -uo pipefail
+
+      cwd="${1:-$PWD}"
+      test_filter="${DOTNET_TEST_FILTER:-Category!=IntegrationTest}"
+
+      # Resolve how to invoke the SDK. dn <args...> runs `dotnet <args...>` in $cwd.
+      if [ -n "${DOTNET_CMD:-}" ]; then
+        dn() { ( cd "$cwd" 2>/dev/null; $DOTNET_CMD "$@" ); }
+        mode="explicit:$DOTNET_CMD"
+      elif command -v dotnet >/dev/null 2>&1; then
+        dn() { ( cd "$cwd" 2>/dev/null; dotnet "$@" ); }
+        mode="native"
+      elif command -v powershell.exe >/dev/null 2>&1; then
+        # /mnt/c/foo/bar -> C:\foo\bar   (best-effort; falls through for UNC/other)
+        winpath=$(printf '%s' "$cwd" | sed -E 's|^/mnt/([a-z])/|\U\1:/|; s|/|\\|g')
+        dn() { powershell.exe -NoProfile -Command "cd '$winpath'; dotnet $*" 2>&1; }
+        mode="wsl:powershell.exe"
+      else
+        printf '{"status":"not_evaluated","summary":"no dotnet SDK found (native, $DOTNET_CMD, or powershell.exe)","criteria":[],"findings":[{"id":"toolchain","detail":"dotnet unavailable in this environment"}],"provenance":{"stack":"language:dotnet","source":"pack","mode":"none"}}\n'
+        exit 1
+      fi
+
+      crit() { printf '{"id":"%s","met":%s,"evidence":"%s"}' "$1" "$2" "$3"; }
+      STATUS="pass"
+
+      if dn build --nologo >&2; then
+        c_build=$(crit build true "dotnet build succeeded")
+      else
+        c_build=$(crit build false "dotnet build failed"); STATUS="fail"
+      fi
+
+      # Only run tests if build passed (a failed build makes test output noise).
+      if [ "$STATUS" = "pass" ]; then
+        if dn test --nologo --filter "$test_filter" >&2; then
+          c_test=$(crit test true "dotnet test (filter: $test_filter) green")
+        else
+          c_test=$(crit test false "dotnet test (filter: $test_filter) failed"); STATUS="fail"
+        fi
+      else
+        c_test=$(crit test false "skipped: build failed")
+      fi
+
+      printf '{"status":"%s","summary":"dotnet build + test: %s","criteria":[%s,%s],"findings":[],"provenance":{"stack":"language:dotnet","source":"pack","mode":"%s"}}\n' \
+        "$STATUS" "$STATUS" "$c_build" "$c_test" "$mode"
+
+      [ "$STATUS" = "pass" ] && exit 0 || exit 1
