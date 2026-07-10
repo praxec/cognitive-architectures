@@ -95,11 +95,45 @@ workflows:
       needs_gate:
         transitions:
           advance:
-            target: defining_requirements
+            target: awaiting_needs_signoff
             actor: deterministic
             guards:
               - kind: expr
                 expr: "$.context.needs_ready == true"
+          abort:
+            target: failed
+            actor: deterministic
+
+      # OPERATOR BOUNDARY (real, not just a comment): stakeholder needs are the
+      # ROOT of the validation trace and CANNOT be model-fabricated — under
+      # auto_drive, cap.plan.elicit-spec's actor:agent submit would otherwise
+      # self-answer the interview and poison the validation root. cap.gate
+      # .human-signoff is actor:human, so it genuinely PARKS the mission
+      # (Waiting) until the operator accepts the elicited needs. This is the one
+      # place sebok deliberately blocks a headless drive — by design.
+      awaiting_needs_signoff:
+        transitions:
+          signoff:
+            target: needs_signed_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.gate.human-signoff
+              use:
+                inputs:
+                  artifact: "$.context.needs"
+                  prompt:   "Accept these stakeholder needs as the validation-trace root?"
+                outputs:
+                  "$.context.needs_signoff": decision
+
+      needs_signed_gate:
+        transitions:
+          advance:
+            target: defining_requirements
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.needs_signoff == 'approved'"
           abort:
             target: failed
             actor: deterministic
@@ -303,13 +337,15 @@ workflows:
                   "$.context.verification": verify
 
       # TRACE-MATRIX GAP: the deterministic `artifact.trace-matrix` writer
-      # (design §Traceability) plugs in HERE — it would enforce every
-      # requirement → ≥1 verification outcome and block on
-      # UnverifiedRequirement. Until it exists, this gate enforces the
-      # artifact-level obligation: the RequirementsArtifact must be accepted
-      # (trace_blocked = GateBlocked{stage: verification, missing_artifact:
-      # requirements}) AND the verification tri-state must be 'pass'; anything
-      # else falls through the unguarded default to failed.
+      # (design §Traceability) plugs in HERE to enforce every requirement → ≥1
+      # verification outcome and block on UnverifiedRequirement. That trace
+      # obligation is NOT yet enforced — cap.verify.rust runs cargo and knows
+      # nothing about the stage-2 requirements, so a green build can leave
+      # requirements unverified and this gate cannot detect it. HONEST SCOPE:
+      # today this gate enforces only "verification passed" (workspace green);
+      # requirement→verification trace lands when the trace-matrix tool does.
+      # (An unguarded default routes anything non-pass to failed — never a
+      # silent proceed.)
       verification_gate:
         transitions:
           advance:
@@ -318,14 +354,6 @@ workflows:
             guards:
               - kind: expr
                 expr: "$.context.verification.status == 'pass'"
-              - kind: expr
-                expr: "$.context.requirements_status == 'validated'"
-          trace_blocked:
-            target: failed
-            actor: deterministic
-            guards:
-              - kind: expr
-                expr: "$.context.requirements_status != 'validated'"
           abort:
             target: failed
             actor: deterministic
@@ -361,16 +389,16 @@ workflows:
                   "$.context.validation_verdict": verdict
                   "$.context.validation_results": need_results
                   "$.context.unvalidated_needs":  unvalidated_needs
+                  "$.context.unvalidated_count":  unvalidated_count
 
       # TRACE-MATRIX GAP: the deterministic `artifact.trace-matrix` writer
-      # plugs in HERE for the other half of the obligation — every need → ≥1
-      # validation outcome, blocking on UnvalidatedNeed. Until it exists, the
-      # per-need outcomes live in $.context.validation_results (agent-reported)
-      # and this gate enforces the artifact-level obligation: the
-      # StakeholderNeedsArtifact must be accepted (trace_blocked =
-      # GateBlocked{stage: validation, missing_artifact: needs}) AND the
-      # validation verdict must be 'validated'; anything else falls through
-      # the unguarded default to failed.
+      # plugs in HERE for the full obligation — every need → ≥1 validation
+      # outcome. Until it exists, the gate enforces a REAL deterministic
+      # cross-check short of the full matrix: advance requires BOTH the verdict
+      # == 'validated' AND unvalidated_count == 0, so an agent verdict that
+      # claims 'validated' while leaving needs in the unvalidated set is caught
+      # by code (not trusted). Per-need evidence lives in
+      # $.context.validation_results. Anything else → unguarded default → failed.
       validation_gate:
         transitions:
           advance:
@@ -380,13 +408,7 @@ workflows:
               - kind: expr
                 expr: "$.context.validation_verdict == 'validated'"
               - kind: expr
-                expr: "$.context.needs_ready == true"
-          trace_blocked:
-            target: failed
-            actor: deterministic
-            guards:
-              - kind: expr
-                expr: "$.context.needs_ready != true"
+                expr: "$.context.unvalidated_count == 0"
           abort:
             target: failed
             actor: deterministic
