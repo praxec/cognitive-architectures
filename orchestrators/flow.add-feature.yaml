@@ -96,6 +96,9 @@ workflows:
             guards:
               - kind: expr
                 expr: "$.context.vet_verdict == 'fail'"
+          unexpected:
+            target: failed
+            actor: deterministic
 
       awaiting_signoff:
         transitions:
@@ -126,6 +129,9 @@ workflows:
             guards:
               - kind: expr
                 expr: "$.context.signoff_decision == 'rejected'"
+          unexpected:
+            target: failed
+            actor: deterministic
 
       implementing:
         transitions:
@@ -220,6 +226,9 @@ workflows:
             guards:
               - kind: expr
                 expr: "$.context.review_verdict == 'rejected'"
+          unexpected:
+            target: failed
+            actor: deterministic
 
       opening_pr:
         transitions:

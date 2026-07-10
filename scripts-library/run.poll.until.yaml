@@ -1,0 +1,68 @@
+# scripts-library/run.poll.until.yaml
+#
+# P7 — the POLL source: suspend a flow until an external condition holds.
+# Poll a shell COMMAND on an interval until it succeeds (exit 0) or a total
+# TIMEOUT elapses, with optional exponential backoff. The in-process v1 of the
+# await-primitive's `poll` source (see docs/await-resume-architecture.md): it
+# blocks the branch (bounded by TIMEOUT) rather than durably parking the mission
+# — the durable park+resume upgrade lands with the unified await primitive.
+# Deterministic; every outcome (satisfied OR timed-out) is DATA (exit 0) so a
+# workflow gate can branch on `satisfied`.
+#
+# Use for: waiting on a CI/build/deploy to reach a terminal state before the
+# next stage (e.g. inside flow.check-in after opening a PR).
+#
+# Inputs — POSITIONAL ARGS (kind:script `args:` are scope-rendered):
+#   $1 / COMMAND  — the shell command to poll; exit 0 ⇒ condition satisfied
+#   $2 / INTERVAL — seconds between polls (default 5)
+#   $3 / TIMEOUT  — max total seconds to poll before giving up (default 300)
+#   $4 / BACKOFF  — "true" ⇒ exponential backoff (interval doubles, capped at
+#                   60s); anything else ⇒ fixed interval (default false)
+# Emits {satisfied, attempts, elapsed_secs, timed_out, error} JSON on stdout.
+version: "1.0.0"
+scripts:
+  run.poll.until:
+    verb: run
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: the polled command is EXPECTED to fail until the condition
+      # holds; every outcome is reported as JSON data, exit 0.
+      set -uo pipefail
+      jstr() { printf '%s' "${1:-}" | jq -Rs . 2>/dev/null || printf '""'; }
+      emit() { printf '{"satisfied": %s, "attempts": %s, "elapsed_secs": %s, "timed_out": %s, "error": %s}\n' \
+                 "$1" "$2" "$3" "$4" "$5"; exit 0; }
+
+      cmd="${1:-${COMMAND:-}}"
+      interval="${2:-${INTERVAL:-5}}"
+      timeout_s="${3:-${TIMEOUT:-300}}"
+      backoff="${4:-${BACKOFF:-false}}"
+
+      [ -z "$cmd" ] && emit false 0 0 false "$(jstr "no COMMAND to poll")"
+      # sanitize numerics
+      case "$interval" in ''|*[!0-9]*) interval=5 ;; esac
+      case "$timeout_s" in ''|*[!0-9]*) timeout_s=300 ;; esac
+      [ "$interval" -lt 1 ] && interval=1
+
+      start=$(date +%s)
+      attempts=0
+      cur_interval="$interval"
+      while : ; do
+        attempts=$((attempts + 1))
+        if bash -c "$cmd" >/dev/null 2>&1; then
+          now=$(date +%s)
+          emit true "$attempts" "$((now - start))" false null
+        fi
+        now=$(date +%s)
+        elapsed=$((now - start))
+        # Would the NEXT sleep exceed the budget? Then we've timed out.
+        if [ "$((elapsed + cur_interval))" -ge "$timeout_s" ]; then
+          emit false "$attempts" "$elapsed" true "$(jstr "condition not met within ${timeout_s}s (${attempts} attempts)")"
+        fi
+        sleep "$cur_interval"
+        if [ "$backoff" = "true" ]; then
+          cur_interval=$((cur_interval * 2))
+          [ "$cur_interval" -gt 60 ] && cur_interval=60
+        fi
+      done
