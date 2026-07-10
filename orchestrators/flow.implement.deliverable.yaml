@@ -67,6 +67,11 @@ workflows:
                   # permanent error that killed every cohort-driven code
                   # deliverable at the cargo step.)
                   cargo_scope: ""
+                  # Coverage floor for the completion check — MUST be passed
+                  # explicitly (snippet-input defaults don't merge into
+                  # $.workflow.input for path resolution), same as cargo_scope.
+                  # "1": a TDD build must add at least one test to count as done.
+                  min_tests: "1"
                 outputs:
                   "$.context.result": result
 

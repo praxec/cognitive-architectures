@@ -40,6 +40,17 @@ workflows:
         # default, `$.workflow.input.cargo_scope` was an unresolved-arg-path
         # permanent error that killed every cohort-driven code deliverable.
         cargo_scope: { type: string, default: "" }
+        # Coverage floor for the deterministic completion check
+        # (inspect.plan-complete arg 6): a code deliverable that added fewer than
+        # `min_tests` tests is NOT complete — this catches premature/stubbed
+        # "done". Same resolution rule as cargo_scope: the caller
+        # (flow.implement.deliverable) must ALSO pass it explicitly, because a
+        # snippet-input default is not merged into `$.workflow.input` for path
+        # resolution — without both the declaration AND the explicit pass,
+        # `$.workflow.input.min_tests` is an unresolved-arg permanent error that
+        # kills the deliverable at the completion check. Default "1": a TDD build
+        # must add at least one test.
+        min_tests:   { type: string, default: "1" }
       outputs:
         result:      { type: object }
         tests_added: { type: integer }
