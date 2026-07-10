@@ -91,7 +91,7 @@ workflows:
       staging:
         transitions:
           stage:
-            target: committing
+            target: verifying
             actor: deterministic
             executor:
               kind: script
@@ -101,6 +101,39 @@ workflows:
                 - "$.workflow.input.repo_path"
             output:
               files_written: "$.output.json.files"
+
+      # ENFORCED "parses via praxec check" gate (the acceptance criterion a
+      # pack-yaml deliverable claims). Run `praxec check` over the repo working
+      # tree; a pack def that does not LOAD (bad schema, or dropped into a
+      # remapped/unscanned dir) must NOT be committed. Docs pass through.
+      verifying:
+        transitions:
+          verify:
+            target: verify_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.pack.loads
+              workingDirectory: "$.workflow.input.repo_path"
+              args:
+                - "$.workflow.input.repo_path"
+                - "$.workflow.input.artifact_kind"
+            output:
+              loaded_ok: "$.output.json.loaded_ok"
+              load_diagnostic: "$.output.json.diagnostic"
+
+      verify_gate:
+        transitions:
+          load_ok:
+            target: committing
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.loaded_ok == true" } ]
+            executor: { kind: noop }
+          load_failed:
+            target: failed
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.loaded_ok != true" } ]
+            executor: { kind: noop }
 
       # Deterministic commit of the git-observed changed files (best-effort: a
       # refusal — default branch, nothing staged — is data in commit_result,
@@ -123,3 +156,11 @@ workflows:
 
       done:
         terminal: true
+
+      # The authored pack-yaml did not load (verify_gate rejected it). Terminal
+      # failure carrying the check diagnostic — the artifact is NOT committed, so
+      # a driven program records this deliverable failed instead of shipping a
+      # silently-dropped definition (v0.0.17 dogfood Finding 1).
+      failed:
+        terminal: true
+        outcome: failure

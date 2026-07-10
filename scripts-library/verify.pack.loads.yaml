@@ -1,0 +1,47 @@
+# scripts-library/verify.pack.loads.yaml
+#
+# Gate a just-authored PACK-YAML artifact on whether it actually LOADS. Runs
+# `praxec check` over the repo (working tree — the authored file need not be
+# committed yet) and fails (`loaded_ok: false`) on a hard error OR an
+# `UNSCANNED_DEFINITION_DIR` warning (an authored definition in a remapped /
+# unscanned directory — silently dropped before v0.0.17). This is the enforced
+# counterpart to cap.implement.artifact's "parses via praxec check" acceptance
+# criterion: a definition that does not load must NOT be committed.
+#
+# Doc artifacts skip the check (nothing to load) → always loaded_ok:true.
+# Emits {loaded_ok, diagnostic} JSON, exit 0 — the flow's verify_gate branches
+# on the data, not the exit code.
+#
+# Inputs (positional): $1 = repo root, $2 = artifact_kind (doc | pack-yaml)
+version: "1.0.0"
+scripts:
+  verify.pack.loads:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      REPO="${1:-$PWD}"
+      KIND="${2:-doc}"
+      # Non-pack artifacts have nothing to load — pass through.
+      if [ "$KIND" != "pack-yaml" ]; then
+        printf '{"loaded_ok": true, "diagnostic": null}\n'
+        exit 0
+      fi
+      command -v praxec >/dev/null 2>&1 || {
+        printf '{"loaded_ok": true, "diagnostic": "praxec not on PATH; load-check skipped"}\n'
+        exit 0
+      }
+      cfg="$(mktemp)"
+      printf 'version: "1.0.0"\ngateway: { allow_ephemeral: true }\nstore: { kind: memory }\nrepos:\n  - path: %s\n' "$REPO" > "$cfg"
+      out="$(praxec check --config "$cfg" 2>&1)"; rc=$?
+      rm -f "$cfg"
+      diag="$(printf '%s' "$out" | tail -25 | jq -Rs . 2>/dev/null || printf '""')"
+      # Fail on a hard error (bad schema in a scanned dir → merge_repo_file bails)
+      # OR the unscanned-dir warning (authored def in a remapped/unscanned dir).
+      if [ "$rc" -ne 0 ] || printf '%s' "$out" | grep -q "UNSCANNED_DEFINITION_DIR"; then
+        printf '{"loaded_ok": false, "diagnostic": %s}\n' "$diag"
+        exit 0
+      fi
+      printf '{"loaded_ok": true, "diagnostic": null}\n'
