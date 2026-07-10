@@ -4,11 +4,13 @@
 # named files (never `git add -A`/`-u`), then commits with the given message.
 # Poka-yoke guards (all fail as DATA, exit 0, so a workflow gate can branch):
 #   - refuses on the default branch (main/master) — branch-first discipline
-#   - refuses an empty MESSAGE or empty FILES set
+#   - empty MESSAGE → sensible default; empty FILES → git-derived working-tree
+#     changes (ceremony-proof: the agent's self-report is a hint, not required)
 #   - refuses paths that don't exist / aren't under the repo
 # Inputs — POSITIONAL ARGS (kind:script `args:` are scope-rendered; `env:` is NOT):
-#   $1 / MESSAGE   — the (per-slice) commit message (required, non-empty)
-#   $2 / FILES     — newline- or space-separated repo-relative paths to stage (required)
+#   $1 / MESSAGE   — the (per-slice) commit message (empty → default)
+#   $2 / FILES     — newline- or space-separated repo-relative paths to stage
+#                    (empty → derived from `git status --porcelain`)
 #   $3 / WORKFLOW  — optional: the driving workflow id, credited as a contributor
 # Authored by a `praxec` identity (not the operator), with the workflow as a
 # Co-Authored-By contributor — the Claude Code / Cursor convention for automated
@@ -30,6 +32,8 @@ scripts:
       jstr() { printf '%s' "${1:-}" | jq -Rs . 2>/dev/null || printf '""'; }
 
       msg="${1:-${MESSAGE:-}}"
+      # A nulled context slot renders as the literal string "null" — treat as empty.
+      [ "$msg" = "null" ] && msg=""
       # Empty message → a sensible default (don't fail; this runs autonomously).
       [ -z "${msg// /}" ] && msg="praxec: automated verified slice"
       if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -44,9 +48,30 @@ scripts:
       workflow="${3:-${WORKFLOW:-}}"
       # Parse FILES (newline or space separated) into an array; verify each exists.
       files_raw="${2:-${FILES:-}}"
+      # A nulled context slot renders as the literal string "null" — treat as empty.
+      [ "$files_raw" = "null" ] && files_raw=""
       read -r -a files <<< "$(printf '%s' "$files_raw" | tr '\n' ' ')"
+      # Ceremony-proof fallback: reported set if present AND non-empty, else the
+      # git-derived working-tree changes (tracked mods + untracked non-ignored;
+      # .gitignore respected via --porcelain; deletions skipped to satisfy the
+      # exists check below). The agent's file tools already wrote the files —
+      # git KNOWS what changed; a fumbled/absent self-report must not discard
+      # a verified slice. Scoped to THIS repo: the script cd's to WORKDIR (the
+      # workflow's repo_path) and git status never wanders past the work tree.
       if [ "${#files[@]}" -eq 0 ]; then
-        emit false null "$(jstr "$branch")" '[]' "$(jstr 'empty FILES set')"; fi
+        derived="$(git status --porcelain --untracked-files=all 2>/dev/null | while IFS= read -r line; do
+            xy="${line:0:2}"; rest="${line:3}"
+            case "$xy" in *D*) continue ;; esac
+            case "$rest" in
+              *" -> "*) printf '%s ' "${rest##* -> }" ;;
+              *)        printf '%s ' "$rest" ;;
+            esac
+          done)"
+        read -r -a files <<< "$derived"
+      fi
+      if [ "${#files[@]}" -eq 0 ]; then
+        emit false null "$(jstr "$branch")" '[]' \
+          "$(jstr 'nothing to commit (reported FILES empty and git working tree clean)')"; fi
       for f in "${files[@]}"; do
         if [ ! -e "$f" ]; then
           emit false null "$(jstr "$branch")" '[]' "$(jstr "path does not exist: $f")"; fi

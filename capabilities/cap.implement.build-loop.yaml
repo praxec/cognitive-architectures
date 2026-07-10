@@ -124,7 +124,11 @@ workflows:
           compile errors so the test builds and goes red. Report
           `test_files_written` (space-separated repo-relative paths), `done=true`
           ONLY when every plan behavior now has a test, and a one-line
-          `commit_message` for THIS slice.
+          `commit_message` for THIS slice. EVERY report field is OPTIONAL — the
+          loop derives changed files from git and the verdict from cargo, so
+          once the files are written ALWAYS call final_answer to sign off, even
+          with an empty object; never withhold the sign-off because a field is
+          unknown.
         skills: [implement.tdd.discipline]
         transitions:
           write_test:
@@ -132,11 +136,21 @@ workflows:
             actor: agent
             inputSchema:
               type: object
-              required: [done]
+              # ZERO hard-required fields (ceremony-proof sign-off). The agent's
+              # structured report was the #1 discard surface: models WROTE a
+              # correct red test but fumbled the sign-off → AGENT_NO_RESULT →
+              # verified work thrown away. Everything an omitted field would
+              # have carried is derived deterministically instead: changed files
+              # from git (tdd-verdict scan fallback + the staging override),
+              # completion from inspect.plan-complete (done defaults false →
+              # keep building), commit message from the default below. The
+              # engine fills these defaults into missing arguments BEFORE
+              # validation and output-mapping, so an EMPTY final_answer is a
+              # valid sign-off and can never null-clobber context.
               properties:
-                done:               { type: boolean }
-                test_files_written: { type: string }
-                commit_message:     { type: string }
+                done:               { type: boolean, default: false }
+                test_files_written: { type: string, default: "" }
+                commit_message:     { type: string, default: "praxec tdd-loop: verified slice" }
             executor: { kind: noop }
             output:
               coding_done:        "$.arguments.done"
@@ -231,7 +245,11 @@ workflows:
           behavior, REMOVE its stub/unfinished-work markers (TODO/FIXME/
           `todo!()`/`unimplemented!()`/SCAFFOLD/"not yet implemented") — the
           deterministic completion check treats any remaining marker as an
-          unbuilt deliverable.
+          unbuilt deliverable. EVERY report field is OPTIONAL — git and the
+          verdict script are the source of truth for what changed and whether
+          it is green, so once the files are written ALWAYS call final_answer
+          to sign off, even with an empty object; never withhold the sign-off
+          because a field is unknown.
         skills: [implement.tdd.discipline]
         transitions:
           write_code:
@@ -239,12 +257,16 @@ workflows:
             actor: agent
             inputSchema:
               type: object
-              required: [done]
+              # ZERO hard-required fields — see write_test: an empty
+              # final_answer is a valid sign-off. The agent's report is a hint;
+              # git (staging + tdd-verdict scan fallback) and cargo (the green
+              # verdict) are the source of truth, and the defaults below stop a
+              # missing field from null-clobbering context.
               properties:
-                done:          { type: boolean }
-                result:        { type: object }
-                tests_added:   { type: integer }
-                files_written: { type: string }
+                done:          { type: boolean, default: false }
+                result:        { type: object, default: {} }
+                tests_added:   { type: integer, default: 0 }
+                files_written: { type: string, default: "" }
             executor: { kind: noop }
             output:
               coding_done:   "$.arguments.done"
