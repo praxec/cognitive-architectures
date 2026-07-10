@@ -136,6 +136,9 @@ workflows:
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.approval == 'rejected'" }
+          unexpected:
+            target: failed
+            actor: deterministic
 
       # FALSIFY — scientific-process adjudicates: try to refute adequacy for each use case.
       falsifying:
@@ -252,6 +255,9 @@ workflows:
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.escalation_decision == 'rejected'" }
+          unexpected:
+            target: failed
+            actor: deterministic
 
       survived:
         terminal: true

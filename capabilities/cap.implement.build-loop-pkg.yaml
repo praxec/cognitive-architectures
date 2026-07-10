@@ -230,6 +230,9 @@ workflows:
             guards:
               - { kind: expr, expr: "$.context.qa_verdict == 'rejected'" }
               - { kind: expr, expr: "$.context.review_iter >= 3" }
+          unexpected:
+            target: needs_human
+            actor: deterministic
 
       # COMMIT the verified slice (best-effort, NEVER blocks): stage ONLY the
       # files the agent reported writing, then commit. run.git.commit-slice exits
