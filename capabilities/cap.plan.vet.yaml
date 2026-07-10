@@ -1,8 +1,11 @@
 # capabilities/cap.plan.vet.yaml
 #
 # Adversarial review of a draft plan. Cognitive cap — agent reads
-# the `compose.plan.vet` skill, evaluates the input plan, submits
-# verdict + findings.
+# the `plan.review.adversarial` skill (a REVIEW skill matching this cap's
+# verdict+findings contract, PROPORTIONAL to plan risk), evaluates the input
+# plan, submits verdict + findings. (Previously read `compose.plan.vet`, a
+# plan-COMPOSER skill, which made the agent emit a plan and dump its critique
+# into the `verdict` enum — a cap/skill contract mismatch.)
 
 workflows:
   cap.plan.vet:
@@ -17,11 +20,16 @@ workflows:
       outputs:
         verdict:  { type: string, enum: [pass, fail, needs-revision] }
         findings: { type: array }
-    skills: [compose.plan.vet]
+    skills: [plan.review.adversarial]
     initialState: ready
     states:
       ready:
-        goal: Vet the plan adversarially; cite each finding.
+        goal: >
+          Review the plan adversarially and PROPORTIONALLY to its risk/blast-radius
+          (a low-risk single-file or doc plan gets a light review; high-risk /
+          schema / auth plans get full scrutiny). Emit `verdict` as EXACTLY one of
+          pass | fail | needs-revision (a single token) and put ALL analysis in the
+          `findings` array — never in `verdict`.
         transitions:
           submit_vet:
             target: done

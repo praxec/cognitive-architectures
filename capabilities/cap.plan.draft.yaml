@@ -22,7 +22,7 @@ workflows:
         lexicon: { type: object, default: {} }
       outputs:
         plan:      { type: object }
-        artifacts: { type: array }
+        artifacts: { type: array, default: [] }
     skills: [plan.specify.change-request]
     initialState: ready
     states:
@@ -30,7 +30,9 @@ workflows:
         goal: >
           Read the brief; emit a typed plan that INCLUDES a top-level
           `deliverables` DAG (id / owned_files [disjoint] / prerequisites),
-          per the plan.specify.change-request skill, plus supporting artifacts.
+          per the plan.specify.change-request skill. ALSO return `artifacts`
+          as an ARRAY of supporting-artifact objects — use an empty array []
+          when there are none. NEVER return null for `artifacts`.
         transitions:
           submit_plan:
             target: done

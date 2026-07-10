@@ -214,7 +214,7 @@ workflows:
               definitionId: cap.coordinate.cpm-plan
               use:
                 inputs:
-                  tasks: "$.context.plan"
+                  graph: "$.context.plan"
                 outputs:
                   "$.context.schedule": schedule
 
