@@ -1,0 +1,31 @@
+version: v0.0.17
+flow:
+  id: onboard-tool
+  states:
+    - id: receive
+      input:
+        descriptor: any
+      transitions:
+        - target: stage_connection
+
+    - id: stage_connection
+      kind: cli
+      command: praxec connections add ${input.descriptor.reach.connection}
+      transitions:
+        - target: await_grant
+
+    - id: await_grant
+      actor: human
+      message: Operator must run `praxec connections grant`
+      transitions:
+        - target: register_and_invoke
+
+    - id: register_and_invoke
+      kind: tool_source
+      command: test
+      transitions:
+        - target: done
+
+    - id: done
+      terminal: true
+      outcome: success
