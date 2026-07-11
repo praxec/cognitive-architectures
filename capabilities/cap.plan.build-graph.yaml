@@ -58,7 +58,12 @@ workflows:
             actor: agent
             inputSchema:
               type: object
-              required: [graph, acceptance_criteria, risk]
+              # `blast_radius` is mandated by the description AND declared in
+              # snippet.outputs — but was absent from `required`, so a run could
+              # (and did) succeed with blast_radius: null and no gate objecting.
+              # A required output that silently comes back null is a fail-open;
+              # the gate now enforces the contract the cap already advertises.
+              required: [graph, acceptance_criteria, risk, blast_radius]
               properties:
                 graph:
                   type: object
@@ -77,7 +82,9 @@ workflows:
                           estimated_effort_hours: { type: number }
                 acceptance_criteria: { type: array, items: { type: string } }
                 risk:                { type: string, enum: [low, medium, high, critical] }
-                blast_radius:        { type: object }
+                # minProperties closes the second half of the fail-open: an empty
+                # `{}` would satisfy `required` while carrying no information.
+                blast_radius:        { type: object, minProperties: 1 }
             executor: { kind: noop }
             output:
               graph:               "$.arguments.graph"

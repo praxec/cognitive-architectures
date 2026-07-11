@@ -18,14 +18,15 @@ workflows:
       inputs:
         graph: { type: object, required: true }
       outputs:
+        plan_id:  { type: string }
         schedule: { type: object }
     initialState: ready
     states:
       ready:
-        goal: Submit the task graph to the CPM planner; capture the schedule.
+        goal: Submit the task graph to the CPM planner; capture the plan_id.
         transitions:
           submit:
-            target: done
+            target: scheduling
             actor: deterministic
             executor:
               kind: mcp
@@ -37,6 +38,24 @@ workflows:
               # from it (name harmonized with cap.plan.build-graph + the tool).
               map:
                 graph: "$.workflow.input.graph"
+            # `plan.submit` returns SubmitResponse { plan_id } and NOTHING else
+            # (cpm-planner/src/server.rs) — the schedule lives behind `plan.status`.
+            # Capture the id here; the `scheduling` state below fetches the schedule
+            # this cap's description actually promises.
+            output:
+              plan_id: "$.output.plan_id"
+      scheduling:
+        goal: Read back the computed schedule (critical path, hours, deliverable rows).
+        transitions:
+          fetch_schedule:
+            target: done
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.status
+              map:
+                plan_id: "$.context.plan_id"
             output:
               schedule: "$.output"
       done: { terminal: true }
