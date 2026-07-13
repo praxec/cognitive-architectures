@@ -32,6 +32,17 @@ workflows:
       # (goal + deliverables/steps + acceptance_criteria).
       deliverable:    { type: object, required: true }
       repo_path:      { type: string, required: true }
+      # CROSS-CRATE BACKSTOP surface (see workspace_gate). Was hardcoded to
+      # repo_path — always correct, but it pays for a full `cargo test
+      # --workspace` on every deliverable. REQUIRED (not defaulted): a path
+      # default in `inputs:` is not merged into `$.workflow.input` for path
+      # resolution, so a defaulted-but-unpassed value is an unresolved-arg
+      # permanent error, not a silent fallback. Pass repo_path for the
+      # always-correct whole-tree gate, or narrow it to the crate(s) that
+      # actually reverse-depend on the touched one. Whichever is chosen it MUST
+      # be a SUPERSET of the inner loop's `cargo_scope` surface, or the backstop
+      # cannot see the breakage it exists to catch.
+      backstop_cwd:   { type: string, required: true }
       # cpm-planner coordinates: which plan/deliverable, and the lock holder.
       plan_id:        { type: string, required: true }
       deliverable_id: { type: string, required: true }
@@ -97,7 +108,7 @@ workflows:
               definitionId: cognitive/cap.verify.rust
               use:
                 inputs:
-                  cwd: "$.workflow.input.repo_path"
+                  cwd: "$.workflow.input.backstop_cwd"
                 outputs:
                   "$.context.ws_verify": verify
 
