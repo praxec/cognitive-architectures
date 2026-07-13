@@ -24,7 +24,39 @@ scripts:
       # hosted under WSL where the SDK lives on the Windows side), it falls back
       # to `powershell.exe -Command "dotnet ..."`, translating a /mnt/<drive>
       # cwd to a Windows path. Set $DOTNET_CMD to force a specific invocation.
+      #
+      # SELF-SUFFICIENCY (hardened 2026-07-11): this script must not depend on
+      # the invoking process's env. A long-lived `praxec serve` daemon may have
+      # been started before a native SDK was installed, or from a shell that
+      # never exported the toolchain PATH / hook-skip var — so the gate resolves
+      # its own environment instead of trusting the caller's:
+      #   1. Prepend $HOME/.dotnet and $HOME/.powershell to PATH so a native
+      #      SDK/pwsh install is always preferred over the powershell.exe/WSL
+      #      interop fallback (interop can be down independent of the SDK).
+      #   2. Default SKIP_GIT_HOOKS_VERIFY=1 (only if the caller hasn't set it)
+      #      so repos whose pre-build target shells out to a hook-verify script
+      #      with CRLF line endings on a /mnt/<drive> checkout (dash chokes on
+      #      CRLF) don't fail the build for a reason unrelated to the code
+      #      under test. Caller can still force it off with
+      #      SKIP_GIT_HOOKS_VERIFY=0 (or any non-"1" value) if a repo's hooks
+      #      legitimately need to run as part of the gate.
+      #   3. Default SKIP_PROJECT_SCHEMA_GENERATION=1 (only if unset). Some
+      #      repos MSBuild-invoke a Windows-npm `quicktype` shim via WSL
+      #      interop as a pre-build step (JSON-schema -> POCO codegen); that
+      #      shim can hang indefinitely when interop is degraded, which would
+      #      hang this "deterministic" gate — unacceptable. The repos that do
+      #      this already ship a designed bypass (same one they use for
+      #      Docker/Podman images, which also lack npm/quicktype) that falls
+      #      back to committed Generated.cs, so build+test still exercises
+      #      real generated code — just not freshly regenerated. Repos without
+      #      this env var simply ignore it.
       set -uo pipefail
+
+      export PATH="$HOME/.dotnet:$HOME/.powershell:${PATH:-}"
+      export SKIP_GIT_HOOKS_VERIFY="${SKIP_GIT_HOOKS_VERIFY:-1}"
+      export SKIP_PROJECT_SCHEMA_GENERATION="${SKIP_PROJECT_SCHEMA_GENERATION:-1}"
+      export DOTNET_NOLOGO="${DOTNET_NOLOGO:-1}"
+      export DOTNET_CLI_TELEMETRY_OPTOUT="${DOTNET_CLI_TELEMETRY_OPTOUT:-1}"
 
       cwd="${1:-$PWD}"
       test_filter="${DOTNET_TEST_FILTER:-Category!=IntegrationTest}"
@@ -42,7 +74,7 @@ scripts:
         dn() { powershell.exe -NoProfile -Command "cd '$winpath'; dotnet $*" 2>&1; }
         mode="wsl:powershell.exe"
       else
-        printf '{"status":"not_evaluated","summary":"no dotnet SDK found (native, $DOTNET_CMD, or powershell.exe)","criteria":[],"findings":[{"id":"toolchain","detail":"dotnet unavailable in this environment"}],"provenance":{"stack":"language:dotnet","source":"pack","mode":"none"}}\n'
+        printf '{"status":"not_evaluated","summary":"no dotnet SDK found (native, $DOTNET_CMD, or powershell.exe)","criteria":[],"findings":[{"id":"toolchain","detail":"dotnet unavailable in this environment"}],"provenance":{"stack":"language:dotnet","source":"pack"}}\n'
         exit 1
       fi
 
@@ -66,7 +98,11 @@ scripts:
         c_test=$(crit test false "skipped: build failed")
       fi
 
-      printf '{"status":"%s","summary":"dotnet build + test: %s","criteria":[%s,%s],"findings":[],"provenance":{"stack":"language:dotnet","source":"pack","mode":"%s"}}\n' \
-        "$STATUS" "$STATUS" "$c_build" "$c_test" "$mode"
+      # provenance must match the CLOSED verifyOut provenance $defs ({stack, source})
+      # exactly as the rust/generic gates do — an extra key (e.g. `mode`) makes the
+      # cap.verify.dotnet SUB-WORKFLOW (kind: workflow) path fail cap.output.schema_violation
+      # and discards an otherwise-correct verdict. So `mode` rides in `summary`, not provenance.
+      printf '{"status":"%s","summary":"dotnet build + test: %s (mode: %s)","criteria":[%s,%s],"findings":[],"provenance":{"stack":"language:dotnet","source":"pack"}}\n' \
+        "$STATUS" "$STATUS" "$mode" "$c_build" "$c_test"
 
       [ "$STATUS" = "pass" ] && exit 0 || exit 1
