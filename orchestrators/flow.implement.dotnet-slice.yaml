@@ -1,0 +1,240 @@
+# orchestrators/flow.implement.dotnet-slice.yaml
+#
+# .NET implement-a-deliverable loop with a STAGED two-gate verdict — the dotnet
+# analogue of flow.implement.deliverable's rust structure (scoped `-p crate`
+# inner loop + `--workspace` cross-crate backstop before mark-complete).
+#
+# WHY (the vetting gap this closes): a SCOPED verify (verify_cwd = the touched
+# test project) is fast and correct for the red→green inner loop, but it only
+# builds/tests the touched project + its references. It CANNOT see a
+# cross-project regression — e.g. a new domain impl that the composition-root
+# hosts never reference/register. That is exactly the PR #1200 class: the new
+# impl passed its own scoped tests, but Api.Autopilot.Tests' DI-validation
+# (a DIFFERENT project, not in the scoped cwd) failed in CI. A scoped-only gate
+# green-lit a slice that broke the composition root.
+#
+# THE FIX: every deliverable must pass BOTH gates before it commits —
+#   (a) SCOPED inner-loop verify   (cwd = scoped_cwd, the touched test project)
+#       — the fast red→green signal the agent iterates against.
+#   (b) FULL-WORKSPACE / COMPOSITION-ROOT BACKSTOP verify (cwd = backstop_cwd)
+#       — run ONCE per slice, BEFORE commit. This is where cross-project /
+#       DI-registration gaps surface (our composition roots run
+#       BuildServiceProvider(validateOnBuild:true) + registration-completeness
+#       tests). A backstop failure routes BACK to the fix state (bounded); a
+#       slice is NEVER committed on scoped evidence alone.
+#
+# backstop_cwd TRADEOFF (input, item 2): the full solution `dotnet build+test`
+# is slow. Rather than always target the whole solution, backstop_cwd lets the
+# caller point the backstop at the specific composition-root / DI-validation
+# test projects that actually surface cross-project registration gaps. RECOMMENDED
+# DEFAULT = the composition-root test projects that run DI validation (for
+# Autopilot: PresentationTier/Api.Autopilot.Tests + Api.Integration.Tests) — that
+# is minimal-but-sufficient: it exercises the composition roots (where #1200
+# broke) without paying for the entire solution every slice. Set backstop_cwd =
+# repo_path only when you want the always-correct-but-slowest whole-tree gate.
+# Whichever cwd is chosen, it MUST be a SUPERSET surface of scoped_cwd (it must
+# build the hosts that reference the touched project), or the backstop cannot
+# see the cross-project break. Both cwds are REQUIRED so the caller explicitly
+# declares the fast surface AND the composition-root surface (proven-safe
+# input→context binding; a path default in initialContext is not a supported
+# pattern — initialContext holds literals only).
+#
+# Both gates run the PROVEN cap.verify.dotnet (dotnet build + dotnet test,
+# Category!=IntegrationTest), whose verify.dotnet.green script emits the
+# canonical HOP verifyOut and rides its `mode` in `summary` (not `provenance`)
+# so the kind: workflow sub-mission path validates cleanly.
+#
+# Loop:
+#   implementing (agent, reasoning) writes the slice + scoped test →
+#   verifying_scoped   (cap.verify.dotnet, cwd=scoped_cwd) →
+#   scoped_gate: pass→verifying_backstop | fail&iter<cap→implementing | fail→failed
+#   verifying_backstop (cap.verify.dotnet, cwd=backstop_cwd) →
+#   backstop_gate: pass→committing | fail&iter<cap→implementing(backstop issues) | fail→failed
+#   committing (run.git.commit-slice) → done
+
+workflows:
+  flow.implement.dotnet-slice:
+    lifecycle: experimental
+    description: >
+      .NET implement-a-deliverable loop with a staged two-gate verdict: a fast
+      SCOPED inner-loop verify (touched test project) drives the agent red→green,
+      then a FULL-WORKSPACE / composition-root BACKSTOP verify gates the slice
+      BEFORE commit so a cross-project / DI-registration break (the PR #1200
+      class) can't slip through on scoped evidence alone.
+    inputs:
+      repo_path: { type: string, required: true }
+      spec:      { type: string, required: true }
+      # SCOPED inner-loop verify cwd — the touched test project (fast red→green).
+      scoped_cwd:   { type: string, required: true }
+      # BACKSTOP verify cwd — the composition-root / DI-validation test
+      # project(s) (see the backstop_cwd tradeoff note above).
+      backstop_cwd: { type: string, required: true }
+    blackboard:
+      repo_path:      { type: string }
+      spec:           { type: string }
+      scoped_cwd:     { type: string }
+      backstop_cwd:   { type: string }
+      scoped_out:     { type: object }
+      backstop_out:   { type: object }
+      build_issues:   { type: string }
+      files_written:  { type: string }
+      commit_message: { type: string }
+      iter:           { type: integer }
+      iter_cap:       { type: integer }
+      last_commit:    { type: object }
+    initialContext:
+      iter: 0
+      iter_cap: 3
+      build_issues: ""
+      files_written: ""
+      commit_message: "praxec: verified .NET slice (scoped + backstop)"
+    initialState: implementing
+    states:
+
+      # ── AGENT (reasoning tier) ── writes the deliverable + its scoped test.
+      implementing:
+        goal: >
+          Implement the deliverable described in $.context.spec in the target
+          .NET repository using your file tools. Keep it minimal and correct. If
+          $.context.build_issues is non-empty, a previous dotnet build+test
+          FAILED with those issues — fix EVERY one this pass and do not resubmit
+          unchanged; a build_issues from the BACKSTOP means a composition-root /
+          DI-registration surface broke (e.g. a new service must be wired into
+          the host's service registration), so fix the composition root too.
+          Report `files_written`: a single space-separated string of the
+          repo-relative paths you created or changed, and a one-line
+          `commit_message`. EVERY field is OPTIONAL — once the files are on disk
+          ALWAYS call final_answer to sign off (git is the source of truth for
+          what changed); never withhold the sign-off because a field is unknown.
+        transitions:
+          write_slice:
+            target: verifying_scoped
+            actor: agent
+            inputSchema:
+              type: object
+              properties:
+                files_written:  { type: string, default: "" }
+                commit_message: { type: string, default: "praxec: verified .NET slice (scoped + backstop)" }
+            executor: { kind: noop }
+            output:
+              files_written:  "$.arguments.files_written"
+              commit_message: "$.arguments.commit_message"
+              iter: { add: ["$.context.iter", 1] }
+
+      # ── GATE (a): SCOPED inner-loop verify ── touched test project only.
+      # Fast red→green; CANNOT see cross-project breakage (that's gate (b)).
+      verifying_scoped:
+        transitions:
+          verify:
+            target: scoped_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.dotnet
+              use:
+                inputs:
+                  cwd: "$.context.scoped_cwd"
+                outputs:
+                  "$.context.scoped_out": verify
+
+      scoped_gate:
+        transitions:
+          # Scoped green → proceed to the composition-root backstop (NOT commit).
+          to_backstop:
+            target: verifying_backstop
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.scoped_out.status == 'pass'" }
+          retry:
+            target: implementing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.scoped_out.status != 'pass'" }
+              - { kind: expr, expr: "$.context.iter < $.context.iter_cap" }
+            executor: { kind: noop }
+            output:
+              build_issues: "$.context.scoped_out.summary"
+          give_up:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.scoped_out.status != 'pass'" }
+              - { kind: expr, expr: "$.context.iter >= $.context.iter_cap" }
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      # ── GATE (b): FULL-WORKSPACE / COMPOSITION-ROOT BACKSTOP verify ──
+      # Runs ONCE per slice, BEFORE commit, over backstop_cwd (the composition
+      # roots). This is where the PR #1200 cross-project / DI-registration class
+      # surfaces. A slice is NEVER committed unless BOTH gates are green.
+      verifying_backstop:
+        transitions:
+          verify:
+            target: backstop_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.dotnet
+              use:
+                inputs:
+                  cwd: "$.context.backstop_cwd"
+                outputs:
+                  "$.context.backstop_out": verify
+
+      backstop_gate:
+        transitions:
+          # BOTH gates green → the slice is genuinely safe to commit.
+          commit:
+            target: committing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.backstop_out.status == 'pass'" }
+          # Backstop caught a cross-project break the scoped gate missed → route
+          # BACK to the fix state with the backstop's failure detail (bounded).
+          fix:
+            target: implementing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.backstop_out.status != 'pass'" }
+              - { kind: expr, expr: "$.context.iter < $.context.iter_cap" }
+            executor: { kind: noop }
+            output:
+              build_issues: "$.context.backstop_out.summary"
+          # Out of attempts: fail loud (outcome: failure) rather than commit a
+          # slice that breaks the composition root.
+          give_up:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.backstop_out.status != 'pass'" }
+              - { kind: expr, expr: "$.context.iter >= $.context.iter_cap" }
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      # ── COMMIT the twice-verified slice ── stages only the reported/derived
+      # files, refuses the default branch, credits the flow.
+      committing:
+        transitions:
+          commit:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: cognitive/run.git.commit-slice
+              workingDirectory: "$.context.repo_path"
+              args:
+                - "$.context.commit_message"
+                - "$.context.files_written"
+                - "cognitive/flow.implement.dotnet-slice"
+            output:
+              last_commit: "$.output.json"
+
+      done:
+        terminal: true
+        outcome: success
+
+      failed:
+        terminal: true
+        outcome: failure
