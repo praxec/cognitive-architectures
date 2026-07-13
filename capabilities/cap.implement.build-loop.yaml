@@ -59,6 +59,15 @@ workflows:
     initialContext:
       build_iter:        0
       build_cap:         12
+      # A DECLARED OUTPUT, so it must hold a valid `integer` at EVERY terminal —
+      # including the human-escalation path (red_gate --escalate_red/
+      # unexpected_verdict--> needs_human --review_scope--> done), which never
+      # traverses `green_code`, the sole writer of tests_added. Unseeded, that
+      # path returned a `tests_added`-less result to the caller: null under
+      # `type: integer` is a scalar, so the deterministic-repair rung cannot
+      # coerce it, and any host binding tests_added (e.g. flow.shared.mini-vee)
+      # took a cap.output.schema_violation on an otherwise-legitimate escalation.
+      tests_added:       0
       # Committed test count from the last green slice; RED must grow beyond it.
       prev_test_count:   0
       test_count:        0
