@@ -64,7 +64,9 @@ workflows:
               required: [resolved_files]
               properties:
                 resolved_files:     { type: string }
-                resolution_summary: { type: string }
+                # default so an omitted optional doesn't land null at the
+                # terminal — resolution_summary is a declared scalar output (V26).
+                resolution_summary: { type: string, default: "" }
             executor: { kind: noop }
             output:
               resolved_files:     "$.arguments.resolved_files"

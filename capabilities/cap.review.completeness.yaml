@@ -42,7 +42,9 @@ workflows:
               properties:
                 verdict:      { type: string, enum: [approved, needs-revision, rejected] }
                 findings:     { type: array, default: [] }
-                health_score: { type: integer }
+                # default so an omitted optional doesn't land null at the
+                # terminal — health_score is a declared scalar output (V26).
+                health_score: { type: integer, default: 0 }
             executor: { kind: noop }
             output:
               verdict:      "$.arguments.verdict"
