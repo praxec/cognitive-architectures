@@ -1,0 +1,56 @@
+# capabilities/cap.coordinate.cpm-mark.yaml
+#
+# Coordination cap: set a cpm-planner deliverable's status. Mirrors
+# cap.coordinate.cpm-plan.yaml exactly: connection `cpm-planner`, `kind: mcp`
+# executor, raw passthrough output. Marking Complete or Failed releases the
+# caller's lock on the deliverable.
+#
+# `status` is the cap-input object the tool's MarkStatusArgs.status field
+# expects verbatim — DeliverableStatus is internally tagged on `status`
+# (cpm-planner/src/plan.rs):
+#   {"status":"pending"} | {"status":"ready"} | {"status":"in_progress"} |
+#   {"status":"complete"} | {"status":"failed","reason":"..."}
+# Callers build this object directly, e.g. { "status": "complete" } or
+# { "status": "failed", "reason": "..." }.
+#
+# Operators wire the `cpm-planner` connection in their gateway config
+# (reference: connections/cpm-planner.yaml).
+
+workflows:
+  cap.coordinate.cpm-mark:
+    verb: coordinate
+    lifecycle: experimental
+    description: >
+      Set a cpm-planner deliverable's status (pending/ready/in_progress/
+      complete/failed). Complete or failed releases the held lock.
+    snippet:
+      inputs:
+        plan_id:        { type: string, required: true }
+        deliverable_id: { type: string, required: true }
+        caller_id:      { type: string, required: true }
+        status:         { type: object, required: true }
+      outputs:
+        result: { type: object }
+    initialState: ready
+    states:
+      ready:
+        goal: Mark the deliverable's status on cpm-planner.
+        transitions:
+          mark:
+            target: done
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.mark_status
+              # McpExecutor resolves `map:` (NOT `arguments:`) against
+              # $.arguments / $.context / $.workflow.input. Field names match
+              # MarkStatusArgs in cpm-planner/src/server.rs.
+              map:
+                plan_id:        "$.workflow.input.plan_id"
+                deliverable_id: "$.workflow.input.deliverable_id"
+                caller_id:      "$.workflow.input.caller_id"
+                status:         "$.workflow.input.status"
+            output:
+              result: "$.output"
+      done: { terminal: true }

@@ -1,0 +1,42 @@
+# capabilities/cap.coordinate.cpm-status.yaml
+#
+# Coordination cap: read-only snapshot of a cpm-planner plan (per-deliverable
+# status/attempt_count, critical path + hours, held locks). Mirrors
+# cap.coordinate.cpm-plan.yaml exactly: connection `cpm-planner`, `kind: mcp`
+# executor, raw passthrough output. Operators wire the `cpm-planner`
+# connection in their gateway config (reference: connections/cpm-planner.yaml).
+
+workflows:
+  cap.coordinate.cpm-status:
+    verb: coordinate
+    lifecycle: experimental
+    description: >
+      Read a cpm-planner plan's status: per-deliverable (id, status,
+      attempt_count) rows, the critical path (ids + summed hours), and
+      currently held locks.
+    snippet:
+      inputs:
+        plan_id: { type: string, required: true }
+      outputs:
+        status: { type: object }
+    initialState: ready
+    states:
+      ready:
+        goal: Read the plan's status snapshot from cpm-planner.
+        transitions:
+          status:
+            target: done
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.status
+              # McpExecutor resolves `map:` (NOT `arguments:`) against
+              # $.arguments / $.context / $.workflow.input. The cap input
+              # `plan_id` lives in workflow.input; bind the tool's `plan_id`
+              # param from it (matches StatusArgs in cpm-planner/src/server.rs).
+              map:
+                plan_id: "$.workflow.input.plan_id"
+            output:
+              status: "$.output"
+      done: { terminal: true }
