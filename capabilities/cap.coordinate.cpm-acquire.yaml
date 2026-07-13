@@ -1,0 +1,52 @@
+# capabilities/cap.coordinate.cpm-acquire.yaml
+#
+# Coordination cap: atomically acquire up to `max_count` ready, file-disjoint
+# deliverables from a cpm-planner plan. Mirrors cap.coordinate.cpm-plan.yaml
+# exactly: connection `cpm-planner`, `kind: mcp` executor, raw passthrough
+# output (the full Cohort, including its per-deliverable `locks`/rows).
+#
+# NOTE: for the single-lease build-loop driver use case (typed
+# {exhausted, spec, deliverable_id} slots, max_count pinned to 1), see the
+# existing specialized cap.coordinate.acquire-cohort.yaml instead — this cap
+# is the general-purpose mirror for callers that want an arbitrary cohort
+# size and the raw MCP response.
+#
+# Operators wire the `cpm-planner` connection in their gateway config
+# (reference: connections/cpm-planner.yaml).
+
+workflows:
+  cap.coordinate.cpm-acquire:
+    verb: coordinate
+    lifecycle: experimental
+    description: >
+      Atomically acquire up to `max_count` ready, file-disjoint deliverables
+      from a cpm-planner plan for `caller_id`; return the leased cohort.
+    snippet:
+      inputs:
+        plan_id:   { type: string, required: true }
+        caller_id: { type: string, required: true }
+        max_count: { type: integer, required: true }
+      outputs:
+        cohort: { type: object }
+    initialState: ready
+    states:
+      ready:
+        goal: Acquire a cohort of ready deliverables from cpm-planner.
+        transitions:
+          acquire:
+            target: done
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.acquire_cohort
+              # McpExecutor resolves `map:` (NOT `arguments:`) against
+              # $.arguments / $.context / $.workflow.input. Field names match
+              # AcquireCohortArgs in cpm-planner/src/server.rs.
+              map:
+                plan_id:   "$.workflow.input.plan_id"
+                caller_id: "$.workflow.input.caller_id"
+                max_count: "$.workflow.input.max_count"
+            output:
+              cohort: "$.output"
+      done: { terminal: true }
