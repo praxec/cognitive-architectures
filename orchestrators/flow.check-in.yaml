@@ -65,6 +65,9 @@ workflows:
     initialContext:
       status: needs_human
       pr_url: ""
+      # Staging slot for the push script's pr_url; promoted into `pr_url` only
+      # on a successful push (see opening/open and repushing/push).
+      push_pr_url: ""
     initialState: preparing
     states:
 
@@ -121,7 +124,11 @@ workflows:
                 - "$.workflow.input.pr_body"
             output:
               pr_ok:      "$.output.json.ok"
-              pr_url:     "$.output.json.pr_url"
+              # STAGED, not written straight to pr_url: an `output:` mapping is
+              # unconditional (merge_output always inserts), so binding pr_url
+              # here would let a FAILED push overwrite a good URL with "". The
+              # promotion happens only on the success edge below.
+              push_pr_url: "$.output.json.pr_url"
               pr_number:  "$.output.json.pr_number"
               open_error: "$.output.json.error"
 
@@ -131,6 +138,9 @@ workflows:
             target: scanning
             actor: deterministic
             guards: [ { kind: expr, expr: "$.context.pr_ok == true" } ]
+            executor: { kind: noop }
+            output:
+              pr_url: "$.context.push_pr_url"
           # Default (V23) — push/PR failed (no gh, no remote, auth): operator.
           halt_open:
             target: needs_human
@@ -255,7 +265,10 @@ workflows:
                 - "$.workflow.input.pr_body"
             output:
               repush_ok:    "$.output.json.ok"
-              pr_url:       "$.output.json.pr_url"
+              # STAGED — see opening/open. This is the edge that actually bit:
+              # a re-push failing AFTER the PR was opened would erase the very
+              # URL the operator needs, then park them at needs_human without it.
+              push_pr_url:  "$.output.json.pr_url"
               repush_error: "$.output.json.error"
 
       repush_gate:
@@ -264,6 +277,9 @@ workflows:
             target: reporting_resolved
             actor: deterministic
             guards: [ { kind: expr, expr: "$.context.repush_ok == true" } ]
+            executor: { kind: noop }
+            output:
+              pr_url: "$.context.push_pr_url"
           # Default (V23) — the re-push failed: operator.
           halt_repush:
             target: needs_human
