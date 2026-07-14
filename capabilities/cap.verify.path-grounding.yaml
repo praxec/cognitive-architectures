@@ -1,0 +1,69 @@
+# capabilities/cap.verify.path-grounding.yaml
+#
+# DETERMINISTIC path-grounding gate cap (consumer ticket #02, "hallucination").
+# Binds the `verify.path-grounding` script: given a `plan` object + a
+# `repo_path`, it grounds every repo-relative path the plan references against
+# the ACTUAL filesystem and emits a typed { grounded, missing[] } verdict — no
+# LLM, a pure existence test. A `plan` kind cap may NOT be used (V6/verb rules);
+# this is a `verify`-verb leaf whose primary transition is `actor: deterministic`
+# + `kind: script`, matching cap.verify.rust / cap.verify.ts / cap.verify.dotnet.
+#
+# It is wired into flow.add-feature BEFORE the human-signoff gate: a plan with
+# any hallucinated path cannot reach signoff (it routes to `failed` with the
+# offending paths surfaced). The human signoff remains the backstop; this catches
+# the hallucination first, deterministically and cheaply.
+#
+# `treatNonZeroAsFailure: false` — the script exits non-zero when a plan is NOT
+# grounded; we CAPTURE that verdict as output (the tri-state gate lives in the
+# `grounded` boolean) rather than collapsing it into a transition error.
+
+workflows:
+  cap.verify.path-grounding:
+    verb: verify
+    lifecycle: experimental
+    description: >
+      Deterministic path-grounding gate: check that every repo-relative path a
+      plan references exists (or lands in an existing directory) in the target
+      repo. Emits { grounded, missing[], new_files[], existing[], checked[] }.
+      A hallucinated directory tree forces grounded:false so the plan cannot be
+      signed off on invented paths.
+    snippet:
+      inputs:
+        # The whole plan object (deliverables[].owned_files + optional
+        # reference arrays are extracted by the script). REQUIRED.
+        plan:      { type: object, required: true }
+        # The target repo ON DISK. REQUIRED and passed EXPLICITLY by the caller
+        # (a path-valued default is not merged into $.workflow.input for
+        # $.-path resolution).
+        repo_path: { type: string, required: true }
+      outputs:
+        grounded: { type: boolean }
+        missing:  { type: array }
+        report:   { type: object }
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Ground every path the plan references against the real repo; emit
+          grounded + the list of hallucinated (missing) paths.
+        transitions:
+          check:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.path-grounding
+              # Capture a grounded:false verdict as output instead of erroring
+              # the transition (the gate is the payload boolean).
+              treatNonZeroAsFailure: false
+              args:
+                - "$.workflow.input.plan"
+                - "$.workflow.input.repo_path"
+            output:
+              # Nested reads into the parsed stdout ($.output.json) resolve via
+              # JSON pointer, so the scalar `grounded` lands as a top-level cap
+              # output (a guard can then read $.context.grounded == true).
+              grounded: "$.output.json.grounded"
+              missing:  "$.output.json.missing"
+              report:   "$.output.json"
+      done: { terminal: true }
