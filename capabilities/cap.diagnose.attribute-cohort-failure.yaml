@@ -1,0 +1,66 @@
+# capabilities/cap.diagnose.attribute-cohort-failure.yaml
+#
+# Diagnose cap for COHORT milestones: when a shared synchronization gate
+# (single build+test verify, or a batched codegen run) fails over a tree that
+# carries N file-disjoint deliverables' edits, attribute the failure to the
+# implicated deliverable(s) instead of poisoning the whole cohort opaquely.
+#
+# The attribution key is the planner-enforced `owned_files` partition: every
+# edit in the shared tree belongs to exactly one deliverable's owned_files
+# set (cpm-planner guarantees global disjointness), so mapping each failure
+# finding (file/line, project, symbol) onto that partition yields a
+# per-deliverable verdict:
+#   - implicated:   findings land in this deliverable's owned_files
+#   - collateral:   findings land in files NOBODY in the cohort owns
+#                   (pre-existing breakage or cross-cutting fallout — a
+#                   cohort-level problem, not a member's)
+#   - clear:        no findings attributable to this deliverable
+#
+# The caller (cognitive/flow.cohort.compiled-stack) uses the verdicts to
+# mark implicated members failed while releasing/retrying clear members,
+# preserving the cohort's economics (one member's defect must not burn the
+# other N-1 verified edits).
+
+workflows:
+  cap.diagnose.attribute-cohort-failure:
+    verb: diagnose
+    lifecycle: experimental
+    description: >
+      Attribute a failed cohort milestone (shared verify or codegen gate) to
+      the implicated deliverable(s) by mapping failure findings onto the
+      cohort's disjoint owned_files partition; emit per-deliverable verdicts
+      (implicated / collateral / clear) with cited evidence.
+    snippet:
+      inputs:
+        # The failed gate's output: a verifyOut-shaped object
+        # (status/summary/criteria/findings) or a codegen result
+        # ({ok, exit_code, stderr_tail, ...}).
+        failure: { type: object, required: true }
+        # The raw cohort (deliverables[].id + owned_files) — the partition.
+        cohort:  { type: object, required: true }
+      outputs:
+        attribution: { type: object }
+    skills: [diagnose.codebase.search]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Map each failure finding (file:line / project / symbol) onto the
+          cohort's owned_files partition. Emit attribution:
+          { verdicts: [{deliverable_id, verdict: implicated|collateral|clear,
+          evidence: [...]}], summary }. Cite file paths for every implicated
+          verdict; findings in files no member owns are collateral (cohort- or
+          tree-level), never silently pinned on a member.
+        transitions:
+          submit_attribution:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [attribution]
+              properties:
+                attribution: { type: object }
+            executor: { kind: noop }
+            output:
+              attribution: "$.arguments.attribution"
+      done: { terminal: true }

@@ -1,0 +1,52 @@
+# scripts-library/run.codegen.command.yaml
+#
+# Deterministic CODEGEN MILESTONE primitive for cohort flows. Runs the
+# repo's designated contract-codegen command (e.g. `./generate-code.ps1`,
+# `npm run codegen`, `cargo run -p schema-gen`) ONCE over the shared tree,
+# so N contract-touching deliverables pay one codegen instead of N.
+#
+# The command is OPERATOR INPUT (the flow's `codegen_command`), not agent
+# output — cohort flows must never let an in-workflow agent choose what
+# gets executed here. Runs in the leaf `workingDirectory` (the workflow's
+# repo_path).
+#
+# Poka-yoke: failures are reported as DATA (exit 0, {ok:false, ...}) so a
+# workflow gate can branch to attribution instead of collapsing the
+# transition — mirrors run.git.commit-slice.
+#
+# Inputs — POSITIONAL ARGS (kind:script `args:` are scope-rendered):
+#   $1 — the codegen command line (run via bash -c in the working dir)
+# Emits {ran, ok, exit_code, stderr_tail, error} JSON on stdout.
+version: "1.0.0"
+scripts:
+  run.codegen.command:
+    verb: run
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      emit() { printf '{"ran": %s, "ok": %s, "exit_code": %s, "stderr_tail": %s, "error": %s}\n' \
+                 "$1" "$2" "$3" "$4" "$5"; exit 0; }
+      jstr() { printf '%s' "${1:-}" | jq -Rs . 2>/dev/null || printf '""'; }
+
+      cmd="${1:-}"
+      # A nulled context slot renders as the literal string "null" — treat as empty.
+      [ "$cmd" = "null" ] && cmd=""
+      if [ -z "${cmd// /}" ]; then
+        emit false false null '""' "$(jstr 'no codegen command supplied')"; fi
+
+      # Capture stderr for attribution; bound the tail so the JSON stays small.
+      errfile="$(mktemp)"
+      bash -c "$cmd" 2>"$errfile"
+      code=$?
+      tail_txt="$(tail -c 4000 "$errfile" 2>/dev/null)"
+      rm -f "$errfile"
+
+      if [ "$code" -eq 0 ]; then
+        emit true true "$code" "$(jstr "$tail_txt")" null
+      else
+        emit true false "$code" "$(jstr "$tail_txt")" \
+          "$(jstr "codegen command exited $code")"
+      fi

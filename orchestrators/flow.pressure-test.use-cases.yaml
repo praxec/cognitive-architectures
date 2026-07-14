@@ -50,6 +50,15 @@ workflows:
     initialContext:
       round: 0
       adequate: false
+      # `refuted_use_cases` and `report` are DECLARED outputs but have exactly
+      # one writer — falsifying/falsify. The human-rejection path
+      # (approval_gate --rejected/unexpected--> failed) reaches a terminal
+      # without ever entering `falsifying`, so both were absent from the
+      # terminal context and a `kind: workflow` parent binding them read null.
+      # Seed them, same as `adequate` above: an empty falsification report is
+      # the truthful answer when nothing was ever falsified.
+      refuted_use_cases: []
+      report: {}
     outcomes:
       - id: survived_falsification
         statement: No approved use case refuted the design's adequacy (inductive support).

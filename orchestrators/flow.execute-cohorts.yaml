@@ -107,6 +107,9 @@ workflows:
                 inputs:
                   deliverable:    "$.context.next_deliverable"
                   repo_path:      "$.workflow.input.repo_path"
+                  # Whole-tree backstop — the behavior this flow has always had,
+                  # now stated rather than hardcoded inside the callee.
+                  backstop_cwd:   "$.workflow.input.repo_path"
                   plan_id:        "$.workflow.input.plan_id"
                   deliverable_id: "$.context.next_deliverable_id"
                   caller_id:      "$.workflow.input.caller_id"
