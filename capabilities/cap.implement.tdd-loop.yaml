@@ -23,6 +23,15 @@ workflows:
       inputs:
         plan:        { type: object, required: true }
         scope_paths: { type: array,  default: [] }
+        # The target repo on disk. Threaded so the agent leaf resolves
+        # `$.workflow.input.repo_path` — the gateway templates the
+        # `file:{{ $.workflow.input.repo_path }}` auto_drive tool against THIS
+        # (immediate) workflow's input, so without it the implement agent gets NO
+        # filesystem access and (the observed bug) tries to npm/git-fetch the
+        # local repo from invented remotes. OPTIONAL so existing callers that
+        # don't yet thread it stay contract-valid (V30); a coding entry flow
+        # (flow.add-feature) passes it.
+        repo_path:   { type: string }
       outputs:
         result:      { type: object }
         tests_added: { type: integer }

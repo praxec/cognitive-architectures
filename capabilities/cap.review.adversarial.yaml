@@ -10,6 +10,12 @@ workflows:
     snippet:
       inputs:
         diff_against: { type: string, required: true }
+        # The repo on disk. Threaded so a grounded adversarial reviewer gets
+        # file-tool access (resolves `$.workflow.input.repo_path` in this cap's
+        # own scope — the gateway templates the file auto_drive tool against the
+        # immediate leaf workflow). OPTIONAL so existing callers stay contract-
+        # valid (V30); a delivery entry flow (flow.add-feature) passes it.
+        repo_path:    { type: string }
       outputs:
         verdict:  { type: string, enum: [approved, needs-revision, rejected] }
         findings: { type: array }
