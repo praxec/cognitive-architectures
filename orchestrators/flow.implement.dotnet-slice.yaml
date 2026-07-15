@@ -93,12 +93,19 @@ workflows:
       implementing:
         goal: >
           Implement the deliverable described in $.context.spec in the target
-          .NET repository using your file tools. Keep it minimal and correct. If
-          $.context.build_issues is non-empty, a previous dotnet build+test
-          FAILED with those issues — fix EVERY one this pass and do not resubmit
-          unchanged; a build_issues from the BACKSTOP means a composition-root /
-          DI-registration surface broke (e.g. a new service must be wired into
-          the host's service registration), so fix the composition root too.
+          .NET repository using your file tools. Keep it minimal and correct.
+          GROUND FIRST: before writing a test, read ONE existing sibling test file
+          in the same test project and match its assertion idiom and using-directives
+          exactly — a project may use FluentAssertions (`result.Should().Be(x)`)
+          rather than vanilla xUnit (`Assert.Equal(x, result)`); guessing the wrong
+          idiom is a compile error (e.g. CS0117 'Assert' has no definition for
+          'Equal'). If $.context.build_issues is non-empty, a previous dotnet
+          build+test FAILED with those issues — they are the CONCRETE compiler
+          errors (file, line, code, message); fix EVERY one this pass and do not
+          resubmit unchanged; a build_issues from the BACKSTOP means a
+          composition-root / DI-registration surface broke (e.g. a new service must
+          be wired into the host's service registration), so fix the composition
+          root too.
           Report `files_written`: a single space-separated string of the
           repo-relative paths you created or changed, and a one-line
           `commit_message`. EVERY field is OPTIONAL — once the files are on disk
