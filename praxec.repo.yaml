@@ -2,8 +2,11 @@ schema: praxec.repo/v1
 name: cognitive-architectures
 namespace: cognitive
 version: 0.0.1
-# Compatibility: requires praxec 0.0.14 or later (the
-# capability/orchestrator composition model, SPEC §9).
+# Compatibility: requires praxec 0.0.22 or later. The flows resolve the target
+# repo as run-ambient `$.run.repo_root` (0.0.21) rather than a hand-threaded
+# `repo_path`, and `flow.drive-program` routes per-deliverable via the per-spawn
+# `repoRoot` override (0.0.22); both need the 0.0.22 scope validator. The
+# capability/orchestrator composition model itself is SPEC §9 (0.0.14+).
 description: |
   The canonical first resource repo for the praxec
   capability/orchestrator composition model (SPEC §9).

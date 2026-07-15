@@ -13,7 +13,7 @@
 #      AND that the audit agent calls as `corpus_search`;
 #   4. auto_drive ON with the audit agent's TOOLS in auto_drive_tools:
 #        - `corpus`                                -> corpus_search / corpus_index
-#        - `file:{{ $.workflow.input.repo_path }}` -> read_file / read_range /
+#        - `file:{{ $.run.repo_root }}` -> read_file / read_range /
 #                                                     search_file over the repo
 #      (the file root renders per-instance from the sub-workflow's repo_path);
 #   5. the cognitive-architectures repo, which supplies flow.audit-docs + its
@@ -53,7 +53,7 @@ praxec:
     # tools on leaves whose repo_path resolves to an absolute path.
     auto_drive_tools:
       - corpus
-      - "file:{{ $.workflow.input.repo_path }}"
+      - "file:{{ $.run.repo_root }}"
 
 audit:
   sink: stderr

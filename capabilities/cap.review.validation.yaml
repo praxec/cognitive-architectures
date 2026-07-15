@@ -24,7 +24,6 @@ workflows:
     snippet:
       inputs:
         needs:     { type: object, required: true }
-        repo_path: { type: string, required: true }
       outputs:
         verdict:           { type: string, enum: [validated, rejected] }
         need_results:      { type: array }

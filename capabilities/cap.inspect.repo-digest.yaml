@@ -21,8 +21,8 @@ workflows:
       crate layout, risk markers) via the inspect.repo script; surface it as a
       typed code_digest for a downstream tool-less judgment leaf.
     snippet:
-      inputs:
-        repo_path: { type: string, required: true }
+      # repo_root is run-ambient ($.run.repo_root).
+      inputs: {}
       outputs:
         code_digest: { type: object }
     initialState: ready
@@ -37,7 +37,7 @@ workflows:
               kind: script
               subject: inspect.repo
               args:
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
             output:
               code_digest: "$.output.json"
       done: { terminal: true }

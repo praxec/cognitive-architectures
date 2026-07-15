@@ -24,7 +24,6 @@ workflows:
         # acceptance_criteria}) — the spec defines the analysis question.
         deliverable: { type: object, required: true }
         # Repo root for `file:` read tools ("" = no repo grounding).
-        repo_path:   { type: string, default: "" }
       outputs:
         findings: { type: array }
         summary:  { type: string }

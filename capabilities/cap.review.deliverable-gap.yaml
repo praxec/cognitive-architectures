@@ -17,7 +17,6 @@ workflows:
     snippet:
       inputs:
         plan:      { type: object, required: true }
-        repo_path: { type: string, required: true }
       outputs:
         verdict: { type: string, enum: [complete, gaps_found] }
         gaps:    { type: array }
