@@ -1,0 +1,68 @@
+# scripts-library/inspect.git.progress.yaml
+#
+# DETERMINISTIC "did the implement step actually change files?" detector for the
+# honest completion gate in flow.implement.deliverable. The verifier passing is
+# necessary but NOT sufficient — `cargo test` / `tsc` / `vite build` all pass on
+# an UNCHANGED repo, so a no-op implement can green a stack verifier and be
+# (dishonestly) marked complete. This script supplies the OTHER half of the
+# honest definition of done: real file changes, code-computed from git.
+#
+# Two modes, one script:
+#   SNAPSHOT (base empty)  → emit the current HEAD sha (record it before build).
+#   MEASURE  (base given)  → count files changed SINCE base: committed slices
+#                            (git diff base..HEAD) PLUS any on-disk uncommitted
+#                            work (git status --porcelain). The union is an
+#                            OVER-count at worst (a file both committed and
+#                            re-touched counts twice) — safe for a `>= 1`
+#                            "something real changed" threshold; it can never
+#                            falsely report zero when work exists.
+#
+# Counting BOTH committed and uncommitted is deliberate: the build-loop commits
+# each green slice (so a converged build shows commits_ahead > 0), but an agent
+# that wrote real code the loop couldn't yet commit still leaves on-disk changes
+# — both are genuine evidence the implement was not a no-op.
+#
+# Args:
+#   $1 / REPO_PATH   — the repo to measure
+#   $2 / BASE_COMMIT — baseline sha; empty ⇒ snapshot mode (returns head)
+# Emits {head, files_changed, commits_ahead, error} JSON, read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  inspect.git.progress:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      REPO="${1:-${REPO_PATH:-.}}"
+      BASE="${2:-${BASE_COMMIT:-}}"
+
+      if ! cd "$REPO" 2>/dev/null; then
+        printf '{"head":"","files_changed":0,"commits_ahead":0,"error":"repo path not found"}\n'; exit 0
+      fi
+      if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        printf '{"head":"","files_changed":0,"commits_ahead":0,"error":"not a git work tree"}\n'; exit 0
+      fi
+
+      head_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+
+      # Uncommitted, non-ignored, non-deletion paths (respects .gitignore).
+      uncommitted="$(git status --porcelain --untracked-files=all 2>/dev/null \
+        | grep -v '^ *D' | grep -cv '^$' || true)"
+      [ -z "$uncommitted" ] && uncommitted=0
+
+      if [ -z "$BASE" ]; then
+        # SNAPSHOT mode — record the baseline HEAD; nothing measured yet.
+        printf '{"head":"%s","files_changed":0,"commits_ahead":0,"error":null}\n' "$head_sha"
+        exit 0
+      fi
+
+      committed="$(git diff --name-only "$BASE"..HEAD 2>/dev/null | grep -cv '^$' || true)"
+      [ -z "$committed" ] && committed=0
+      commits_ahead="$(git rev-list --count "$BASE"..HEAD 2>/dev/null || echo 0)"
+      [ -z "$commits_ahead" ] && commits_ahead=0
+      files_changed=$(( committed + uncommitted ))
+
+      printf '{"head":"%s","files_changed":%d,"commits_ahead":%d,"error":null}\n' \
+        "$head_sha" "$files_changed" "$commits_ahead"

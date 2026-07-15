@@ -1,0 +1,140 @@
+version: "1.0.0"
+scripts:
+  verify.path-grounding:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # DETERMINISTIC path-grounding gate. Consumer ticket #02 ("hallucination"):
+      # the draft/plan step invents file paths that don't exist in the target
+      # repo (e.g. it planned edits to
+      #   src/sysadmin/signal-catalog/components/CatalogView.tsx
+      # when the real tree is
+      #   src/_components/tools/SysadminSignalCatalog/SysadminSignalCatalogComponent.tsx
+      # ) and only the human-signoff gate caught it. This script grounds every
+      # repo-relative path a plan references against the ACTUAL filesystem BEFORE
+      # signoff — no LLM, pure existence test — so a hallucinated plan is routed
+      # to `failed` (with the offending paths surfaced) instead of reaching the
+      # approve gate on invented paths.
+      #
+      # Args:
+      #   $1 = the plan object as JSON (the whole `plan` — the script extracts the
+      #        paths itself; an object arg arrives here stringified by the script
+      #        executor's arg_render).
+      #   $2 = repo_path (the target repo ON DISK; paths are resolved relative to
+      #        it, exactly the repo the implement/review agents get file access to).
+      #
+      # Emits (single JSON object on stdout, mapped by cap.verify.path-grounding
+      # via $.output.json):
+      #   {
+      #     grounded:   bool,     # true iff NO referenced path is hallucinated
+      #     missing:    [string], # the hallucinated paths (the gate's payload)
+      #     new_files:  [string], # don't exist yet but their parent dir does
+      #                           # (a legitimately-new file — NOT a hallucination)
+      #     existing:   [string], # edit/reference targets that exist today
+      #     checked:    [string], # every path considered
+      #     repo_ok:    bool,     # repo_path resolved to a real directory
+      #     repo_path:  string,
+      #     summary:    string
+      #   }
+      # Exit code mirrors `grounded` (0 = grounded, 1 = not). The cap sets
+      # treatNonZeroAsFailure:false, so a `grounded:false` verdict is CAPTURED as
+      # output (the tri-state gate lives in the payload) rather than erroring the
+      # transition.
+      #
+      # GROUNDING SEMANTICS — why not a naive `test -e` on every path:
+      #   flow.add-feature ADDS a feature to an existing repo, so a plan
+      #   legitimately references NEW files that do not exist yet. A strict
+      #   `test -e` on every owned_file would fail every real plan (every new
+      #   file "missing") and make the gate useless. So a referenced path is
+      #   HALLUCINATED (ungrounded) only when NEITHER the file itself
+      #   (`test -e`) NOR its PARENT DIRECTORY (`test -d`) exists — i.e. the plan
+      #   named a directory tree that isn't in the repo. That is exactly the
+      #   ticket-#02 failure mode (an invented `.../signal-catalog/components/`
+      #   tree), while a new file dropped into a real directory stays grounded.
+      #   `grounded` is fail-closed: repo missing, unparseable plan, or any
+      #   hallucinated path all force `grounded:false`.
+      set -uo pipefail
+
+      PLAN_JSON="${1:-}"
+      REPO="${2:-${REPO_PATH:-}}"
+
+      arr() { printf '%s' "$1" | jq -R -s 'split("\n") | map(select(length>0)) | unique'; }
+
+      # Fail-closed: repo_path must resolve to a real directory.
+      repo_ok=true
+      if [ -z "$REPO" ] || [ ! -d "$REPO" ]; then
+        repo_ok=false
+      fi
+
+      # Fail-closed: the plan must be parseable JSON.
+      parse_ok=true
+      if ! printf '%s' "$PLAN_JSON" | jq -e . >/dev/null 2>&1; then
+        parse_ok=false
+      fi
+
+      # Extract every repo-relative path the plan references: each deliverable's
+      # owned_files (the schedulable core) plus any optional reference arrays
+      # (reference_files / references) at deliverable OR top level — ticket #02
+      # also cited a non-existent *reference* file. Best-effort: absent arrays
+      # coalesce to []; non-string / empty entries are dropped.
+      paths=""
+      if [ "$parse_ok" = true ]; then
+        paths="$(printf '%s' "$PLAN_JSON" | jq -r '
+          (
+            [ (.deliverables // [])[]?
+                | ((.owned_files // []) + (.reference_files // []) + (.references // []))[]? ]
+            + ((.reference_files // []) + (.references // []))
+          )
+          | map(select(type == "string" and (. | length) > 0))
+          | unique[]
+        ' 2>/dev/null)"
+      fi
+
+      EXIST=""; NEWF=""; HALLU=""; CHECKED=""
+      if [ "$repo_ok" = true ] && [ "$parse_ok" = true ] && [ -n "$paths" ]; then
+        while IFS= read -r p; do
+          [ -z "$p" ] && continue
+          CHECKED+="$p"$'\n'
+          if [ -e "$REPO/$p" ]; then
+            EXIST+="$p"$'\n'
+          elif [ -d "$REPO/$(dirname "$p")" ]; then
+            NEWF+="$p"$'\n'
+          else
+            HALLU+="$p"$'\n'
+          fi
+        done <<<"$paths"
+      fi
+
+      grounded=true
+      [ "$repo_ok" = false ]  && grounded=false
+      [ "$parse_ok" = false ] && grounded=false
+      [ -n "$HALLU" ]         && grounded=false
+
+      n_check=$(printf '%s' "$CHECKED" | grep -c . || true)
+      n_hallu=$(printf '%s' "$HALLU"   | grep -c . || true)
+      n_new=$(printf '%s'   "$NEWF"    | grep -c . || true)
+
+      if [ "$repo_ok" = false ]; then
+        summary="not grounded: repo_path '$REPO' is not a directory — cannot verify plan paths."
+      elif [ "$parse_ok" = false ]; then
+        summary="not grounded: plan argument was not parseable JSON — cannot extract referenced paths."
+      elif [ "$grounded" = true ]; then
+        summary="grounded: $n_check path(s) checked, 0 hallucinated ($n_new new file(s) in existing dirs)."
+      else
+        summary="NOT grounded: $n_hallu of $n_check path(s) reference a directory tree not present in the repo — plan must be revised."
+      fi
+
+      jq -n \
+        --argjson grounded  "$grounded" \
+        --argjson repo_ok   "$repo_ok" \
+        --argjson missing   "$(arr "$HALLU")" \
+        --argjson new_files "$(arr "$NEWF")" \
+        --argjson existing  "$(arr "$EXIST")" \
+        --argjson checked   "$(arr "$CHECKED")" \
+        --arg     repo      "$REPO" \
+        --arg     summary   "$summary" \
+        '{grounded:$grounded, missing:$missing, new_files:$new_files, existing:$existing, checked:$checked, repo_ok:$repo_ok, repo_path:$repo, summary:$summary}'
+
+      [ "$grounded" = true ] && exit 0 || exit 1
