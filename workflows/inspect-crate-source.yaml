@@ -44,7 +44,7 @@ workflows:
               # Crate name flows in via workflow.start input: { crate: "aether-tui" }
               # The script reads it as $1. Output JSON is exposed at
               # $.output.json by the script executor (SPEC §22).
-              args: ["$.input.crate"]
+              args: ["$.workflow.input.crate"]
             output:
               crate:   "$.output.json.crate"
               path:    "$.output.json.path"

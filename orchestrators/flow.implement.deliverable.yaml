@@ -2,12 +2,23 @@
 #
 # Execute ONE plan deliverable end-to-end, then record it in the durable
 # plan tracker:
+#   baselining      → snapshot repo HEAD (honest-progress baseline).
 #   building        → run the recoverable build-loop on the deliverable
 #                     (builder → cargo → QA reviewer → commit-slice), via a
 #                     `kind: workflow` sub-mission (cap.implement.build-loop).
+#   measuring_impl  → count files changed since the baseline (real evidence).
+#   implemented_decision → zero files changed ⇒ `failed` (no silent no-op mark).
+#   detecting_stack → resolve the stack (deliverable.stack, else repo sniff).
+#   stack_gate      → route to the STACK-APPROPRIATE verifier:
+#                       ts     → cap.verify.ts     (npm ci + tsc + vite build)
+#                       rust   → cap.verify.rust   (cargo fmt + clippy + test)
+#                       dotnet → cap.verify.dotnet (dotnet build + test)
+#                     an undetected stack ⇒ `failed` (never a disguised pass).
 #   marking_complete→ cpm-planner `plan.mark_status` complete (compare-and-swap;
 #                     the caller must hold the deliverable's cohort lock —
 #                     `caller_id`). LOCK_NOT_HELD / a CAS conflict fails the run.
+# The HONEST definition of done (top-level `outcomes:`) keys on BOTH real file
+# changes AND the verifier passing — not a value true regardless of the build.
 #
 # This is a FLOW (not a capability): capabilities are composition leaves
 # (SPEC §3/§4.1, V6/V10) — only flows may invoke other workflows via
@@ -31,25 +42,74 @@ workflows:
       # The deliverable spec — passed straight through as the build-loop `plan`
       # (goal + deliverables/steps + acceptance_criteria).
       deliverable:    { type: object, required: true }
-      repo_path:      { type: string, required: true }
+      # CROSS-CRATE BACKSTOP surface (see workspace_gate). Was hardcoded to
+      # repo_path — always correct, but it pays for a full `cargo test
+      # --workspace` on every deliverable. REQUIRED (not defaulted): a path
+      # default in `inputs:` is not merged into `$.workflow.input` for path
+      # resolution, so a defaulted-but-unpassed value is an unresolved-arg
+      # permanent error, not a silent fallback. Pass repo_path for the
+      # always-correct whole-tree gate, or narrow it to the crate(s) that
+      # actually reverse-depend on the touched one. Whichever is chosen it MUST
+      # be a SUPERSET of the inner loop's `cargo_scope` surface, or the backstop
+      # cannot see the breakage it exists to catch.
+      backstop_cwd:   { type: string, required: true }
       # cpm-planner coordinates: which plan/deliverable, and the lock holder.
       plan_id:        { type: string, required: true }
       deliverable_id: { type: string, required: true }
       caller_id:      { type: string, required: true }
     # `status` for plan.mark_status is an internally-tagged OBJECT
     # ({"status":"complete"}); a map: binding can't build an object literal, so
-    # seed it here and bind it by path.
+    # seed it here and bind it by path. base_commit / impl_files_changed seed the
+    # HONEST completion evidence (see baselining / measuring_impl below).
     initialContext:
       status_complete: { status: complete }
-    initialState: building
+      base_commit: ""
+      impl_files_changed: 0
+    # HONEST definition of done (deterministic `met` flags): a deliverable is
+    # only complete when BOTH real files changed AND the stack-appropriate
+    # verifier passed on them — NOT a value that is true regardless of what the
+    # build did. A verifier passing on an UNCHANGED repo (cargo/tsc/vite all do)
+    # can no longer disguise a no-op as success (fail-fast / no fail-open).
+    outcomes:
+      - id: implement_changed_files
+        statement: >
+          The implement step produced real file changes (committed slices or
+          on-disk work), not a no-op.
+        check: "$.context.impl_files_changed >= 1"
+      - id: workspace_verified
+        statement: >
+          The stack-appropriate verifier (ts | rust | dotnet) passed on the
+          changed repository.
+        check: "$.context.ws_verify.status == 'pass'"
+    initialState: baselining
     states:
+
+      # HONEST-EVIDENCE BASELINE: record HEAD before the build so real progress
+      # (committed slices + on-disk changes) can be measured deterministically
+      # after it. Without a baseline, "did anything change" is unknowable and a
+      # no-op implement can ride a green verifier to a false complete.
+      baselining:
+        goal: Snapshot repo HEAD before implementing (baseline for honest progress).
+        transitions:
+          snapshot:
+            target: building
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.git.progress
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.run.repo_root"
+                - ""   # empty base ⇒ snapshot mode → returns current HEAD
+            output:
+              base_commit: "$.output.json.head"
 
       # Run the build-loop as a child mission; capture its result on completion.
       building:
         goal: Build the deliverable to green via the recoverable build-loop.
         transitions:
           build:
-            target: workspace_gate
+            target: measuring_impl
             actor: deterministic
             executor:
               kind: workflow
@@ -57,7 +117,6 @@ workflows:
               use:
                 inputs:
                   plan:      "$.workflow.input.deliverable"
-                  repo_path: "$.workflow.input.repo_path"
                   # SCOPED inner loop: cargo_scope rides in the deliverable spec
                   # (deliverable.cargo_scope) so a single-crate slice tests only
                   # its crate (fast RED/GREEN) instead of the whole workspace.
@@ -68,8 +127,9 @@ workflows:
                   # in each deliverable's metadata (empty string when genuinely
                   # workspace-wide) — a missing key is an unresolved-arg-path
                   # permanent error. Full-workspace correctness is enforced by
-                  # workspace_gate below BEFORE mark_status, so a deliverable is
-                  # never marked complete on scoped evidence alone.
+                  # verify_rust below (the rust arm of stack_gate) BEFORE
+                  # mark_status, so a deliverable is never marked complete on
+                  # scoped evidence alone.
                   cargo_scope: "$.workflow.input.deliverable.cargo_scope"
                   # Coverage floor for the completion check — MUST be passed
                   # explicitly (snippet-input defaults don't merge into
@@ -79,15 +139,107 @@ workflows:
                 outputs:
                   "$.context.result": result
 
+      # HONEST-EVIDENCE MEASURE: count files changed since the baseline
+      # (committed slices ∪ on-disk work). This is the "real files changed" half
+      # of the definition of done — the verifier passing is the other half.
+      measuring_impl:
+        goal: Measure real file changes since the baseline (honest implement evidence).
+        transitions:
+          measure:
+            target: implemented_decision
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.git.progress
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.run.repo_root"
+                - "$.context.base_commit"
+            output:
+              impl_files_changed: "$.output.json.files_changed"
+
+      # FAILED / EMPTY IMPLEMENT GUARD: the build-loop always resolves
+      # structurally (it converges OR parks at a human who signs off), so it
+      # NEVER propagates a failure signal — a human-escalated no-op returns an
+      # empty result and the flow used to advance straight to verify+mark. Gate
+      # on real evidence instead: zero files changed ⇒ nothing was built ⇒
+      # `failed` (never a silent complete). Exhaustive: changed | not-changed.
+      implemented_decision:
+        transitions:
+          proceed:
+            target: detecting_stack
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.impl_files_changed >= 1" }
+          empty_implement:
+            target: failed
+            actor: deterministic
+
+      # STACK DETECTION (deterministic; code decides, the gate routes): resolve
+      # the deliverable's stack from deliverable.stack, else by sniffing the repo
+      # filesystem. This is what makes verify stack-AWARE instead of hardcoded to
+      # cargo — a TS deliverable now reaches cap.verify.ts, not cap.verify.rust.
+      detecting_stack:
+        goal: Detect the deliverable's stack (deliverable.stack, else repo filesystem).
+        transitions:
+          detect:
+            target: stack_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.stack
+              args:
+                - "$.workflow.input.deliverable"
+                - "$.run.repo_root"
+            output:
+              stack: "$.output.json.stack"
+
+      # Route to the stack-appropriate verifier (exhaustive: ts | rust | dotnet |
+      # default). An undetected stack cannot be honestly verified → `failed`
+      # (never marked): the never-disguised-pass poka-yoke, at the routing layer.
+      stack_gate:
+        transitions:
+          ts:
+            target: verify_ts
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.stack == 'ts'" } ]
+          rust:
+            target: verify_rust
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.stack == 'rust'" } ]
+          dotnet:
+            target: verify_dotnet
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.stack == 'dotnet'" } ]
+          unknown_stack:
+            target: failed
+            actor: deterministic
+
+      # TS/Vite verify (npm ci + tsc + vite build). cwd = repo_path (the
+      # package.json root) — threaded explicitly so there is no unresolved
+      # `$.workflow.input.cwd`; cap.verify.ts declares `cwd`, so this use.inputs
+      # binding is V30-contract-clean.
+      verify_ts:
+        goal: TypeScript/Vite verify (npm ci + tsc + vite build) before marking complete.
+        transitions:
+          verify:
+            target: verified_decision
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.ts
+              use:
+                inputs:
+                  cwd: "$.run.repo_root"
+                outputs:
+                  "$.context.ws_verify": verify
+
       # CROSS-CRATE CORRECTNESS BACKSTOP (the "milestone" build): the inner loop
       # verified the deliverable's OWN crate; scoped `-p crate` can miss
       # reverse-dependency breakage. Run ONE full `cargo test --workspace`
-      # (+ fmt + clippy) here before marking complete. Pass ⇒ mark; fail ⇒
-      # `failed` (never a silent complete on scoped evidence). This is the staged
-      # verdict: fast scoped slices in the loop, full workspace once per
-      # deliverable at the mark boundary.
-      workspace_gate:
-        goal: Full-workspace verify (cross-crate backstop) before marking complete.
+      # (+ fmt + clippy) here (cwd = backstop_cwd) before marking complete.
+      verify_rust:
+        goal: Full-workspace rust verify (cross-crate backstop) before marking complete.
         transitions:
           verify:
             target: verified_decision
@@ -97,11 +249,28 @@ workflows:
               definitionId: cognitive/cap.verify.rust
               use:
                 inputs:
-                  cwd: "$.workflow.input.repo_path"
+                  cwd: "$.workflow.input.backstop_cwd"
                 outputs:
                   "$.context.ws_verify": verify
 
-      # Branch on the workspace verifyOut status (exhaustive: pass | anything else).
+      # .NET verify (dotnet build + test). cwd = backstop_cwd (the
+      # composition-root / whole-solution surface the caller declared).
+      verify_dotnet:
+        goal: .NET verify (dotnet build + test) before marking complete.
+        transitions:
+          verify:
+            target: verified_decision
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.dotnet
+              use:
+                inputs:
+                  cwd: "$.workflow.input.backstop_cwd"
+                outputs:
+                  "$.context.ws_verify": verify
+
+      # Branch on the chosen verifier's verifyOut status (exhaustive: pass | anything else).
       verified_decision:
         transitions:
           pass:
@@ -137,11 +306,14 @@ workflows:
         terminal: true
         outcome: success
 
-      # workspace_gate rejected: the deliverable built green on its OWN crate but
-      # broke the workspace. Fail (outcome: failure) rather than silently mark —
-      # the deliverable reverts to ready and is re-driven (or circuit-breaks at
-      # MAX_ATTEMPTS). A targeted fix-feedback loop (route findings back into the
-      # build loop) is a follow-up; failing loud is the correct v1.
+      # Reached from any of: an EMPTY implement (zero files changed —
+      # implemented_decision), an UNDETECTED stack (stack_gate), or a verifier
+      # REJECTION (verified_decision — e.g. the deliverable built green on its
+      # OWN crate but broke the workspace). Fail loud (outcome: failure) rather
+      # than silently mark — the deliverable reverts to ready and is re-driven
+      # (or circuit-breaks at MAX_ATTEMPTS). A targeted fix-feedback loop (route
+      # findings back into the build loop) is a follow-up; failing loud is the
+      # correct v1.
       failed:
         terminal: true
         outcome: failure

@@ -14,7 +14,7 @@
 #   $3 / WORKFLOW  — optional: the driving workflow id, credited as a contributor
 # Authored by a `praxec` identity (not the operator), with the workflow as a
 # Co-Authored-By contributor — the Claude Code / Cursor convention for automated
-# commits. Run with the leaf `workingDirectory: $.workflow.input.repo_path`.
+# commits. Run with the leaf `workingDirectory: $.run.repo_root`.
 # Emits {committed, sha, branch, staged, error} JSON on stdout.
 version: "1.0.0"
 scripts:

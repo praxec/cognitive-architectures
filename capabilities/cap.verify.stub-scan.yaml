@@ -6,7 +6,7 @@
 # `cap.review.completeness` judgment gate. Verb `verify` (the deterministic
 # script gate) -> V6 requires a `kind: script` executor, like
 # cap.verify.rust. The script needs the repo dir, so the cap passes
-# it from $.workflow.input.repo_path as a positional arg (like
+# it from $.run.repo_root as a positional arg (like
 # cap.run.scaffold-repo).
 
 workflows:
@@ -18,8 +18,8 @@ workflows:
       for todo!/unimplemented!/unreachable!/panic!/TODO/FIXME; emit
       passed (true iff zero hits) + the hit list.
     snippet:
-      inputs:
-        repo_path: { type: string, required: true }
+      # repo_root is run-ambient ($.run.repo_root).
+      inputs: {}
       outputs:
         passed: { type: boolean }
         hits:   { type: array }
@@ -35,7 +35,7 @@ workflows:
               kind: script
               subject: verify.stub-scan
               args:
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
             # Script executor wraps stdout; parsed JSON is at $.output.json.*
             output:
               passed: "$.output.json.passed"

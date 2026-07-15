@@ -1,0 +1,107 @@
+version: "1.0.0"
+scripts:
+  verify.ts.green:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # TypeScript / Vite frontend correctness gate (npm ci + tsc --noEmit +
+      # vite build), emitted as the canonical HOP `verifyOut` shape
+      # (praxec://hop#/$defs/verifyOut):
+      #   { status, summary, criteria[], findings[], provenance }
+      # `status` = "pass" iff every criterion.met is true, else "fail". Exit code
+      # mirrors status (0 = pass, 1 = fail); slot consumers (cap.verify.ts via
+      # hop_slot / kind: workflow, which sets treatNonZeroAsFailure:false) read
+      # the full verifyOut from $.output.json. Mirrors cap.verify.rust /
+      # cap.verify.dotnet so a TS deliverable is verified by its OWN toolchain
+      # instead of being (wrongly) run through cargo.
+      #
+      # Optional positional $1 = working directory (the package.json root — the
+      # verifyIn `cwd` the slot forwards). Defaults to PWD.
+      #
+      # SELF-SUFFICIENCY (mirrors verify.dotnet.green): do not trust the invoking
+      # daemon's env. Prefer a repo-local toolchain if present, run npm
+      # non-interactively, and never hang the "deterministic" gate:
+      #   1. Prepend node_modules/.bin so a repo-pinned tsc/vite is used.
+      #   2. CI=1 + npm_config_fund/audit=false so install is non-interactive and
+      #      does not stall on prompts.
+      # provenance MUST stay exactly {stack, source} (the CLOSED verifyOut
+      # provenance $defs) — any extra key makes the cap.verify.ts kind: workflow
+      # sub-mission fail cap.output.schema_violation and discards a real verdict.
+      set -uo pipefail
+
+      cwd="${1:-$PWD}"
+      export PATH="$cwd/node_modules/.bin:${PATH:-}"
+      export CI="${CI:-1}"
+      export npm_config_fund="${npm_config_fund:-false}"
+      export npm_config_audit="${npm_config_audit:-false}"
+      export npm_config_progress="${npm_config_progress:-false}"
+
+      crit() { printf '{"id":"%s","met":%s,"evidence":"%s"}' "$1" "$2" "$3"; }
+
+      if ! cd "$cwd" 2>/dev/null; then
+        printf '{"status":"not_evaluated","summary":"cwd not found: %s","criteria":[],"findings":[{"id":"cwd","detail":"working directory does not exist"}],"provenance":{"stack":"language:ts","source":"pack"}}\n' "$cwd"
+        exit 1
+      fi
+      if [ ! -f package.json ]; then
+        printf '{"status":"not_evaluated","summary":"no package.json at cwd — not a node/ts project","criteria":[],"findings":[{"id":"project","detail":"package.json absent"}],"provenance":{"stack":"language:ts","source":"pack"}}\n'
+        exit 1
+      fi
+      if ! command -v npm >/dev/null 2>&1; then
+        printf '{"status":"not_evaluated","summary":"npm not on PATH","criteria":[],"findings":[{"id":"toolchain","detail":"npm unavailable in this environment"}],"provenance":{"stack":"language:ts","source":"pack"}}\n'
+        exit 1
+      fi
+
+      STATUS="pass"
+
+      # 1. INSTALL — reproducible `npm ci` when a lockfile is present, else install.
+      if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+        inst="npm ci"
+      else
+        inst="npm install"
+      fi
+      if $inst >&2; then
+        c_inst=$(crit install true "$inst succeeded")
+      else
+        c_inst=$(crit install false "$inst failed"); STATUS="fail"
+      fi
+
+      # 2. TYPECHECK — tsc --noEmit against the project's tsconfig. Skip honestly
+      # (met=true, evidence says so) when there is no tsconfig — do NOT invent a
+      # failure for a project that legitimately has none.
+      if [ "$STATUS" = "pass" ]; then
+        if [ -f tsconfig.json ]; then
+          if npx --no-install tsc --noEmit >&2 2>&1 || npx tsc --noEmit >&2; then
+            c_type=$(crit typecheck true "tsc --noEmit clean")
+          else
+            c_type=$(crit typecheck false "tsc --noEmit reported type errors"); STATUS="fail"
+          fi
+        else
+          c_type=$(crit typecheck true "no tsconfig.json — typecheck skipped")
+        fi
+      else
+        c_type=$(crit typecheck false "skipped: install failed")
+      fi
+
+      # 3. BUILD — the project's `build` script (Vite projects define `vite build`
+      # there), else `vite build` directly.
+      if [ "$STATUS" = "pass" ]; then
+        if node -e "process.exit(require('./package.json').scripts && require('./package.json').scripts.build ? 0 : 1)" 2>/dev/null; then
+          build="npm run build"
+        else
+          build="npx --no-install vite build"
+        fi
+        if $build >&2; then
+          c_build=$(crit build true "$build succeeded")
+        else
+          c_build=$(crit build false "$build failed"); STATUS="fail"
+        fi
+      else
+        c_build=$(crit build false "skipped: earlier step failed")
+      fi
+
+      printf '{"status":"%s","summary":"npm install + tsc + vite build: %s","criteria":[%s,%s,%s],"findings":[],"provenance":{"stack":"language:ts","source":"pack"}}\n' \
+        "$STATUS" "$STATUS" "$c_inst" "$c_type" "$c_build"
+
+      [ "$STATUS" = "pass" ] && exit 0 || exit 1

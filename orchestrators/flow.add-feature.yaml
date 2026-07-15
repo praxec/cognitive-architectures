@@ -25,6 +25,12 @@ workflows:
     stack: rust
     inputs:
       feature_brief: { type: string, required: true }
+      # The target repo is RUN-AMBIENT (praxec 0.0.21+): every leaf (implementing
+      # / reviewing) resolves `$.run.repo_root` in its own scope, and the gateway
+      # templates the `file:{{ $.run.repo_root }}` auto_drive tool against it — no
+      # `repo_path` input and no hand-threading through each child's use.inputs.
+      # The root is sourced once at the run boundary from the gateway's declared
+      # writable repos, so a leaf can never be handed a missing/invented root.
       base_ref:      { type: string, default: main }
       lexicon:       { type: object, default: {} }
     # Declaring the `verify` HOP slot (via hop_slot injection) puts this flow in
@@ -40,6 +46,12 @@ workflows:
       draft_artifacts:       {}
       vet_verdict:           { type: string }
       vet_findings:          {}
+      # Deterministic path-grounding gate (consumer ticket #02). `grounded` is a
+      # top-level scalar bool a guard reads directly; the other two carry the
+      # hallucinated paths + full report for the failure payload / operator.
+      grounded:              { type: boolean }
+      grounding_missing:     {}
+      grounding_report:      {}
       signoff_decision:      { type: string }
       implementation_result: {}
       tests_added:           {}
@@ -84,8 +96,12 @@ workflows:
 
       vetted_plan:
         transitions:
+          # A vet-passed plan is NOT yet trustworthy: its file paths may be
+          # hallucinated (consumer ticket #02). Route to the deterministic
+          # path-grounding gate BEFORE the human signoff — the vet is cognitive,
+          # this is a filesystem fact.
           advance:
-            target: awaiting_signoff
+            target: grounding_plan
             actor: deterministic
             guards:
               - kind: expr
@@ -96,6 +112,50 @@ workflows:
             guards:
               - kind: expr
                 expr: "$.context.vet_verdict == 'fail'"
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      # PATH-GROUNDING (deterministic, no LLM). Ground every repo-relative path
+      # the plan references against the real repo on disk. This runs the check;
+      # the `grounded_gate` state below branches on its `grounded` boolean.
+      grounding_plan:
+        transitions:
+          ground:
+            target: grounded_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.verify.path-grounding
+              use:
+                inputs:
+                  plan:      "$.context.draft_plan"
+                  # Ground against the SAME repo the implement/review agents get
+                  # file access to. Passed EXPLICITLY (a path input is not merged
+                  # from a default into $.workflow.input).
+                outputs:
+                  "$.context.grounded":          grounded
+                  "$.context.grounding_missing": missing
+                  "$.context.grounding_report":  report
+
+      # Gate on the deterministic verdict. `grounded == true` is the ONLY arm
+      # that reaches signoff; a hallucinated path (grounded == false) routes to
+      # `failed` with `grounding_missing` carrying the offending paths — the plan
+      # can NOT be approved on invented paths. `unexpected` fails closed.
+      grounded_gate:
+        transitions:
+          advance:
+            target: awaiting_signoff
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.grounded == true"
+          abort:
+            target: failed
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.grounded == false"
           unexpected:
             target: failed
             actor: deterministic
@@ -145,6 +205,8 @@ workflows:
                 inputs:
                   plan:        "$.context.draft_plan"
                   scope_paths: "$.context.draft_plan"
+                  # Thread the repo so the implement agent gets file-tool access
+                  # (resolves in the tdd-loop's own $.workflow.input scope).
                 outputs:
                   "$.context.implementation_result": result
                   "$.context.tests_added":           tests_added
@@ -208,6 +270,7 @@ workflows:
               use:
                 inputs:
                   diff_against: "$.context.base_ref"
+                  # Ground the reviewer in the actual repo (file-tool access).
                 outputs:
                   "$.context.review_verdict":  verdict
                   "$.context.review_findings": findings

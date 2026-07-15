@@ -17,7 +17,6 @@ workflows:
       completeness critic, system FMECA) and emit a consolidated remediation
       report. Advisory, not a hard gate.
     inputs:
-      repo_path: { type: string, required: true }
       base_ref:  { type: string, default: main }
     initialState: digesting
     states:
@@ -33,7 +32,7 @@ workflows:
             executor:
               kind: script
               subject: inspect.repo
-              args: ["$.workflow.input.repo_path"]
+              args: ["$.run.repo_root"]
             # Plain script-executor `output:` — BARE slot key (a `$.context.*`
             # prefix here writes a mis-named field and leaves `repo_digest` unset).
             output:
@@ -49,8 +48,7 @@ workflows:
               kind: workflow
               definitionId: cap.verify.stub-scan
               use:
-                inputs:
-                  repo_path: "$.workflow.input.repo_path"
+                inputs: {}
                 outputs:
                   "$.context.stub_passed": passed
                   "$.context.stub_hits":   hits
@@ -65,8 +63,7 @@ workflows:
               kind: workflow
               definitionId: cap.review.completeness
               use:
-                inputs:
-                  repo_path: "$.workflow.input.repo_path"
+                inputs: {}
                 outputs:
                   "$.context.completeness_verdict":  verdict
                   "$.context.completeness_findings": findings
@@ -82,7 +79,7 @@ workflows:
               definitionId: cap.review.fmeca
               use:
                 inputs:
-                  subject:      { repo_path: "$.workflow.input.repo_path", focus: "existing-codebase risk audit", digest: "$.context.repo_digest" }
+                  subject:      { repo_path: "$.run.repo_root", focus: "existing-codebase risk audit", digest: "$.context.repo_digest" }
                   subject_kind: system
                 outputs:
                   "$.context.fmeca_ready":        ready

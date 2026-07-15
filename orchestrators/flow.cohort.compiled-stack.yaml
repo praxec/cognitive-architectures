@@ -1,0 +1,656 @@
+# orchestrators/flow.cohort.compiled-stack.yaml
+#
+# COHORT execution for COMPILED / CODEGEN'D stacks: N provably file-disjoint
+# deliverables edited in ONE shared warm worktree, paying ONE codegen run and
+# ONE build+test verify instead of N of each.
+#
+#   acquiring    → cpm-planner acquire_cohort (max_count ≤ 5) — the planner
+#                  PROVES file-disjointness via globally-unique owned_files
+#                  (disjointness is guaranteed, not hoped for).
+#   editing_0..4 → per-deliverable EDIT-ONLY work (cap.implement.scope-bounded,
+#                  hard-scoped to that deliverable's owned_files). NO builds,
+#                  NO git — see "shared-tree contract" below.
+#   codegen milestone (optional) → the repo's contract-codegen command runs
+#                  ONCE for all accumulated spec edits (run.codegen.command).
+#   verify milestone → ONE build+test gate over the shared tree
+#                  (cap.verify.<stack>), the cohort's synchronization point.
+#   committing   → one commit of the whole verified cohort (run.git.commit-slice,
+#                  branch-guarded), BEFORE mark — earned value needs a durable
+#                  record first.
+#   marking_0..4 → plan.mark_status complete per deliverable (CAS — this flow's
+#                  caller_id holds every cohort lock from the acquire).
+#   done         → terminal context carries the handoff record (cohort, edit
+#                  results, verify verdict, commit sha) for the PR step
+#                  (cognitive/cap.coordinate.pr-open, deliberately not chained
+#                  here — it needs github-mcp env the milestone doesn't).
+#
+# WHY THIS FLOW EXISTS — build/codegen are SYNCHRONIZATION POINTS, not
+# per-slice steps. The per-deliverable shape (flow.implement.deliverable /
+# flow.execute-cohorts with max_count 1) implicitly assumes builds are cheap:
+# true for interpreted stacks, false for compiled ones. Measured on a large
+# .NET+React monorepo (2026-07-11): ~20 min backend CI, ~18 min FE CI, ~40 min
+# when a contract change trips both; a fresh worktree additionally pays a cold
+# local build of the same dependency closure per slice. N slices worked
+# per-slice cost N cold builds + N CI runs + N rebases; a file-disjoint cohort
+# in one warm tree costs 1 + 1 + 0. Codegen compounds it: batching K
+# contract-touching slices behind ONE codegen milestone collapses K×(codegen +
+# both-pipeline CI) to one.
+#
+# SHARED-TREE CONTRACT (the invariants that make one tree safe for N slices):
+#   1. Edits stay inside each deliverable's owned_files — the planner enforces
+#      the partition; cap.implement.scope-bounded refuses out-of-scope writes.
+#   2. Editing agents run NO git commands (a shared index is a race) and NO
+#      builds (obj/bin intermediates race). Builds/codegen/commit belong to
+#      the flow's serialized deterministic milestones ONLY.
+#   3. On milestone failure, ATTRIBUTION comes first
+#      (cap.diagnose.attribute-cohort-failure): findings are mapped back onto
+#      the owned_files partition so one member's defect is named
+#      (implicated / collateral / clear per member) instead of opaquely
+#      poisoning all N. The flow parks in failed_attributed with verdicts in
+#      context; the operator/driver marks implicated members failed and
+#      re-runs the survivors — it must NOT bulk-fail the cohort.
+#
+# COHORT SELECTION CAVEATS (enforced upstream of this flow, by the planner
+# and the plan author — findings from the 2026-07-11 dogfood run):
+#   - IMPACT-AWARE, not just disjointness-aware: under path-filtered CI a
+#     cohort's CI cost is the UNION of its members' impact surfaces (one
+#     contract-bucket file in an otherwise-backend cohort doubles the bill).
+#     Group by impact domain first; acquire within the domain. cpm-planner
+#     already stores owned_files, so impact-union minimization belongs
+#     upstream in acquire_cohort — proposed as a planner enhancement.
+#   - NO-FLIP: behavioral flips (config/enforcement toggles that must stay
+#     independently revertable) never ride in a cohort — one commit per flip.
+#     Keep flips out of the ready pool while a cohort is leasing.
+#   - EXTERNAL WIP cannot be parked as bare `in_progress`: cpm-planner's
+#     startup quarantine resets lock-less in_progress to ready, so work owned
+#     outside the planner must be excluded some other way (planner gap).
+#
+# ENGINE-SHAPE NOTES (why the YAML looks like this):
+#   - Static unroll (editing_0..4 / marking_0..4): the guard language is one
+#     binary comparison; it cannot iterate arrays. The indexed acquire cap
+#     (cap.coordinate.cpm-acquire-indexed) binds every dN_* slot eagerly
+#     (null-coalesced) so `$.context.dN_id == null` skip-guards are legal.
+#     INDEX CAP: max_count must be ≤ 5.
+#   - Edits SERIALIZE (editing_0 → .. → editing_4): the engine has no
+#     parallel fan-out primitive. The cohort's economics survive — the win is
+#     the collapsed build/codegen/CI, not edit-phase parallelism — but true
+#     fan-out needs engine support (finding for the praxec team).
+#   - Verify is a DIRECT cap call, not `hop_slot: verify`: the hop_slot
+#     resolver binds required slot inputs from $.arguments (actor-supplied),
+#     so a deterministic auto-fired milestone would degrade cwd to the
+#     gateway's PWD — the wrong tree. Direct `use.inputs {cwd: repo_path}`
+#     is deterministic and correct; the FM-7 slot-ownership lint then
+#     requires a non-slot context key ($.context.milestone_verify). Stack
+#     dispatch is reimplemented as guarded transitions over the existing
+#     verify caps (dotnet / rust / generic floor).
+#   - LEASE TTL: cpm-planner locks expire in ~5 min without heartbeat; a
+#     compiled-stack milestone runs 20+ min. There is no heartbeat cap yet
+#     (gap) — until one exists, the terminal marks tolerate lock expiry
+#     (mark_status on an unlocked deliverable is legal for any caller).
+#
+# HANG-SAFETY: editing_0..4 and the attribution states are agent-actor leaves
+# (cap.implement.scope-bounded / cap.diagnose.attribute-cohort-failure). Under
+# the known auto_drive reasoning hang, do NOT auto-drive this flow — drive the
+# deterministic milestones via CLI and park agent states for operator-managed
+# agents. Any cap.verify.dotnet leg needs timeout ≥ 1800s (real build+test is
+# 19–23 min); a shorter timeout is an operator error, not a praxec hang.
+#
+# Requires: the `cpm-planner` connection (acquire + inline mark_status),
+# cognitive/cap.coordinate.cpm-acquire-indexed, cognitive/cap.implement.scope-bounded,
+# cognitive/cap.verify.{dotnet,rust,generic}, cognitive/cap.run.codegen-milestone,
+# cognitive/cap.diagnose.attribute-cohort-failure, and the run.codegen.command /
+# run.git.commit-slice scripts.
+
+workflows:
+  flow.cohort.compiled-stack:
+    lifecycle: experimental
+    description: >
+      Execute a cohort of file-disjoint plan deliverables in ONE shared warm
+      worktree for compiled/codegen'd stacks: acquire ≤ 5 ready deliverables
+      (planner-proven disjoint), apply edit-only scope-bounded work per
+      deliverable (no builds, no git), run the codegen milestone once
+      (optional), run ONE build+test verify milestone over the shared tree,
+      commit the verified cohort as one slice, then mark each deliverable
+      complete. On milestone failure, attribute findings to the implicated
+      member(s) via the owned_files partition instead of failing the cohort
+      opaquely. Build and codegen are synchronization points, not per-slice
+      steps.
+    inputs:
+      plan_id:   { type: string, required: true }
+      caller_id: { type: string, required: true }
+      # The SHARED warm worktree all cohort members edit (not per-slice trees).
+      # ≤ 5 (the static unroll's index cap).
+      max_count: { type: integer, required: true }
+      # Verify-milestone stack dispatch: dotnet | rust | anything-else →
+      # cap.verify.generic (honest not_evaluated floor, which the milestone
+      # gate treats as NOT passing — an unevaluated cohort is never marked).
+      stack: { type: string }
+      # The repo's contract-codegen command (e.g. "./generate-code.ps1",
+      # "npm run codegen"). Absent/empty → the codegen milestone is skipped.
+      # OPERATOR INPUT: never agent-chosen (it is executed verbatim).
+      codegen_command: { type: string }
+      # One commit message for the whole verified cohort (empty → the
+      # commit-slice default).
+      commit_message: { type: string }
+    # `status` for plan.mark_status is an internally-tagged OBJECT
+    # ({"status":"complete"}); a map: binding can't build an object literal,
+    # so seed it here and bind it by path (flow.implement.deliverable
+    # precedent).
+    initialContext:
+      status_complete: { status: complete }
+    initialState: acquiring
+    states:
+
+      # ── Acquire: the planner proves file-disjointness and leases the cohort ──
+      acquiring:
+        goal: >
+          Acquire up to max_count ready, file-disjoint deliverables from
+          cpm-planner as indexed slots (or detect exhaustion).
+        transitions:
+          acquire:
+            target: cohort_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.coordinate.cpm-acquire-indexed
+              use:
+                inputs:
+                  plan_id:   "$.workflow.input.plan_id"
+                  caller_id: "$.workflow.input.caller_id"
+                  max_count: "$.workflow.input.max_count"
+                outputs:
+                  "$.context.exhausted": exhausted
+                  "$.context.cohort":    cohort
+                  "$.context.d0_id":     d0_id
+                  "$.context.d0_spec":   d0_spec
+                  "$.context.d0_files":  d0_files
+                  "$.context.d1_id":     d1_id
+                  "$.context.d1_spec":   d1_spec
+                  "$.context.d1_files":  d1_files
+                  "$.context.d2_id":     d2_id
+                  "$.context.d2_spec":   d2_spec
+                  "$.context.d2_files":  d2_files
+                  "$.context.d3_id":     d3_id
+                  "$.context.d3_spec":   d3_spec
+                  "$.context.d3_files":  d3_files
+                  "$.context.d4_id":     d4_id
+                  "$.context.d4_spec":   d4_spec
+                  "$.context.d4_files":  d4_files
+
+      cohort_gate:
+        transitions:
+          finish_empty:
+            target: done_empty
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.exhausted == true" }
+          edit:
+            target: editing_0
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.exhausted == false" }
+
+      # ── Edit fan-out (statically unrolled; serialized by the engine) ──
+      # Each member's edits are hard-scoped to its owned_files. NO builds,
+      # NO git — the shared tree's synchronization points are the flow's.
+      editing_0:
+        goal: >
+          Apply deliverable d0's edits, scoped to its owned_files. Edit-only:
+          run no build, no test, no git — the cohort milestones own those.
+        transitions:
+          edit:
+            target: editing_1
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d0_id != null" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.scope-bounded
+              use:
+                inputs:
+                  plan:        "$.context.d0_spec"
+                  scope_paths: "$.context.d0_files"
+                outputs:
+                  "$.context.d0_edit": result
+          skip:
+            target: editing_1
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d0_id == null" }
+
+      editing_1:
+        goal: >
+          Apply deliverable d1's edits, scoped to its owned_files. Edit-only:
+          run no build, no test, no git — the cohort milestones own those.
+        transitions:
+          edit:
+            target: editing_2
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d1_id != null" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.scope-bounded
+              use:
+                inputs:
+                  plan:        "$.context.d1_spec"
+                  scope_paths: "$.context.d1_files"
+                outputs:
+                  "$.context.d1_edit": result
+          skip:
+            target: editing_2
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d1_id == null" }
+
+      editing_2:
+        goal: >
+          Apply deliverable d2's edits, scoped to its owned_files. Edit-only:
+          run no build, no test, no git — the cohort milestones own those.
+        transitions:
+          edit:
+            target: editing_3
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d2_id != null" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.scope-bounded
+              use:
+                inputs:
+                  plan:        "$.context.d2_spec"
+                  scope_paths: "$.context.d2_files"
+                outputs:
+                  "$.context.d2_edit": result
+          skip:
+            target: editing_3
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d2_id == null" }
+
+      editing_3:
+        goal: >
+          Apply deliverable d3's edits, scoped to its owned_files. Edit-only:
+          run no build, no test, no git — the cohort milestones own those.
+        transitions:
+          edit:
+            target: editing_4
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d3_id != null" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.scope-bounded
+              use:
+                inputs:
+                  plan:        "$.context.d3_spec"
+                  scope_paths: "$.context.d3_files"
+                outputs:
+                  "$.context.d3_edit": result
+          skip:
+            target: editing_4
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d3_id == null" }
+
+      editing_4:
+        goal: >
+          Apply deliverable d4's edits, scoped to its owned_files. Edit-only:
+          run no build, no test, no git — the cohort milestones own those.
+        transitions:
+          edit:
+            target: codegen_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d4_id != null" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.scope-bounded
+              use:
+                inputs:
+                  plan:        "$.context.d4_spec"
+                  scope_paths: "$.context.d4_files"
+                outputs:
+                  "$.context.d4_edit": result
+          skip:
+            target: codegen_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d4_id == null" }
+
+      # ── CODEGEN MILESTONE (optional): one codegen run for ALL members ──
+      # This is where batched contract work pays off: K contract-touching
+      # members share one generate + one both-pipeline CI instead of K.
+      codegen_gate:
+        transitions:
+          run_codegen:
+            target: generating
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.workflow.input.codegen_command != null" }
+              - { kind: expr, expr: "$.workflow.input.codegen_command != ''" }
+          skip_absent:
+            target: verifying
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.workflow.input.codegen_command == null" }
+          skip_empty:
+            target: verifying
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.workflow.input.codegen_command == ''" }
+
+      generating:
+        goal: Run the repo's contract codegen once over the shared tree.
+        transitions:
+          generate:
+            target: codegen_check
+            actor: deterministic
+            # Snippet-typed cap (not an inline script): the attribution step
+            # consumes `$.context.codegen` via use.inputs, and only `inputs:`
+            # or a child's `use.outputs` seed V13 slots — a transition
+            # `output:` block does not (cap.coordinate.acquire-cohort's rule).
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.run.codegen-milestone
+              use:
+                inputs:
+                  codegen_command: "$.workflow.input.codegen_command"
+                outputs:
+                  "$.context.codegen": codegen
+
+      codegen_check:
+        transitions:
+          advance:
+            target: verifying
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.codegen.ok == true" }
+          attribute:
+            target: attributing_codegen
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.codegen.ok == false" }
+
+      # ── VERIFY MILESTONE: ONE build+test gate over the shared tree ──
+      # Guard-dispatched over the stack input (hop_slot can't bind cwd
+      # deterministically — see header). Unknown/absent stack falls to the
+      # generic floor, whose honest `not_evaluated` FAILS the milestone gate:
+      # an unverified cohort is never marked complete.
+      verifying:
+        goal: >
+          Run the single cohort verify milestone (build + test) over the
+          shared tree. Serialized: nothing else builds in this tree.
+        transitions:
+          verify_dotnet:
+            target: milestone_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.workflow.input.stack == 'dotnet'" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.dotnet
+              use:
+                inputs:
+                  cwd: "$.run.repo_root"
+                outputs:
+                  "$.context.milestone_verify": verify
+          verify_rust:
+            target: milestone_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.workflow.input.stack == 'rust'" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.rust
+              use:
+                inputs:
+                  cwd: "$.run.repo_root"
+                outputs:
+                  "$.context.milestone_verify": verify
+          # UNGUARDED DEFAULT (the linter-blessed switch shape, cf.
+          # flow.implement.deliverable's verified_decision): any stack other
+          # than dotnet/rust — including absent — lands on the generic floor,
+          # whose honest not_evaluated fails the milestone gate.
+          verify_floor:
+            target: milestone_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.generic
+              use:
+                inputs:
+                  cwd: "$.run.repo_root"
+                outputs:
+                  "$.context.milestone_verify": verify
+
+      milestone_gate:
+        transitions:
+          advance:
+            target: committing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.milestone_verify.status == 'pass'" }
+          # fail AND not_evaluated both land here — never mark on non-pass.
+          attribute:
+            target: attributing_verify
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.milestone_verify.status != 'pass'" }
+
+      # ── Failure attribution: name the implicated member, don't poison N ──
+      attributing_codegen:
+        goal: >
+          Attribute the failed codegen milestone to the implicated cohort
+          member(s) via the owned_files partition.
+        transitions:
+          attribute:
+            target: failed_attributed
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.diagnose.attribute-cohort-failure
+              use:
+                inputs:
+                  failure: "$.context.codegen"
+                  cohort:  "$.context.cohort"
+                outputs:
+                  "$.context.attribution": attribution
+
+      attributing_verify:
+        goal: >
+          Attribute the failed verify milestone to the implicated cohort
+          member(s) via the owned_files partition.
+        transitions:
+          attribute:
+            target: failed_attributed
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.diagnose.attribute-cohort-failure
+              use:
+                inputs:
+                  failure: "$.context.milestone_verify"
+                  cohort:  "$.context.cohort"
+                outputs:
+                  "$.context.attribution": attribution
+
+      # ── Commit the verified cohort as ONE slice, then record earned value ──
+      committing:
+        goal: >
+          Commit the whole verified cohort as one slice (branch-guarded;
+          derives the file set from the working tree).
+        transitions:
+          commit:
+            target: commit_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.commit-slice
+              workingDirectory: "$.run.repo_root"
+              treatNonZeroAsFailure: false
+              args:
+                - "$.workflow.input.commit_message"
+                # FILES empty → commit-slice derives the union of cohort edits
+                # from git status (ceremony-proof; scoped to repo_path).
+                - ""
+            output:
+              commit: "$.output.json"
+
+      commit_gate:
+        transitions:
+          advance:
+            target: marking_0
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.commit.committed == true" }
+          # A verified cohort that cannot be durably recorded is NOT complete
+          # (default-branch refusal, empty tree, git failure). Park for the
+          # operator; locks lapse via TTL.
+          abort:
+            target: failed_commit
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.commit.committed == false" }
+
+      # ── Mark complete per member (statically unrolled) ──
+      marking_0:
+        goal: Mark deliverable d0 complete in cpm-planner.
+        transitions:
+          mark:
+            target: marking_1
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d0_id != null" }
+            # Inline mcp `map:` (flow.implement.deliverable precedent): map
+            # bindings are path-resolved at runtime and NOT slot-table-checked,
+            # which is what lets the initialContext-seeded `status_complete`
+            # object ride here (a `use.inputs` binding would trip V13
+            # UNREACHABLE_SLOT — initialContext does not seed the slot table).
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.mark_status
+              map:
+                plan_id:        "$.workflow.input.plan_id"
+                deliverable_id: "$.context.d0_id"
+                caller_id:      "$.workflow.input.caller_id"
+                status:         "$.context.status_complete"
+            output:
+              d0_mark: "$.output"
+          skip:
+            target: marking_1
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d0_id == null" }
+
+      marking_1:
+        goal: Mark deliverable d1 complete in cpm-planner.
+        transitions:
+          mark:
+            target: marking_2
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d1_id != null" }
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.mark_status
+              map:
+                plan_id:        "$.workflow.input.plan_id"
+                deliverable_id: "$.context.d1_id"
+                caller_id:      "$.workflow.input.caller_id"
+                status:         "$.context.status_complete"
+            output:
+              d1_mark: "$.output"
+          skip:
+            target: marking_2
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d1_id == null" }
+
+      marking_2:
+        goal: Mark deliverable d2 complete in cpm-planner.
+        transitions:
+          mark:
+            target: marking_3
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d2_id != null" }
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.mark_status
+              map:
+                plan_id:        "$.workflow.input.plan_id"
+                deliverable_id: "$.context.d2_id"
+                caller_id:      "$.workflow.input.caller_id"
+                status:         "$.context.status_complete"
+            output:
+              d2_mark: "$.output"
+          skip:
+            target: marking_3
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d2_id == null" }
+
+      marking_3:
+        goal: Mark deliverable d3 complete in cpm-planner.
+        transitions:
+          mark:
+            target: marking_4
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d3_id != null" }
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.mark_status
+              map:
+                plan_id:        "$.workflow.input.plan_id"
+                deliverable_id: "$.context.d3_id"
+                caller_id:      "$.workflow.input.caller_id"
+                status:         "$.context.status_complete"
+            output:
+              d3_mark: "$.output"
+          skip:
+            target: marking_4
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d3_id == null" }
+
+      marking_4:
+        goal: Mark deliverable d4 complete in cpm-planner.
+        transitions:
+          mark:
+            target: done
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d4_id != null" }
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.mark_status
+              map:
+                plan_id:        "$.workflow.input.plan_id"
+                deliverable_id: "$.context.d4_id"
+                caller_id:      "$.workflow.input.caller_id"
+                status:         "$.context.status_complete"
+            output:
+              d4_mark: "$.output"
+          skip:
+            target: done
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.d4_id == null" }
+
+      # ── Terminals ──
+      # Nothing ready to lease — a legitimate quiescent end.
+      done_empty: { terminal: true }
+      # Milestone failed; $.context.attribution names implicated/collateral/
+      # clear members. Operator marks implicated failed, re-runs survivors.
+      failed_attributed: { terminal: true }
+      # Verified but not durably recorded — operator intervention required.
+      failed_commit: { terminal: true }
+      # Handoff record in context: cohort, d*_edit, milestone_verify, commit.
+      done: { terminal: true }

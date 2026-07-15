@@ -24,7 +24,6 @@ workflows:
         # acceptance_criteria}) — the spec defines the analysis question.
         deliverable: { type: object, required: true }
         # Repo root for `file:` read tools ("" = no repo grounding).
-        repo_path:   { type: string, default: "" }
       outputs:
         findings: { type: array }
         summary:  { type: string }
@@ -60,7 +59,9 @@ workflows:
                       evidence:       { type: string }
                       severity:       { type: string, enum: [critical, high, medium, low] }
                       recommendation: { type: string }
-                summary: { type: string }
+                # default so an omitted optional doesn't land null at the
+                # terminal — summary is a declared scalar output (V26).
+                summary: { type: string, default: "" }
             executor: { kind: noop }
             output:
               findings: "$.arguments.findings"

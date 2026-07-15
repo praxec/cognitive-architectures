@@ -22,7 +22,6 @@ workflows:
     snippet:
       inputs:
         defect:    { type: object, required: true }
-        repo_path: { type: string, required: true }
       outputs:
         behavioral_gaps: { type: array }
         ears:            { type: array }

@@ -35,7 +35,6 @@ workflows:
       # The increment's requirement/spec object (what to build + why; ideally
       # carries acceptance criteria for the build-loop's end-of-plan review).
       requirement: { type: object, required: true }
-      repo_path:   { type: string, required: true }
       # Threaded through to cap.implement.build-loop. Declared here AND passed
       # explicitly below — a snippet-input default is NOT merged into
       # `$.workflow.input` for path resolution when a sub-workflow is invoked
@@ -89,7 +88,6 @@ workflows:
               use:
                 inputs:
                   plan:      "$.context.sketch"
-                  repo_path: "$.workflow.input.repo_path"
                   # Pass BOTH explicitly — snippet-input defaults are NOT merged
                   # into $.workflow.input for path resolution when invoked via
                   # use.inputs (the unresolved-arg-path gotcha), so this flow
@@ -115,7 +113,7 @@ workflows:
               definitionId: cognitive/cap.verify.rust
               use:
                 inputs:
-                  cwd: "$.workflow.input.repo_path"
+                  cwd: "$.run.repo_root"
                 outputs:
                   "$.context.verify_report": verify
 

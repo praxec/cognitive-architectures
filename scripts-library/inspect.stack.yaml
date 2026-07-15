@@ -1,0 +1,86 @@
+# scripts-library/inspect.stack.yaml
+#
+# DETERMINISTIC stack detector for the stack-aware delivery leaf
+# (flow.implement.deliverable). Given a deliverable's metadata + its repo path,
+# emit the language STACK the verify step must route to — rust | ts | dotnet |
+# unknown. Code decides, the gate routes (same split as inspect.deliverable-route
+# and verify.test.tdd-verdict).
+#
+# Note: cap.inspect.deliverable-route yields a LEAF token (code|doc|vet|...),
+# NOT a language stack — so it cannot pick the verifier. This is the dedicated
+# stack normalizer that closes that gap.
+#
+# Precedence:
+#   1. deliverable.stack (explicit author intent), normalized through common
+#      aliases (typescript/node/react → ts; csharp/.net → dotnet; cargo → rust).
+#   2. else SNIFF the repo filesystem: Cargo.toml → rust; package.json → ts;
+#      *.sln / *.csproj → dotnet. (Cargo.toml is checked BEFORE package.json so
+#      a rust repo that carries a tooling package.json still routes to rust.)
+#   3. else the sentinel "unknown" (the flow's unguarded default marks the
+#      deliverable failed rather than mis-routing or dead-stalling — never a
+#      disguised pass).
+#
+# Poka-yoke (this pack's unresolved-arg-path failure class): a guard expr
+# FAILS-FAST on a missing context path, so the flow must never guard directly on
+# `$.workflow.input.deliverable.stack` (it may be absent). This script coalesces
+# it to a closed value the gate can branch on.
+#
+# Args:
+#   $1 / DELIVERABLE_JSON — the deliverable metadata object (JSON string; the
+#                           script-arg renderer stringifies object values)
+#   $2 / REPO_PATH        — the resolved repo path to sniff when stack is absent
+# Emits {stack, source, error} JSON on stdout, read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  inspect.stack:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      META="${1:-${DELIVERABLE_JSON:-}}"
+      REPO="${2:-${REPO_PATH:-}}"
+
+      norm() {
+        case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+          rust|cargo)                                   echo rust ;;
+          ts|tsx|typescript|node|nodejs|js|javascript|vite|react|frontend|fe) echo ts ;;
+          dotnet|.net|dotnetcore|csharp|c#|cs)          echo dotnet ;;
+          *)                                            echo "" ;;
+        esac
+      }
+
+      declared=""
+      if printf '%s' "$META" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        declared="$(printf '%s' "$META" | jq -r '(.stack // "") | tostring')"
+      fi
+      stack="$(norm "$declared")"
+      source="declared"
+
+      if [ -z "$stack" ]; then
+        source="filesystem"
+        if [ -n "$REPO" ] && [ -d "$REPO" ]; then
+          if [ -f "$REPO/Cargo.toml" ]; then
+            stack="rust"
+          elif [ -f "$REPO/package.json" ]; then
+            stack="ts"
+          elif ls "$REPO"/*.sln >/dev/null 2>&1 \
+            || ls "$REPO"/*.csproj >/dev/null 2>&1 \
+            || [ -n "$(find "$REPO" -maxdepth 3 -name '*.csproj' -print -quit 2>/dev/null)" ]; then
+            stack="dotnet"
+          fi
+        fi
+      fi
+
+      if [ -z "$stack" ]; then
+        stack="unknown"; source="none"
+      fi
+
+      jq -n --arg s "$stack" --arg src "$source" '
+        { stack: $s,
+          source: $src,
+          error: (if $s == "unknown"
+                    then "could not determine stack from deliverable.stack or repo filesystem (Cargo.toml | package.json | *.csproj/*.sln)"
+                    else null end) }'

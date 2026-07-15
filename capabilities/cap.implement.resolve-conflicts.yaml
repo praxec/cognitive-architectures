@@ -25,10 +25,8 @@ workflows:
       merge commit happen downstream; an incomplete resolution is never
       committed.
     snippet:
-      inputs:
-        # Repo root — roots the agent's `file:` read/write/search tools; the
-        # in-progress merge (with conflict markers) lives in this tree.
-        repo_path: { type: string, required: true }
+      # repo_root is run-ambient ($.run.repo_root) — no repo input needed.
+      inputs: {}
       outputs:
         resolved_files:     { type: string }
         resolution_summary: { type: string }
@@ -64,7 +62,9 @@ workflows:
               required: [resolved_files]
               properties:
                 resolved_files:     { type: string }
-                resolution_summary: { type: string }
+                # default so an omitted optional doesn't land null at the
+                # terminal — resolution_summary is a declared scalar output (V26).
+                resolution_summary: { type: string, default: "" }
             executor: { kind: noop }
             output:
               resolved_files:     "$.arguments.resolved_files"

@@ -48,7 +48,6 @@ workflows:
       flag; the build spec rides in deliverable.metadata.
     inputs:
       plan_id:   { type: string, required: true }
-      repo_path: { type: string, required: true }
       # This driver's lock-holder identity (distinct per parallel driver so
       # cpm-planner keeps cohorts file-disjoint). Held across acquire → mark.
       caller_id: { type: string, required: true }
@@ -106,7 +105,9 @@ workflows:
               use:
                 inputs:
                   deliverable:    "$.context.next_deliverable"
-                  repo_path:      "$.workflow.input.repo_path"
+                  # Whole-tree backstop — the behavior this flow has always had,
+                  # now stated rather than hardcoded inside the callee.
+                  backstop_cwd:   "$.run.repo_root"
                   plan_id:        "$.workflow.input.plan_id"
                   deliverable_id: "$.context.next_deliverable_id"
                   caller_id:      "$.workflow.input.caller_id"

@@ -11,7 +11,7 @@
 #   $2 / BASE   — the PR base branch (required)
 #   $3 / TITLE  — PR title (used only when creating)
 #   $4 / BODY   — PR body  (used only when creating; "" ok)
-# Run with the leaf `workingDirectory: $.workflow.input.repo_path`.
+# Run with the leaf `workingDirectory: $.run.repo_root`.
 # Emits {ok, pushed, pr_url, pr_number, created, error} JSON on stdout.
 version: "1.0.0"
 scripts:
@@ -27,7 +27,11 @@ scripts:
       jstr() { printf '%s' "${1:-}" | jq -Rs . 2>/dev/null || printf '""'; }
       emit() { printf '{"ok": %s, "pushed": %s, "pr_url": %s, "pr_number": %s, "created": %s, "error": %s}\n' \
                  "$1" "$2" "$3" "$4" "$5" "$6"; exit 0; }
-      fail() { emit false false null null false "$(jstr "$1")"; }
+      # pr_url is "" (never JSON null) on failure: flow.check-in declares it
+      # `type: string`, and null under a scalar schema is NOT deterministically
+      # repairable — it would fail the terminal output contract on every abort
+      # path. The caller must still gate on `ok`, never on a non-empty pr_url.
+      fail() { emit false false '""' null false "$(jstr "$1")"; }
 
       branch="${1:-${BRANCH:-}}"
       base="${2:-${BASE:-}}"

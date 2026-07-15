@@ -25,7 +25,6 @@ workflows:
     inputs:
       project_brief: { type: string, required: true }
       crate_name:    { type: string, required: true }
-      repo_path:     { type: string, required: true }
       base_ref:      { type: string, default: main }
     initialState: eliciting
     states:
@@ -260,7 +259,6 @@ workflows:
               definitionId: cap.run.scaffold-repo
               use:
                 inputs:
-                  repo_path:  "$.workflow.input.repo_path"
                   crate_name: "$.workflow.input.crate_name"
                 outputs:
                   "$.context.scaffolded": scaffolded
@@ -282,7 +280,6 @@ workflows:
               use:
                 inputs:
                   plan:      "$.context.plan"
-                  repo_path: "$.workflow.input.repo_path"
                 outputs:
                   "$.context.implementation_result": result
                   "$.context.tests_added":           tests_added
@@ -297,8 +294,7 @@ workflows:
               kind: workflow
               definitionId: cap.verify.stub-scan
               use:
-                inputs:
-                  repo_path: "$.workflow.input.repo_path"
+                inputs: {}
                 outputs:
                   "$.context.stub_passed": passed
                   "$.context.stub_hits":   hits
@@ -331,7 +327,6 @@ workflows:
               use:
                 inputs:
                   plan:      "$.context.plan"
-                  repo_path: "$.workflow.input.repo_path"
                 outputs:
                   "$.context.deliverable_verdict": verdict
                   "$.context.deliverable_gaps":    gaps
@@ -364,7 +359,6 @@ workflows:
               use:
                 inputs:
                   plan:      "$.context.plan"
-                  repo_path: "$.workflow.input.repo_path"
                 outputs:
                   "$.context.acceptance_verdict": verdict
                   "$.context.acceptance_results": criteria_results
@@ -415,8 +409,7 @@ workflows:
               kind: workflow
               definitionId: cap.review.completeness
               use:
-                inputs:
-                  repo_path: "$.workflow.input.repo_path"
+                inputs: {}
                 outputs:
                   "$.context.completeness_verdict":  verdict
                   "$.context.completeness_findings": findings

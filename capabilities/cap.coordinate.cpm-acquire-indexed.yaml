@@ -1,0 +1,114 @@
+# capabilities/cap.coordinate.cpm-acquire-indexed.yaml
+#
+# Coordination cap: atomically acquire up to `max_count` (≤ 5) ready,
+# file-disjoint deliverables from a cpm-planner plan and return them as
+# STATICALLY-INDEXED typed slots (d0_* .. d4_*) alongside the raw cohort.
+#
+# Why indexed outputs exist (vs. cap.coordinate.cpm-acquire's raw cohort):
+# the guard-expr language is a single binary comparison over a concrete
+# path — it cannot iterate an array or test emptiness. A cohort-shaped flow
+# (cognitive/flow.cohort.compiled-stack) therefore unrolls its per-deliverable
+# states statically and guards each on `$.context.dN_id == null` /
+# `!= null`. That guard only works if the slot is SET (a missing
+# `$.context.*` path fails fast, GUARD_UNSET_SLOT) — so this cap binds every
+# index eagerly: transition `output:` maps null-coalesce missing paths
+# (same wire behavior cap.coordinate.acquire-cohort relies on for its
+# exhausted case), giving downstream guards a set-but-null slot for absent
+# cohort members.
+#
+# Wire shape (cpm-planner plan.acquire_cohort, FLAT):
+#   { deliverables: [{ id, metadata, owned_files, ... }], locks: [...],
+#     exhausted: bool }
+#
+# INDEX CAP: 5. A max_count > 5 still acquires (and LOCKS) the whole cohort
+# but members beyond index 4 are only reachable through the raw `cohort`
+# output — callers of the indexed surface must pass max_count ≤ 5.
+#
+# Requires the `cpm-planner` connection (reference:
+# connections/cpm-planner.yaml).
+
+workflows:
+  cap.coordinate.cpm-acquire-indexed:
+    verb: coordinate
+    lifecycle: experimental
+    description: >
+      Atomically acquire up to max_count (≤ 5) ready, file-disjoint
+      deliverables from a cpm-planner plan for caller_id; return the raw
+      cohort plus statically-indexed per-deliverable slots (d0..d4:
+      id/spec/files, null-coalesced) so a state-machine flow can unroll
+      per-deliverable steps with guardable slots.
+    snippet:
+      inputs:
+        plan_id:   { type: string, required: true }
+        caller_id: { type: string, required: true }
+        max_count: { type: integer, required: true }
+      outputs:
+        # Scalar termination signal — true when nothing is ready.
+        exhausted: { type: boolean }
+        # The raw Cohort (deliverables + locks) for audit / handoff records.
+        cohort:    { type: object }
+        # Indexed member slots. Absent indices are null (set-but-null), so
+        # guard exprs `== null` / `!= null` are legal on every one of them.
+        #
+        # The types MUST admit null, and that is not a formality. `null` here is
+        # LOAD-BEARING: it is the whole reason this cap exists — the flow unrolls
+        # its per-deliverable states statically and reads `$.context.dN_id == null`
+        # to decide a member is absent. A cohort of k < 5 therefore terminates with
+        # 5-k of these slots null BY DESIGN. Declaring them bare `{type: string}`
+        # would say the opposite, and the runtime enforces a definition's declared
+        # outputs at its own terminal (SPEC §5.3) — so every under-full cohort (the
+        # common case) would fail the cap on a contract it was never meant to keep.
+        d0_id:    { type: [string, "null"] }
+        d0_spec:  { type: [object, "null"] }
+        d0_files: { type: [array,  "null"] }
+        d1_id:    { type: [string, "null"] }
+        d1_spec:  { type: [object, "null"] }
+        d1_files: { type: [array,  "null"] }
+        d2_id:    { type: [string, "null"] }
+        d2_spec:  { type: [object, "null"] }
+        d2_files: { type: [array,  "null"] }
+        d3_id:    { type: [string, "null"] }
+        d3_spec:  { type: [object, "null"] }
+        d3_files: { type: [array,  "null"] }
+        d4_id:    { type: [string, "null"] }
+        d4_spec:  { type: [object, "null"] }
+        d4_files: { type: [array,  "null"] }
+    initialState: ready
+    states:
+      ready:
+        goal: Acquire an indexed cohort of ready deliverables from cpm-planner.
+        transitions:
+          acquire:
+            target: done
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: cpm-planner
+              tool: plan.acquire_cohort
+              # McpExecutor resolves `map:` (NOT `arguments:`) against
+              # $.arguments / $.context / $.workflow.input. Field names match
+              # AcquireCohortArgs in cpm-planner/src/server.rs.
+              map:
+                plan_id:   "$.workflow.input.plan_id"
+                caller_id: "$.workflow.input.caller_id"
+                max_count: "$.workflow.input.max_count"
+            output:
+              exhausted: "$.output.exhausted"
+              cohort:    "$.output"
+              # Missing indices coalesce to null — deliberate; see header.
+              d0_id:     "$.output.deliverables.0.id"
+              d0_spec:   "$.output.deliverables.0.metadata"
+              d0_files:  "$.output.deliverables.0.owned_files"
+              d1_id:     "$.output.deliverables.1.id"
+              d1_spec:   "$.output.deliverables.1.metadata"
+              d1_files:  "$.output.deliverables.1.owned_files"
+              d2_id:     "$.output.deliverables.2.id"
+              d2_spec:   "$.output.deliverables.2.metadata"
+              d2_files:  "$.output.deliverables.2.owned_files"
+              d3_id:     "$.output.deliverables.3.id"
+              d3_spec:   "$.output.deliverables.3.metadata"
+              d3_files:  "$.output.deliverables.3.owned_files"
+              d4_id:     "$.output.deliverables.4.id"
+              d4_spec:   "$.output.deliverables.4.metadata"
+              d4_files:  "$.output.deliverables.4.owned_files"
+      done: { terminal: true }

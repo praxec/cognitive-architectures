@@ -1,0 +1,53 @@
+# capabilities/cap.run.codegen-milestone.yaml
+#
+# The CODEGEN MILESTONE leaf for cohort flows: run the repo's designated
+# contract-codegen command ONCE over a shared tree (run.codegen.command
+# script) and return the result as a snippet-typed `codegen` slot.
+#
+# Why a cap (not an inline script in flow.cohort.compiled-stack): a flow's
+# slot table (V13) only recognizes slots written by `inputs:` or a child
+# workflow's `use.outputs` — NOT by a transition `output:` block. The cohort
+# flow's failure-attribution step consumes the codegen result via
+# `use.inputs`, so the result must be a first-class slot; wrapping the script
+# in this snippet-typed cap is the same move cap.coordinate.acquire-cohort
+# documents for the acquire result.
+#
+# The command is OPERATOR INPUT (executed verbatim by the script) — cohort
+# flows must never let an in-workflow agent choose it. Failures come back as
+# DATA ({ok:false, exit_code, stderr_tail}) so the caller can branch to
+# attribution instead of collapsing the transition.
+
+workflows:
+  cap.run.codegen-milestone:
+    verb: run
+    lifecycle: experimental
+    description: >
+      Run the repo's contract-codegen command once over a shared tree (the
+      cohort codegen milestone) and return {ran, ok, exit_code, stderr_tail,
+      error} as a typed slot; failures are data, so callers can branch to
+      attribution.
+    snippet:
+      inputs:
+        codegen_command: { type: string, required: true }
+      outputs:
+        codegen: { type: object }
+    initialState: ready
+    states:
+      ready:
+        goal: Run the codegen command once in the shared tree; emit the result.
+        transitions:
+          generate:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.codegen.command
+              workingDirectory: "$.run.repo_root"
+              # The script always exits 0 and reports failure as data; this is
+              # belt-and-braces so a nonzero exit still lands in the payload.
+              treatNonZeroAsFailure: false
+              args:
+                - "$.workflow.input.codegen_command"
+            output:
+              codegen: "$.output.json"
+      done: { terminal: true }
