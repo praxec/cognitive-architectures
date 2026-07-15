@@ -66,7 +66,6 @@ workflows:
       gates fail fast on a missing predecessor artifact.
     inputs:
       brief:     { type: string, required: true }
-      repo_path: { type: string, required: true }
     initialState: eliciting_needs
     states:
 
@@ -259,7 +258,6 @@ workflows:
               use:
                 inputs:
                   requirement: "$.context.design"
-                  repo_path:   "$.workflow.input.repo_path"
                   # Pass BOTH explicitly — snippet-input defaults are NOT
                   # merged into $.workflow.input for path resolution when a
                   # sub-workflow is invoked via use.inputs (the
@@ -300,8 +298,7 @@ workflows:
               kind: workflow
               definitionId: cognitive/cap.review.completeness
               use:
-                inputs:
-                  repo_path: "$.workflow.input.repo_path"
+                inputs: {}
                 outputs:
                   "$.context.integration_verdict":  verdict
                   "$.context.integration_findings": findings
@@ -332,7 +329,7 @@ workflows:
               definitionId: cognitive/cap.verify.rust
               use:
                 inputs:
-                  cwd: "$.workflow.input.repo_path"
+                  cwd: "$.run.repo_root"
                 outputs:
                   "$.context.verification": verify
 
@@ -384,7 +381,6 @@ workflows:
               use:
                 inputs:
                   needs:     "$.context.needs"
-                  repo_path: "$.workflow.input.repo_path"
                 outputs:
                   "$.context.validation_verdict": verdict
                   "$.context.validation_results": need_results

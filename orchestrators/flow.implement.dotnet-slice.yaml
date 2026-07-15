@@ -62,7 +62,6 @@ workflows:
       BEFORE commit so a cross-project / DI-registration break (the PR #1200
       class) can't slip through on scoped evidence alone.
     inputs:
-      repo_path: { type: string, required: true }
       spec:      { type: string, required: true }
       # SCOPED inner-loop verify cwd — the touched test project (fast red→green).
       scoped_cwd:   { type: string, required: true }
@@ -70,7 +69,6 @@ workflows:
       # project(s) (see the backstop_cwd tradeoff note above).
       backstop_cwd: { type: string, required: true }
     blackboard:
-      repo_path:      { type: string }
       spec:           { type: string }
       scoped_cwd:     { type: string }
       backstop_cwd:   { type: string }
@@ -223,7 +221,7 @@ workflows:
             executor:
               kind: script
               subject: cognitive/run.git.commit-slice
-              workingDirectory: "$.context.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
                 - "$.context.commit_message"
                 - "$.context.files_written"

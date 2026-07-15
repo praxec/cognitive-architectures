@@ -16,7 +16,7 @@
 #   $1 / BRANCH — branch to check in ("" = the currently checked-out branch)
 #   $2 / BASE   — integration base ("" = the repo's default branch)
 #   $3 / TITLE  — PR title ("" = last commit subject)
-# Run with the leaf `workingDirectory: $.workflow.input.repo_path`.
+# Run with the leaf `workingDirectory: $.run.repo_root`.
 # Emits {ok, branch, base, title, committed_now, error} JSON on stdout.
 version: "1.0.0"
 scripts:

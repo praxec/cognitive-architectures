@@ -15,7 +15,7 @@
 #   $1 / RESOLVED_FILES — space-separated repo-relative paths the resolver
 #                         claims to have resolved (informational; the marker
 #                         scan runs over ALL unmerged paths regardless)
-# Run with the leaf `workingDirectory: $.workflow.input.repo_path`.
+# Run with the leaf `workingDirectory: $.run.repo_root`.
 # Emits {resolved, sha, remaining, error} JSON on stdout.
 version: "1.0.0"
 scripts:

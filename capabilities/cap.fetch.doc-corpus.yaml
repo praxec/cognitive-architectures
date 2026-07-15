@@ -27,7 +27,6 @@ workflows:
       doc_evidence [{ path, heading_path, snippet, score }] + index_stats.
     snippet:
       inputs:
-        repo_path: { type: string, required: true }
         topic:     { type: string, required: true }
         k:         { type: integer, default: 12 }
       outputs:
@@ -48,7 +47,6 @@ workflows:
               connection: corpus
               tool: corpus_index
               map:
-                repo_path: "$.workflow.input.repo_path"
             output:
               index_stats: "$.output"
 
@@ -65,7 +63,6 @@ workflows:
               tool: corpus_search
               map:
                 query:     "$.workflow.input.topic"
-                repo_path: "$.workflow.input.repo_path"
                 k:         "$.workflow.input.k"
             output:
               doc_evidence: "$.output"

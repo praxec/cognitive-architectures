@@ -42,7 +42,6 @@ workflows:
       # The deliverable spec — passed straight through as the build-loop `plan`
       # (goal + deliverables/steps + acceptance_criteria).
       deliverable:    { type: object, required: true }
-      repo_path:      { type: string, required: true }
       # CROSS-CRATE BACKSTOP surface (see workspace_gate). Was hardcoded to
       # repo_path — always correct, but it pays for a full `cargo test
       # --workspace` on every deliverable. REQUIRED (not defaulted): a path
@@ -98,9 +97,9 @@ workflows:
             executor:
               kind: script
               subject: inspect.git.progress
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
                 - ""   # empty base ⇒ snapshot mode → returns current HEAD
             output:
               base_commit: "$.output.json.head"
@@ -118,7 +117,6 @@ workflows:
               use:
                 inputs:
                   plan:      "$.workflow.input.deliverable"
-                  repo_path: "$.workflow.input.repo_path"
                   # SCOPED inner loop: cargo_scope rides in the deliverable spec
                   # (deliverable.cargo_scope) so a single-crate slice tests only
                   # its crate (fast RED/GREEN) instead of the whole workspace.
@@ -153,9 +151,9 @@ workflows:
             executor:
               kind: script
               subject: inspect.git.progress
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
                 - "$.context.base_commit"
             output:
               impl_files_changed: "$.output.json.files_changed"
@@ -192,7 +190,7 @@ workflows:
               subject: inspect.stack
               args:
                 - "$.workflow.input.deliverable"
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
             output:
               stack: "$.output.json.stack"
 
@@ -232,7 +230,7 @@ workflows:
               definitionId: cognitive/cap.verify.ts
               use:
                 inputs:
-                  cwd: "$.workflow.input.repo_path"
+                  cwd: "$.run.repo_root"
                 outputs:
                   "$.context.ws_verify": verify
 

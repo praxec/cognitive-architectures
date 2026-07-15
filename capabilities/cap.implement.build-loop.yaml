@@ -33,7 +33,6 @@ workflows:
     snippet:
       inputs:
         plan:      { type: object, required: true }
-        repo_path: { type: string, required: true }
         # Optional `-p <crate>` scope for the cargo test/build steps. Cohort
         # drivers (flow.implement.deliverable) don't thread it, so default to
         # empty → the red/green scripts test the whole workspace. Without this
@@ -175,9 +174,9 @@ workflows:
             executor:
               kind: script
               subject: verify.test.tdd-verdict
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
                 - "red"
                 - "$.context.prev_test_count"
                 - "$.context.build_iter"
@@ -297,9 +296,9 @@ workflows:
             executor:
               kind: script
               subject: format.cleanup
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
             output:
               cleanup_summary: "$.output.json.summary"
 
@@ -312,9 +311,9 @@ workflows:
             executor:
               kind: script
               subject: verify.test.tdd-verdict
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
                 - "green"
                 - "$.context.prev_test_count"
                 - "$.context.build_iter"
@@ -444,7 +443,7 @@ workflows:
             executor:
               kind: script
               subject: inspect.qa-ladder
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
                 - "$.context.qa_tier_index"
                 - "$.context.qa_tier_attempt"
@@ -486,9 +485,9 @@ workflows:
             executor:
               kind: script
               subject: inspect.changed-files
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
             output:
               files_written: "$.output.json.files"
 
@@ -502,7 +501,7 @@ workflows:
             executor:
               kind: script
               subject: run.git.commit-slice
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
                 - "$.context.commit_message"
                 - "$.context.files_written"
@@ -537,9 +536,9 @@ workflows:
             executor:
               kind: script
               subject: inspect.plan-complete
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
                 - "$.context.compiled"
                 - "$.context.failed_count"
                 - "$.context.coding_done"

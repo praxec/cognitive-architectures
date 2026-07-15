@@ -15,7 +15,7 @@
 # delegates). Its tools are wired by the driving gateway config's
 # `praxec.agents.auto_drive_tools`:
 #   - `corpus`                          -> corpus_search (widen doc context)
-#   - `file:{{ $.workflow.input.repo_path }}` -> read_file / read_range /
+#   - `file:{{ $.run.repo_root }}` -> read_file / read_range /
 #                                          search_file over the audited repo
 # so the critic retrieves the ACTUAL source for each claim rather than judging a
 # static digest. `code_digest` is passed only as a NAVIGATION MAP (which files
@@ -42,7 +42,6 @@ workflows:
         # The audit slice / corpus_search query this batch covers.
         topic:        { type: string, required: true }
         # Repo root — roots the `file:` read tools + the corpus_search retarget.
-        repo_path:    { type: string, required: true }
       outputs:
         findings: { type: array }
     skills: [review.doc-drift.critic]

@@ -5,7 +5,7 @@
 # cap is for artifacts with no compiler to gate on: prose docs, pack YAML).
 # Cognitive cap: the auto-driven agent gets `file:` tools rooted at
 # `repo_path` (the gateway's auto_drive_tools template keys off the leaf's
-# `$.workflow.input.repo_path`), writes the artifact file(s) per the
+# `$.run.repo_root`), writes the artifact file(s) per the
 # deliverable spec, and signs off (the report fields are optional); a
 # deterministic `inspect.changed-files` staging step derives the changed file
 # set from git, then `run.git.commit-slice` commits EXACTLY those files
@@ -32,7 +32,6 @@ workflows:
         deliverable:   { type: object, required: true }
         # Repo root — roots the agent's `file:` write/read tools and the
         # commit step's working directory.
-        repo_path:     { type: string, required: true }
         # doc | pack-yaml (see header).
         artifact_kind: { type: string, default: doc }
       outputs:
@@ -96,9 +95,9 @@ workflows:
             executor:
               kind: script
               subject: inspect.changed-files
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
             output:
               files_written: "$.output.json.files"
 
@@ -114,9 +113,9 @@ workflows:
             executor:
               kind: script
               subject: verify.pack.loads
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
                 - "$.workflow.input.artifact_kind"
             output:
               loaded_ok: "$.output.json.loaded_ok"
@@ -146,7 +145,7 @@ workflows:
             executor:
               kind: script
               subject: run.git.commit-slice
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
                 - "$.context.commit_message"
                 - "$.context.files_written"

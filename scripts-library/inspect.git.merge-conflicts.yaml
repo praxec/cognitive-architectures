@@ -14,7 +14,7 @@
 # Inputs — POSITIONAL ARGS:
 #   $1 / BASE — the integration base branch (required); origin/<base> is
 #               preferred when it exists (freshly fetched), else local <base>.
-# Run with the leaf `workingDirectory: $.workflow.input.repo_path`.
+# Run with the leaf `workingDirectory: $.run.repo_root`.
 # Emits {ok, conflicts, conflict_files, merge_ref, error} JSON on stdout
 # (conflict_files is a space-separated string, ready for script args).
 version: "1.0.0"

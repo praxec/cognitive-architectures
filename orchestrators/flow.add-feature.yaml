@@ -25,18 +25,12 @@ workflows:
     stack: rust
     inputs:
       feature_brief: { type: string, required: true }
-      # The target repo ON DISK. REQUIRED and threaded to the agent leaves
-      # (implementing / reviewing) so each resolves `$.workflow.input.repo_path`
-      # in ITS OWN scope — the gateway templates the
-      # `file:{{ $.workflow.input.repo_path }}` auto_drive tool against the
-      # immediate leaf workflow's input (verified: AgentExecutor renders tools
-      # against `request.workflow`). Without this the implement agent has NO
-      # filesystem access and (the observed bug) tries to npm/git-fetch the local
-      # repo from invented remotes and writes 0 lines. A path input is NOT merged
-      # from a default into `$.workflow.input`, so it is REQUIRED (a defaulted-
-      # but-unpassed path is an unresolved-arg permanent error), and it is passed
-      # EXPLICITLY through each child's use.inputs.
-      repo_path:     { type: string, required: true }
+      # The target repo is RUN-AMBIENT (praxec 0.0.21+): every leaf (implementing
+      # / reviewing) resolves `$.run.repo_root` in its own scope, and the gateway
+      # templates the `file:{{ $.run.repo_root }}` auto_drive tool against it — no
+      # `repo_path` input and no hand-threading through each child's use.inputs.
+      # The root is sourced once at the run boundary from the gateway's declared
+      # writable repos, so a leaf can never be handed a missing/invented root.
       base_ref:      { type: string, default: main }
       lexicon:       { type: object, default: {} }
     # Declaring the `verify` HOP slot (via hop_slot injection) puts this flow in
@@ -46,7 +40,6 @@ workflows:
     # declaration, not constraint.
     blackboard:
       feature_brief:         { type: string }
-      repo_path:             { type: string }
       base_ref:              { type: string }
       lexicon:               { type: object }
       draft_plan:            {}
@@ -140,7 +133,6 @@ workflows:
                   # Ground against the SAME repo the implement/review agents get
                   # file access to. Passed EXPLICITLY (a path input is not merged
                   # from a default into $.workflow.input).
-                  repo_path: "$.workflow.input.repo_path"
                 outputs:
                   "$.context.grounded":          grounded
                   "$.context.grounding_missing": missing
@@ -215,7 +207,6 @@ workflows:
                   scope_paths: "$.context.draft_plan"
                   # Thread the repo so the implement agent gets file-tool access
                   # (resolves in the tdd-loop's own $.workflow.input scope).
-                  repo_path:   "$.workflow.input.repo_path"
                 outputs:
                   "$.context.implementation_result": result
                   "$.context.tests_added":           tests_added
@@ -280,7 +271,6 @@ workflows:
                 inputs:
                   diff_against: "$.context.base_ref"
                   # Ground the reviewer in the actual repo (file-tool access).
-                  repo_path:    "$.workflow.input.repo_path"
                 outputs:
                   "$.context.review_verdict":  verdict
                   "$.context.review_findings": findings

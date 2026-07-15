@@ -119,7 +119,6 @@ workflows:
       plan_id:   { type: string, required: true }
       caller_id: { type: string, required: true }
       # The SHARED warm worktree all cohort members edit (not per-slice trees).
-      repo_path: { type: string, required: true }
       # ≤ 5 (the static unroll's index cap).
       max_count: { type: integer, required: true }
       # Verify-milestone stack dispatch: dotnet | rust | anything-else →
@@ -357,7 +356,6 @@ workflows:
               use:
                 inputs:
                   codegen_command: "$.workflow.input.codegen_command"
-                  repo_path:       "$.workflow.input.repo_path"
                 outputs:
                   "$.context.codegen": codegen
 
@@ -394,7 +392,7 @@ workflows:
               definitionId: cognitive/cap.verify.dotnet
               use:
                 inputs:
-                  cwd: "$.workflow.input.repo_path"
+                  cwd: "$.run.repo_root"
                 outputs:
                   "$.context.milestone_verify": verify
           verify_rust:
@@ -407,7 +405,7 @@ workflows:
               definitionId: cognitive/cap.verify.rust
               use:
                 inputs:
-                  cwd: "$.workflow.input.repo_path"
+                  cwd: "$.run.repo_root"
                 outputs:
                   "$.context.milestone_verify": verify
           # UNGUARDED DEFAULT (the linter-blessed switch shape, cf.
@@ -422,7 +420,7 @@ workflows:
               definitionId: cognitive/cap.verify.generic
               use:
                 inputs:
-                  cwd: "$.workflow.input.repo_path"
+                  cwd: "$.run.repo_root"
                 outputs:
                   "$.context.milestone_verify": verify
 
@@ -489,7 +487,7 @@ workflows:
             executor:
               kind: script
               subject: run.git.commit-slice
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               treatNonZeroAsFailure: false
               args:
                 - "$.workflow.input.commit_message"

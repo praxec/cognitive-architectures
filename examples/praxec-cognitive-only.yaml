@@ -9,8 +9,20 @@
 # The repo's manifest declares `namespace: cognitive`, so every
 # loaded definitionId surfaces under `cognitive/<id>` (e.g.
 # `cognitive/flow.add-feature`).
+#
+# `_writableRepos` (praxec 0.0.21+) declares the repo(s) a run may operate on.
+# Every run's ambient `$.run.repo_root` is sourced from here — a run cannot
+# start without at least one, and the flows resolve `$.run.repo_root` (no
+# hand-threaded `repo_path`) against it. Point `root` at the repo you are
+# operating ON (here, the target codebase); with a single entry it is selected
+# automatically, otherwise a `start` names one via a `repoRoot` selector.
 
 version: "1.0.0"
+
+praxec:
+  _writableRepos:
+    - root: "."          # the repo this run operates on (adjust to your target)
+      push: false
 
 repos:
   - path: ..

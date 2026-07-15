@@ -29,7 +29,6 @@ workflows:
     snippet:
       inputs:
         codegen_command: { type: string, required: true }
-        repo_path:       { type: string, required: true }
       outputs:
         codegen: { type: object }
     initialState: ready
@@ -43,7 +42,7 @@ workflows:
             executor:
               kind: script
               subject: run.codegen.command
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               # The script always exits 0 and reports failure as data; this is
               # belt-and-braces so a nonzero exit still lands in the payload.
               treatNonZeroAsFailure: false

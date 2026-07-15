@@ -45,7 +45,6 @@ workflows:
       on any repo; the blocking (wrong | superseded) count is the code-computed
       definition of done.
     inputs:
-      repo_path: { type: string, required: true }
       # The audit slice — becomes the corpus_search query (e.g. "executor kinds
       # and governance", "configuration and defaults", "CLI commands").
       topic:     { type: string, required: true }
@@ -72,7 +71,6 @@ workflows:
               definitionId: cognitive/cap.fetch.doc-corpus
               use:
                 inputs:
-                  repo_path: "$.workflow.input.repo_path"
                   topic:     "$.workflow.input.topic"
                   k:         "$.workflow.input.k"
                 outputs:
@@ -90,8 +88,7 @@ workflows:
               kind: workflow
               definitionId: cognitive/cap.inspect.repo-digest
               use:
-                inputs:
-                  repo_path: "$.workflow.input.repo_path"
+                inputs: {}
                 outputs:
                   "$.context.repo_digest": code_digest
 
@@ -110,7 +107,6 @@ workflows:
                   doc_evidence: "$.context.doc_evidence"
                   code_digest:  "$.context.repo_digest"
                   topic:        "$.workflow.input.topic"
-                  repo_path:    "$.workflow.input.repo_path"
                 outputs:
                   "$.context.findings": findings
 

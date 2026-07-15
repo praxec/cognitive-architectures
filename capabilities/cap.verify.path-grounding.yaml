@@ -35,7 +35,6 @@ workflows:
         # The target repo ON DISK. REQUIRED and passed EXPLICITLY by the caller
         # (a path-valued default is not merged into $.workflow.input for
         # $.-path resolution).
-        repo_path: { type: string, required: true }
       outputs:
         grounded: { type: boolean }
         missing:  { type: array }
@@ -58,7 +57,7 @@ workflows:
               treatNonZeroAsFailure: false
               args:
                 - "$.workflow.input.plan"
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
             output:
               # Nested reads into the parsed stdout ($.output.json) resolve via
               # JSON pointer, so the scalar `grounded` lands as a top-level cap

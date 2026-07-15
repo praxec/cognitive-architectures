@@ -11,7 +11,7 @@
 #   $2 / BASE   — the PR base branch (required)
 #   $3 / TITLE  — PR title (used only when creating)
 #   $4 / BODY   — PR body  (used only when creating; "" ok)
-# Run with the leaf `workingDirectory: $.workflow.input.repo_path`.
+# Run with the leaf `workingDirectory: $.run.repo_root`.
 # Emits {ok, pushed, pr_url, pr_number, created, error} JSON on stdout.
 version: "1.0.0"
 scripts:

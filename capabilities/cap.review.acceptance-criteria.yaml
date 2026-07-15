@@ -17,7 +17,6 @@ workflows:
     snippet:
       inputs:
         plan:      { type: object, required: true }
-        repo_path: { type: string, required: true }
       outputs:
         verdict:          { type: string, enum: [all_met, unmet] }
         criteria_results: { type: array }

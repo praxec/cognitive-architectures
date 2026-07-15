@@ -62,7 +62,6 @@ workflows:
     inputs:
       plan_id:   { type: string, required: true }
       # Program-default repo; a deliverable's metadata.repo overrides per-leaf.
-      repo_path: { type: string, required: true }
       # This driver's lock-holder identity (distinct per parallel driver so
       # cpm-planner keeps cohorts file-disjoint). Held across acquire → mark.
       caller_id: { type: string, required: true }
@@ -144,7 +143,7 @@ workflows:
               use:
                 inputs:
                   deliverable:  "$.context.next_deliverable"
-                  default_repo: "$.workflow.input.repo_path"
+                  default_repo: "$.run.repo_root"
                 outputs:
                   "$.context.route_leaf": leaf
                   "$.context.route_repo": repo
@@ -196,10 +195,10 @@ workflows:
             executor:
               kind: workflow
               definitionId: cognitive/flow.implement.deliverable
+              repoRoot: "$.context.route_repo"
               use:
                 inputs:
                   deliverable:    "$.context.next_deliverable"
-                  repo_path:      "$.context.route_repo"
                   # Whole-tree backstop — the behavior this flow has always had,
                   # now stated rather than hardcoded inside the callee. Narrow it
                   # here if a program's crates justify a cheaper backstop surface.
@@ -238,9 +237,9 @@ workflows:
             executor:
               kind: workflow
               definitionId: cognitive/flow.check-in
+              repoRoot: "$.context.route_repo"
               use:
-                inputs:
-                  repo_path: "$.context.route_repo"
+                inputs: {}
                 outputs:
                   "$.context.checkin_status": status
                   "$.context.checkin_pr_url": pr_url
@@ -255,10 +254,10 @@ workflows:
             executor:
               kind: workflow
               definitionId: cognitive/cap.implement.artifact
+              repoRoot: "$.context.route_repo"
               use:
                 inputs:
                   deliverable:   "$.context.next_deliverable"
-                  repo_path:     "$.context.route_repo"
                   artifact_kind: "doc"
                 outputs:
                   "$.context.artifact_files":   files_written
@@ -274,10 +273,10 @@ workflows:
             executor:
               kind: workflow
               definitionId: cognitive/cap.implement.artifact
+              repoRoot: "$.context.route_repo"
               use:
                 inputs:
                   deliverable:   "$.context.next_deliverable"
-                  repo_path:     "$.context.route_repo"
                   artifact_kind: "pack-yaml"
                 outputs:
                   "$.context.artifact_files":   files_written
@@ -330,10 +329,10 @@ workflows:
             executor:
               kind: workflow
               definitionId: cognitive/cap.review.analysis
+              repoRoot: "$.context.route_repo"
               use:
                 inputs:
                   deliverable: "$.context.next_deliverable"
-                  repo_path:   "$.context.route_repo"
                 outputs:
                   "$.context.analysis_findings": findings
                   "$.context.analysis_summary":  summary

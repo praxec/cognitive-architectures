@@ -44,7 +44,6 @@ workflows:
       report {pr_url, status}. Signoff-free; only a genuinely-unresolvable
       conflict parks at needs_human.
     inputs:
-      repo_path: { type: string, required: true }
       # "" = the currently checked-out branch (the common case when chained
       # after a build that already worked on the deliverable branch).
       branch:    { type: string, default: "" }
@@ -81,7 +80,7 @@ workflows:
             executor:
               kind: script
               subject: run.git.ensure-committed
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
                 - "$.workflow.input.branch"
                 - "$.workflow.input.base"
@@ -116,7 +115,7 @@ workflows:
             executor:
               kind: script
               subject: run.git.push-pr
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
                 - "$.context.branch_ref"
                 - "$.context.base_ref"
@@ -156,7 +155,7 @@ workflows:
             executor:
               kind: script
               subject: inspect.git.merge-conflicts
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
                 - "$.context.base_ref"
             output:
@@ -207,8 +206,7 @@ workflows:
               kind: workflow
               definitionId: cognitive/cap.implement.resolve-conflicts
               use:
-                inputs:
-                  repo_path: "$.workflow.input.repo_path"
+                inputs: {}
                 outputs:
                   "$.context.resolved_files":     resolved_files
                   "$.context.resolution_summary": resolution_summary
@@ -225,7 +223,7 @@ workflows:
             executor:
               kind: script
               subject: run.git.merge-finish
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
                 - "$.context.resolved_files"
             output:
@@ -257,7 +255,7 @@ workflows:
             executor:
               kind: script
               subject: run.git.push-pr
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
                 - "$.context.branch_ref"
                 - "$.context.base_ref"

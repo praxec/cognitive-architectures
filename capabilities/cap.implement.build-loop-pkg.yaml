@@ -28,7 +28,6 @@ workflows:
     snippet:
       inputs:
         plan:      { type: object, required: true }
-        repo_path: { type: string, required: true }
       outputs:
         result:      { type: object }
         tests_added: { type: integer }
@@ -112,7 +111,7 @@ workflows:
             executor:
               kind: script
               subject: verify.cargo.cwd
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
             output:
               build_passed:  "$.output.json.passed"
               build_summary: "$.output.json.summary"
@@ -251,7 +250,7 @@ workflows:
             executor:
               kind: script
               subject: run.git.commit-slice
-              workingDirectory: "$.workflow.input.repo_path"
+              workingDirectory: "$.run.repo_root"
               args:
                 - "$.context.commit_message"
                 - "$.context.files_written"

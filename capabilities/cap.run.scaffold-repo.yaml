@@ -14,11 +14,9 @@ workflows:
       CI, README, git init + initial commit) at the target path.
     snippet:
       inputs:
-        repo_path:  { type: string, required: true }
         crate_name: { type: string, required: true }
       outputs:
         scaffolded: { type: boolean }
-        repo_path:  { type: string }
     initialState: ready
     states:
       ready:
@@ -31,7 +29,7 @@ workflows:
               kind: script
               subject: run.scaffold.cargo-mcp
               args:
-                - "$.workflow.input.repo_path"
+                - "$.run.repo_root"
                 - "$.workflow.input.crate_name"
             # The script executor wraps stdout: the parsed script JSON is at
             # $.output.json.* (alongside $.output.{exitCode,success,stdout,...}).

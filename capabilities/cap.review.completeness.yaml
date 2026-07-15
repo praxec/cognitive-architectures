@@ -17,7 +17,6 @@ workflows:
       emit a typed verdict + verbatim-evidence findings + health_score.
     snippet:
       inputs:
-        repo_path:    { type: string, required: true }
         diff_against: { type: string }
       outputs:
         verdict:      { type: string, enum: [approved, needs-revision, rejected] }
