@@ -14,6 +14,22 @@ scripts:
       # hop_slot, which sets treatNonZeroAsFailure:false) read the full verifyOut
       # from $.output.json.
       #
+      # ACTIONABLE FAILURES (FB-5, 2026-07-15): on a FAILED build, this gate does
+      # NOT collapse to a one-line summary. It PARSES the dotnet build/test output
+      # for compiler diagnostics of the form
+      #   File.cs(12,34): error CS0117: 'Assert' has no definition for 'Equal' [P.csproj]
+      # and emits ONE structured `finding` per unique error
+      #   { file, line, column, rule_id, severity, message }
+      # AND folds the same error lines into `summary`. The implement leaf binds
+      # `context.build_issues` from this verifyOut's `summary` (the flow's
+      # scoped/backstop gate does `build_issues: $.context.<gate>_out.summary`), so
+      # the fixing agent receives the CONCRETE compiler errors to fix — not the
+      # useless "fail (mode: native)" one-liner that made the C# dogfood run repeat
+      # the same mistake for 3 iterations. This is the LOG-DRIVEN-FIX pattern: the
+      # gate surfaces the real diagnostics, not a verdict. The pass/fail verdict is
+      # UNCHANGED (a genuine failure stays a failure); only the failure payload is
+      # enriched.
+      #
       # Test filter matches a common CI gate: everything EXCEPT integration tests
       # (`Category!=IntegrationTest`). Override with $DOTNET_TEST_FILTER.
       #
@@ -61,6 +77,14 @@ scripts:
       cwd="${1:-$PWD}"
       test_filter="${DOTNET_TEST_FILTER:-Category!=IntegrationTest}"
 
+      # JSON-string-safe body for stdin (no surrounding quotes): escape backslash
+      # and doublequote; collapse embedded newlines to a literal \n so a multi-line
+      # value (e.g. the enriched summary) stays a single valid JSON string.
+      json_escape() {
+        sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+          | awk 'BEGIN{ORS=""} NR>1{printf "\\n"} {printf "%s", $0}'
+      }
+
       # Resolve how to invoke the SDK. dn <args...> runs `dotnet <args...>` in $cwd.
       if [ -n "${DOTNET_CMD:-}" ]; then
         dn() { ( cd "$cwd" 2>/dev/null; $DOTNET_CMD "$@" ); }
@@ -74,35 +98,99 @@ scripts:
         dn() { powershell.exe -NoProfile -Command "cd '$winpath'; dotnet $*" 2>&1; }
         mode="wsl:powershell.exe"
       else
-        printf '{"status":"not_evaluated","summary":"no dotnet SDK found (native, $DOTNET_CMD, or powershell.exe)","criteria":[],"findings":[{"id":"toolchain","detail":"dotnet unavailable in this environment"}],"provenance":{"stack":"language:dotnet","source":"pack"}}\n'
+        printf '{"status":"not_evaluated","summary":"no dotnet SDK found (native, $DOTNET_CMD, or powershell.exe); dotnet unavailable in this environment","criteria":[],"findings":[],"provenance":{"stack":"language:dotnet","source":"pack"}}\n'
         exit 1
       fi
 
       crit() { printf '{"id":"%s","met":%s,"evidence":"%s"}' "$1" "$2" "$3"; }
       STATUS="pass"
 
-      if dn build --nologo >&2; then
+      # Capture build/test output so we can BOTH stream it to stderr (logs) AND
+      # parse compiler diagnostics out of it for the failure payload.
+      build_out=""
+      test_out=""
+
+      if build_out=$(dn build --nologo 2>&1); then
+        printf '%s\n' "$build_out" >&2
         c_build=$(crit build true "dotnet build succeeded")
       else
+        printf '%s\n' "$build_out" >&2
         c_build=$(crit build false "dotnet build failed"); STATUS="fail"
       fi
 
       # Only run tests if build passed (a failed build makes test output noise).
       if [ "$STATUS" = "pass" ]; then
-        if dn test --nologo --filter "$test_filter" >&2; then
+        if test_out=$(dn test --nologo --filter "$test_filter" 2>&1); then
+          printf '%s\n' "$test_out" >&2
           c_test=$(crit test true "dotnet test (filter: $test_filter) green")
         else
+          printf '%s\n' "$test_out" >&2
           c_test=$(crit test false "dotnet test (filter: $test_filter) failed"); STATUS="fail"
         fi
       else
         c_test=$(crit test false "skipped: build failed")
       fi
 
-      # provenance must match the CLOSED verifyOut provenance $defs ({stack, source})
-      # exactly as the rust/generic gates do — an extra key (e.g. `mode`) makes the
-      # cap.verify.dotnet SUB-WORKFLOW (kind: workflow) path fail cap.output.schema_violation
-      # and discards an otherwise-correct verdict. So `mode` rides in `summary`, not provenance.
-      printf '{"status":"%s","summary":"dotnet build + test: %s (mode: %s)","criteria":[%s,%s],"findings":[],"provenance":{"stack":"language:dotnet","source":"pack"}}\n' \
-        "$STATUS" "$STATUS" "$mode" "$c_build" "$c_test"
+      # ── PARSE compiler diagnostics from the combined build+test output ──
+      # A dotnet/MSBuild error line is:
+      #   <file>(<line>,<col>): error <CODE>: <message> [<project>]
+      # (the column and the trailing [project] are optional). We surface ERROR
+      # severities only — those are the fix-driving diagnostics; warnings are noise
+      # for a red->green fix loop. Duplicate lines (dotnet re-emits per TFM/project)
+      # are de-duped so the agent sees each error once.
+      all_output=$(printf '%s\n%s\n' "$build_out" "$test_out" | tr -d '\r')
+      mapfile -t diag_lines < <(printf '%s\n' "$all_output" \
+        | grep -E '\([0-9]+(,[0-9]+)?\): error [A-Za-z][A-Za-z0-9]+: ' \
+        | awk '!seen[$0]++')
+
+      re_col='^(.+)\(([0-9]+),([0-9]+)\): error ([A-Za-z][A-Za-z0-9]+): (.+)$'
+      re_nocol='^(.+)\(([0-9]+)\): error ([A-Za-z][A-Za-z0-9]+): (.+)$'
+      findings_items=()
+      diag_text=""
+      diag_count=0
+      for line in "${diag_lines[@]}"; do
+        if [[ "$line" =~ $re_col ]]; then
+          efile=$(printf '%s' "${BASH_REMATCH[1]}" | json_escape)
+          ln="${BASH_REMATCH[2]}"; col_json=",\"column\":${BASH_REMATCH[3]}"
+          code="${BASH_REMATCH[4]}"
+          emsg=$(printf '%s' "${BASH_REMATCH[5]}" | json_escape)
+        elif [[ "$line" =~ $re_nocol ]]; then
+          efile=$(printf '%s' "${BASH_REMATCH[1]}" | json_escape)
+          ln="${BASH_REMATCH[2]}"; col_json=""
+          code="${BASH_REMATCH[3]}"
+          emsg=$(printf '%s' "${BASH_REMATCH[4]}" | json_escape)
+        else
+          continue
+        fi
+        findings_items+=("{\"file\":\"$efile\",\"line\":$ln$col_json,\"rule_id\":\"$code\",\"severity\":\"error\",\"message\":\"$emsg\"}")
+        diag_text="${diag_text}- ${line}"$'\n'
+        diag_count=$((diag_count + 1))
+      done
+
+      if [ "${#findings_items[@]}" -gt 0 ]; then
+        findings_json="[$(IFS=,; echo "${findings_items[*]}")]"
+      else
+        findings_json="[]"
+      fi
+
+      # ── SUMMARY ── on pass, the terse verdict; on fail, the verdict PLUS the
+      # concrete per-error lines so `context.build_issues` (bound to summary) is
+      # actionable. `mode` still rides in summary (NOT provenance): provenance is a
+      # CLOSED {stack, source} $def, and an extra key fails cap.output.schema_violation
+      # and would discard an otherwise-correct verdict.
+      if [ "$STATUS" = "pass" ]; then
+        summary="dotnet build + test: pass (mode: $mode)"
+      elif [ "$diag_count" -gt 0 ]; then
+        summary="dotnet build + test: fail (mode: $mode) — ${diag_count} compiler error(s), fix EVERY one:"$'\n'"${diag_text%$'\n'}"
+      else
+        # Genuine failure with no parseable compiler diagnostic (e.g. a test
+        # assertion failure, or a build error in a form we don't parse). Keep the
+        # verdict; the streamed stderr log carries the detail.
+        summary="dotnet build + test: fail (mode: $mode) — see build/test log for detail (no compiler diagnostics parsed)"
+      fi
+      esummary=$(printf '%s' "$summary" | json_escape)
+
+      printf '{"status":"%s","summary":"%s","criteria":[%s,%s],"findings":%s,"provenance":{"stack":"language:dotnet","source":"pack"}}\n' \
+        "$STATUS" "$esummary" "$c_build" "$c_test" "$findings_json"
 
       [ "$STATUS" = "pass" ] && exit 0 || exit 1
