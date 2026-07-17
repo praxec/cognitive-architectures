@@ -1,0 +1,56 @@
+# capabilities/cap.inspect.react-fix-scope.yaml
+#
+# Wraps inspect.react.classify-fix-scope (design:
+# docs/react-antipatterns.review-plan-fix.md, "report-vs-fix config"). Why a
+# cap and not an inline script step in flow.fix.react-antipatterns: the same
+# V13 reason as cap.inspect.deliverable-route -- a bare transition `output:`
+# block does NOT seed a slot usable by a LATER `use.inputs` (only a child
+# capability's snippet-typed `use.outputs` does; confirmed against `praxec
+# check`, which rejected the inline-script version with UNREACHABLE_SLOT on
+# both `scope_paths` and `findings` once a downstream state tried to consume
+# them via `use.inputs`). Wrapping the deterministic script in a
+# snippet-typed capability gives the flow's slot table a real type for
+# `scope_paths`/`mechanical`/`judgment` to hand onward into
+# cap.implement.scope-bounded and cap.plan.diff-proposal.
+#
+# Verb `inspect` (the script-primary verb, V6) -- code decides the split, the
+# flow just branches on `mechanical_count`.
+
+workflows:
+  cap.inspect.react-fix-scope:
+    verb: inspect
+    lifecycle: experimental
+    description: >
+      Split adjudicated React-review findings by their Layer-D `fix_class`
+      tag (mechanical | judgment) and collect the mechanical group's unique
+      file set as `scope_paths` -- the exact shape cap.implement.scope-bounded
+      expects.
+    snippet:
+      inputs:
+        findings: { type: array, required: true }
+      outputs:
+        mechanical:       { type: array }
+        judgment:         { type: array }
+        scope_paths:      { type: array }
+        mechanical_count: { type: integer }
+        judgment_count:   { type: integer }
+    initialState: ready
+    states:
+      ready:
+        goal: Split findings by fix_class; collect the mechanical scope_paths.
+        transitions:
+          classify:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.react.classify-fix-scope
+              args:
+                - "$.workflow.input.findings"
+            output:
+              mechanical:       "$.output.json.mechanical"
+              judgment:         "$.output.json.judgment"
+              scope_paths:      "$.output.json.scope_paths"
+              mechanical_count: "$.output.json.mechanical_count"
+              judgment_count:   "$.output.json.judgment_count"
+      done: { terminal: true }

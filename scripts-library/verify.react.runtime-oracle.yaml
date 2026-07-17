@@ -1,0 +1,132 @@
+# scripts-library/verify.react.runtime-oracle.yaml
+#
+# Layer C of the React anti-pattern review pipeline (design:
+# docs/react-antipatterns.review-plan-fix.md) -- the PLUGGABLE, AUTO-DETECTED,
+# OPTIONAL runtime oracle. Enhancement only: Layers A/B/D are a complete,
+# honest capability without this script ever running.
+#
+# Detection order:
+#   1. $2 / ORACLE_COMMAND (profile override) -- the repo profile's
+#      `oracle_command`, when the generic auto-detection below would guess
+#      wrong for this repo's actual test invocation.
+#   2. vitest or jest configured AND @testing-library/react present -- run the
+#      repo's own "test" npm script (non-watch), or a directly-invoked
+#      `vitest run` / `jest --ci` fallback.
+#   3. a `test-storybook` script in package.json -- run it.
+#   4. none of the above -- emit oracle: "none", ran: false, warnings: [], and
+#      a `degrade_reason` string. THERE IS NO FOURTH BRANCH THAT ASSUMES CLEAN.
+#      A capability that reads this output may only call a finding CONFIRMED
+#      when `ran == true` -- never on an absent oracle, no matter how
+#      confident the LLM sounds (THE LAW: verification is earned from
+#      evidence, never asserted by the thing being verified).
+#
+# `ran` means "we actually invoked the oracle command," independent of its
+# exit code -- a real test-suite failure for unrelated reasons still counts as
+# a real run; only "no oracle command was ever invoked" sets ran: false. The
+# captured stdout+stderr is scraped for a fixed set of known React runtime-
+# warning signatures (key warnings, act() warnings, uncontrolled<->controlled
+# input drift, unmounted-component updates, update-depth-exceeded loops).
+#
+# Self-sufficiency (mirrors verify.ts.green / verify.dotnet.green): never
+# installs anything into the target repo; a hard wall-clock budget
+# (ORACLE_TIMEOUT_SECONDS, default 300) via `timeout` so this deterministic
+# gate can never hang a flow.
+#
+# Args:
+#   $1 / REPO_PATH       -- repo directory
+#   $2 / ORACLE_COMMAND  -- optional repo-profile override (verbatim shell command)
+#
+# Emits JSON on stdout: { oracle, ran, exit_code, warnings[] (text,
+# matched_pattern), degrade_reason }. Read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  verify.react.runtime-oracle:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      REPO_PATH="${1:-${REPO_PATH:?repo_path required (arg 1 or \$REPO_PATH)}}"
+      ORACLE_COMMAND="${2:-${ORACLE_COMMAND:-}}"
+      TIMEOUT_S="${ORACLE_TIMEOUT_SECONDS:-300}"
+
+      emit_none() {
+        jq -n --arg reason "$1" \
+          '{oracle: "none", ran: false, exit_code: null, warnings: [], degrade_reason: $reason}'
+        exit 0
+      }
+
+      if [ ! -d "$REPO_PATH" ]; then
+        emit_none "repo_path not found: $REPO_PATH"
+      fi
+      if [ ! -f "$REPO_PATH/package.json" ]; then
+        emit_none "no package.json at repo_path -- not a node/React project, or repo_path is wrong"
+      fi
+
+      TIMEOUT_BIN=""
+      command -v timeout >/dev/null 2>&1 && TIMEOUT_BIN="timeout ${TIMEOUT_S}s"
+
+      cmd=""
+      oracle=""
+
+      if [ -n "$ORACLE_COMMAND" ]; then
+        oracle="profile-command"
+        cmd="$ORACLE_COMMAND"
+      else
+        deps_json="$(jq -c '(.dependencies // {}) + (.devDependencies // {})' "$REPO_PATH/package.json" 2>/dev/null || echo '{}')"
+        has() { printf '%s' "$deps_json" | jq -e --arg k "$1" 'has($k)' >/dev/null 2>&1; }
+        has_script() { jq -e --arg k "$1" '.scripts // {} | has($k)' "$REPO_PATH/package.json" >/dev/null 2>&1; }
+
+        if has "@testing-library/react" && { has vitest || has jest; }; then
+          if has_script test; then
+            oracle="$(has vitest && echo vitest+rtl || echo jest+rtl)"
+            cmd="npm run test --silent -- --run || npm run test --silent"
+          elif has vitest; then
+            oracle="vitest+rtl"; cmd="npx --no-install vitest run"
+          elif has jest; then
+            oracle="jest+rtl"; cmd="npx --no-install jest --ci"
+          fi
+        elif has_script test-storybook; then
+          oracle="storybook-test-runner"
+          cmd="npm run test-storybook --silent"
+        fi
+      fi
+
+      if [ -z "$cmd" ]; then
+        emit_none "no vitest/jest + @testing-library/react config and no test-storybook script found -- Layer C skipped; findings will be reported as PLAUSIBLE, never CONFIRMED"
+      fi
+
+      TMP="$(mktemp)"
+      trap 'rm -f "$TMP"' EXIT
+      ( cd "$REPO_PATH" && CI=1 eval "$TIMEOUT_BIN $cmd" ) >"$TMP" 2>&1
+      exit_code=$?
+
+      # Known React runtime-warning signatures (id -> substring to grep for).
+      declare -A SIGNATURES=(
+        [unstable-list-key]='Each child in a list should have a unique'
+        [duplicate-key]='Encountered two children with the same key'
+        [update-unmounted]="Can't perform a React state update on an unmounted component"
+        [update-depth-exceeded]='Maximum update depth exceeded'
+        [update-while-rendering]='Cannot update a component.*while rendering a different component'
+        [uncontrolled-to-controlled]='changing an uncontrolled input to be controlled'
+        [controlled-to-uncontrolled]='changing a controlled input to be uncontrolled'
+        [act-warning]='was not wrapped in act'
+        [failed-prop-type]='Failed prop type'
+      )
+
+      warnings="[]"
+      for id in "${!SIGNATURES[@]}"; do
+        pattern="${SIGNATURES[$id]}"
+        hits="$(grep -E "$pattern" "$TMP" 2>/dev/null | head -20 || true)"
+        [ -z "$hits" ] && continue
+        w="$(printf '%s' "$hits" | jq -R -s --arg id "$id" \
+          'split("\n") | map(select(length > 0)) | map({matched_pattern: $id, text: .[0:300]})')"
+        warnings="$(printf '%s\n%s\n' "$warnings" "$w" | jq -s '[.[][]]')"
+      done
+
+      jq -n \
+        --arg oracle "$oracle" \
+        --argjson exit_code "$exit_code" \
+        --argjson warnings "$warnings" \
+        '{oracle: $oracle, ran: true, exit_code: $exit_code, warnings: $warnings, degrade_reason: null}'

@@ -1,0 +1,90 @@
+# skills/review.react.antipatterns-skeptic.yaml
+#
+# Layer D (fuzzy half) of the React anti-pattern review pipeline (design:
+# docs/react-antipatterns.review-plan-fix.md). The adversarial pass the
+# owner's original review prompt lacked. Mirrors
+# review.use-case-falsification's shape exactly: the model supplies ONE
+# observation per item (here: one refute/uphold vote per finding, per
+# skeptic pass) and never decides the final outcome -- the deterministic
+# adjudicator (verify.react.adjudicate-findings) folds the votes and computes
+# whether a finding survives.
+
+skills:
+  review.react.antipatterns-skeptic:
+    verb: review
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      # Adversarial skeptic -- React finding pressure-test
+
+      You are three INDEPENDENT skeptical senior reviewers pressure-testing
+      someone else's finding list (`$.context.raw_findings`, from Layer B).
+      Your job is to try to REFUTE each finding, not to rubber-stamp it. The
+      default position for every finding is REFUTE -- a finding only survives
+      your pass if the evidence genuinely convinces you it is real.
+
+      ## Objective
+
+      For EACH finding in `$.context.raw_findings`, cast exactly THREE
+      independent votes (as if three different skeptical reviewers looked at
+      it separately, each reasoning from a fresh, adversarial starting point --
+      do not let one vote anchor the next). For each vote, decide `refute`
+      (true = you are NOT convinced this is real, false = you ARE convinced)
+      and give a one-sentence `rationale`. You do NOT decide whether the
+      finding survives overall -- majority-refute across the three votes is
+      computed downstream, deterministically. Submit `votes` as a FLAT array
+      (three entries per finding, `finding_id` on each).
+
+      ## Constraints
+
+      - **Default to refute.** A finding needs to actually convince you --
+        vague, plausible-sounding, or "probably right" is a REFUTE, not an
+        uphold. Require the SAME evidence discipline Layer B was held to: does
+        the quoted `evidence` actually show the claimed misuse, in context?
+      - **Attack the weakest point of each finding**, not the strongest:
+        could the flagged code be intentional and correct (e.g. a `key={index}`
+        on a list that is provably append-only and never reordered)? Could the
+        "missing" cleanup actually be handled elsewhere (a cleanup registered
+        via a ref callback, not `return () =>`)? Could the "mutation" be on a
+        local copy, not the actual state variable?
+      - **Vary the three votes genuinely** -- don't emit the same
+        rationale three times. If you cannot find three genuinely distinct
+        angles of attack, it is fine for votes to agree, but say why
+        independently each time (three separate sentences, not one copied).
+      - **You do not have new file-read access here** -- work from the
+        `evidence` field Layer B already quoted, plus `$.context.static_candidates`
+        / `$.context.runtime_result` if referenced. If the evidence Layer B
+        quoted is too thin to judge at all, that thinness is itself grounds
+        for a REFUTE vote ("insufficient evidence to confirm").
+      - **Do not invent a verdict field.** Only `finding_id`, `refute`,
+        `rationale` per vote. The adjudicator computes CONFIRMED/PLAUSIBLE/
+        killed from your votes plus runtime corroboration you cannot see.
+
+      ## Procedure
+
+      1. For each finding, read its `evidence`, `failure_scenario`, and
+         `root_cause`.
+      2. Cast vote 1: could this evidence be explained by something benign?
+      3. Cast vote 2: is the `remediation` actually behavior-preserving, or
+         does the finding itself misunderstand what the code does?
+      4. Cast vote 3: is the `category`/`fix_class` classification itself
+         defensible, or does miscategorization suggest the finding wasn't
+         thought through?
+      5. Submit all votes, flattened, one array.
+
+      ## Output contract
+
+      Submit `votes`:
+      ```
+      [ { finding_id, refute: <bool>, rationale: <string> }, ... ]
+      ```
+      Exactly three entries per finding_id present in `$.context.raw_findings`.
+
+      ## Verification (self-check before emitting)
+
+      - Every finding_id in `$.context.raw_findings` has exactly three votes.
+      - No vote defaults to uphold (`refute: false`) without a rationale that
+        cites the actual evidence.
+      - The three votes per finding are not copy-pasted from each other.
+      - You did not add a verdict, severity, or ranking field -- only the raw
+        votes.

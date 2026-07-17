@@ -1,0 +1,302 @@
+# orchestrators/flow.fix.react-antipatterns.yaml
+#
+# The fix workflow for the React anti-pattern suite (design:
+# docs/react-antipatterns.review-plan-fix.md, "report-vs-fix config").
+# CONFIG-DRIVEN autonomy via `mode: report | fix` (default report --
+# safety-over-completeness). One `reviewing` step already carries all four
+# layers (cap.review.react-antipatterns is self-contained; see the design
+# doc's "where this bends the requested shape" for why adversarial-verify is
+# NOT a second top-level state here), then branches:
+#
+#   reviewing -> mode_gate
+#     report -> reporting (terminal; nothing touched)
+#     fix    -> classifying (mechanical vs judgment split, by the Layer-D
+#                             fix_class tag)
+#                 -> autonomy_gate
+#                      no mechanical findings -> done_nothing_to_fix
+#                      oracle present (Layer C's oracle_status.ran)
+#                        -> applying_mechanical (cap.implement.scope-bounded,
+#                           REUSED verbatim -- an agent WITH write tools
+#                           applies the findings' own `remediation` text)
+#                        -> reprobing_runtime (verify.react.runtime-oracle,
+#                           the SAME Layer C script, run again post-edit)
+#                        -> gating_regression (verify.react.regression-gate:
+#                           oracle ran clean AND zero warnings)
+#                        -> gate_verdict: pass -> fixed_done
+#                                         fail -> needs_human (edit left
+#                                           uncommitted on disk; reason
+#                                           attached; operator decides revert
+#                                           vs hand-fix)
+#                      no oracle -> proposing_diffs (cap.plan.diff-proposal --
+#                           an agent with NO write tool; drafts the SAME
+#                           remediation as DATA) -> proposed_done
+#
+# Judgment-class findings are NEVER auto-applied on any path -- they ride in
+# $.context.judgment_findings on every fix-mode terminal for the operator to
+# read, in both the gated and no-oracle branches.
+#
+# Requires: cognitive/cap.review.react-antipatterns,
+# cognitive/cap.implement.scope-bounded (existing, reused),
+# cognitive/cap.plan.diff-proposal, cognitive/cap.inspect.react-fix-scope, and
+# the verify.react.runtime-oracle / verify.react.regression-gate scripts.
+
+workflows:
+  flow.fix.react-antipatterns:
+    lifecycle: experimental
+    description: >
+      Review a React codebase for anti-patterns (the full four-layer
+      cap.review.react-antipatterns gate), then either report the findings or
+      autonomously fix the mechanical-class subset behind a regression gate
+      (oracle green + zero runtime warnings). Judgment-class findings are
+      always findings-only. No regression oracle in the target repo means no
+      autonomous apply -- fixes are proposed as diffs instead.
+    inputs:
+      mode:          { type: string, enum: [report, fix], default: report }
+      react_profile: { type: object, default: {} }
+    outputs:
+      findings:            { type: array }
+      oracle_status:        { type: object }
+      counts:               { type: object }
+      mechanical_count:     { type: integer }
+      judgment_count:        { type: integer }
+      judgment_findings:     { type: array }
+      gate_pass:             { type: boolean }
+      gate_reason:           { type: string }
+      diffs:                 { type: array }
+    initialContext:
+      # Seeded so a guard can never hit GUARD_UNSET_SLOT on a path where an
+      # upstream step chain-failed before writing its real output (the
+      # documented unresolved-arg-path poka-yoke: never guard directly on a
+      # context path that might be absent -- coalesce to a closed value).
+      # `oracle_ran` is `autonomy_gate`'s guard target -- a flattened
+      # TOP-LEVEL boolean (cap.review.react-antipatterns' own mirror of
+      # oracle_status.ran), not a nested field read, per the same poka-yoke:
+      # `praxec fuzz`'s nested mock-sub-workflow execution could leave a
+      # NESTED field on `oracle_status` genuinely unresolved on a simulated
+      # chain-failure path even with `oracle_status` itself seeded; a
+      # top-level scalar has no such nested-resolution gap.
+      findings: []
+      killed: []
+      suppressed: []
+      counts: {}
+      oracle_status: { ran: false }
+      oracle_ran: false
+      mechanical_count: 0
+      judgment_count: 0
+      judgment_findings: []
+      gate_pass: false
+      gate_reason: ""
+      diffs: []
+    initialState: seeding
+    states:
+
+      seeding:
+        goal: Seed mode + profile from inputs (guards need a context writer).
+        transitions:
+          seed:
+            target: reviewing
+            actor: deterministic
+            executor: { kind: noop }
+            output:
+              mode:          "$.workflow.input.mode"
+              react_profile: "$.workflow.input.react_profile"
+
+      # All four layers live inside this one capability (design doc's
+      # "where this bends the requested shape").
+      reviewing:
+        goal: Run the full four-layer React anti-pattern review.
+        transitions:
+          review:
+            target: mode_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.react-antipatterns
+              use:
+                inputs:
+                  react_profile: "$.context.react_profile"
+                outputs:
+                  "$.context.findings":      findings
+                  "$.context.killed":        killed
+                  "$.context.suppressed":    suppressed
+                  "$.context.oracle_status": oracle_status
+                  "$.context.oracle_ran":    oracle_ran
+                  "$.context.counts":        counts
+
+      mode_gate:
+        transitions:
+          report:
+            target: reporting
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.mode == 'report'" }
+          fix:
+            target: classifying
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.mode == 'fix'" }
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      # Report mode: findings only, nothing touched.
+      reporting:
+        terminal: true
+        outcome: success
+
+      # Deterministic split by the Layer-D fix_class tag. Wrapped as a
+      # capability (cap.inspect.react-fix-scope), not an inline script step --
+      # V13 needs a snippet-typed producer to seed the slot table before
+      # `scope_paths`/`mechanical_findings` can feed the `use.inputs` of the
+      # kind:workflow steps below (confirmed against `praxec check`; see the
+      # capability's own header comment).
+      classifying:
+        goal: Split findings into mechanical (auto-fix candidate) vs judgment (findings-only).
+        transitions:
+          classify:
+            target: autonomy_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.inspect.react-fix-scope
+              use:
+                inputs:
+                  findings: "$.context.findings"
+                outputs:
+                  "$.context.mechanical_findings": mechanical
+                  "$.context.judgment_findings":   judgment
+                  "$.context.scope_paths":         scope_paths
+                  "$.context.mechanical_count":    mechanical_count
+                  "$.context.judgment_count":      judgment_count
+
+      autonomy_gate:
+        transitions:
+          nothing_to_fix:
+            target: done_nothing_to_fix
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.mechanical_count == 0" }
+          gated:
+            target: applying_mechanical
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.mechanical_count > 0" }
+              - { kind: expr, expr: "$.context.oracle_ran == true" }
+          ungated:
+            target: proposing_diffs
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.mechanical_count > 0" }
+              - { kind: expr, expr: "$.context.oracle_ran == false" }
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      # GATED PATH -- an oracle exists, so an autonomous apply is permitted
+      # PROVIDED it survives the post-fix regression gate below.
+      applying_mechanical:
+        goal: Apply the mechanical-class findings' own remediation. Behavior-preserving only.
+        transitions:
+          apply:
+            target: reprobing_runtime
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.scope-bounded
+              use:
+                inputs:
+                  plan:
+                    instruction: >
+                      Apply each finding's own `remediation` exactly, scoped to
+                      its file/line. Behavior-preserving only -- do not
+                      restructure beyond what the finding describes.
+                    findings: "$.context.mechanical_findings"
+                  scope_paths: "$.context.scope_paths"
+                outputs:
+                  "$.context.edit_result": result
+
+      reprobing_runtime:
+        goal: Re-run the SAME Layer C oracle post-edit.
+        transitions:
+          reprobe:
+            target: gating_regression
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.react.runtime-oracle
+              args:
+                - "$.run.repo_root"
+                - "$.context.react_profile.oracle_command"
+            output:
+              post_fix_runtime: "$.output.json"
+
+      gating_regression:
+        goal: Compute the regression gate from the post-fix oracle run.
+        transitions:
+          gate:
+            target: gate_verdict
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.react.regression-gate
+              args:
+                - "$.context.post_fix_runtime"
+            output:
+              gate_pass:   "$.output.json.gate_pass"
+              gate_reason: "$.output.json.reason"
+
+      gate_verdict:
+        transitions:
+          pass:
+            target: fixed_done
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.gate_pass == true" }
+          fail:
+            target: needs_human
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.gate_pass == false" }
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      fixed_done:
+        terminal: true
+        outcome: success
+
+      # Gate failed: the edit is left on disk, uncommitted, with the reason
+      # attached -- the operator reverts (`git checkout --`) or hand-fixes.
+      # Behavior-preserving is the prime directive; this suite does not leave
+      # a failed autonomous edit silently in place.
+      needs_human:
+        terminal: true
+
+      # NO-GATE PATH -- no oracle in this repo. Draft diffs as data; nothing
+      # is applied ("no gate = no autonomous apply").
+      proposing_diffs:
+        goal: Draft remediation diffs for the mechanical findings, with no write tool.
+        transitions:
+          propose:
+            target: proposed_done
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.plan.diff-proposal
+              use:
+                inputs:
+                  findings: "$.context.mechanical_findings"
+                outputs:
+                  "$.context.diffs": diffs
+
+      proposed_done:
+        terminal: true
+        outcome: success
+
+      done_nothing_to_fix:
+        terminal: true
+        outcome: success
+
+      failed:
+        terminal: true
+        outcome: failure

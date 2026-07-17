@@ -1,0 +1,60 @@
+# capabilities/cap.plan.diff-proposal.yaml
+#
+# The no-gate degrade path for flow.fix.react-antipatterns (design:
+# docs/react-antipatterns.review-plan-fix.md, "report-vs-fix config": "no
+# oracle exists -> fixes are proposed as diffs but NOT auto-applied -- no gate
+# = no autonomous apply"). A generic, reusable primitive distinct from
+# cap.implement.scope-bounded: this capability's agent has NO file-write
+# tool -- it drafts remediation as DATA, never touches the working tree.
+# Verb `plan` (not `implement`): the same distinction cap.plan.fix already
+# draws against cap.implement.scope-bounded in flow.bugfix-from-error-log --
+# a plan is proposed, a separate (here: absent) implement step would apply
+# it. Single agent state, noop executor, same shape as cap.plan.draft /
+# cap.plan.fix.
+
+workflows:
+  cap.plan.diff-proposal:
+    verb: plan
+    lifecycle: experimental
+    description: >
+      Draft remediation diffs for a set of findings as structured DATA, with
+      no file-write tool available to the agent -- nothing is applied to
+      disk. The no-gate degrade path: when no regression oracle exists to
+      certify an autonomous apply, this is what the operator gets instead.
+    snippet:
+      inputs:
+        findings: { type: array, required: true }
+      outputs:
+        diffs: { type: array }
+    skills: [plan.diff-proposal]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Read $.workflow.input.findings (mechanical-class findings). Draft
+          one behavior-preserving remediation proposal per finding per the
+          plan.diff-proposal skill's output contract. You have NO file-write
+          tool in this state -- do not attempt one.
+        transitions:
+          submit_diffs:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [diffs]
+              properties:
+                diffs:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    required: [file, finding_id, patch]
+                    properties:
+                      file:        { type: string }
+                      finding_id:  { type: string }
+                      patch:       { type: string }
+                      rationale:   { type: string }
+            executor: { kind: noop }
+            output:
+              diffs: "$.arguments.diffs"
+      done: { terminal: true }

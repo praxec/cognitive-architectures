@@ -1,0 +1,74 @@
+# examples/react-antipatterns.yaml
+#
+# Minimal gateway config that DRIVES cognitive/flow.fix.react-antipatterns
+# live -- the config that wires the file-read-tooled review + skeptic agent
+# states end to end (mirrors examples/audit-docs-run.yaml's shape). The
+# concrete answer to "what do I need to run this?":
+#
+#   1. a durable store (sqlite) so state persists across `command`/
+#      `orchestrate` calls;
+#   2. a model binding (gateway.models_yaml) + a provider key on the process
+#      env (or ~/.praxec/providers.env) so the agent leaves (Layer B's
+#      reviewing, Layer D's skeptic_pass, cap.plan.react-feature,
+#      cap.plan.diff-proposal) resolve a real model;
+#   3. auto_drive ON with the review agent's ONLY tool need --
+#      `file:{{ $.run.repo_root }}` -- so Layer B reads real source instead of
+#      judging Layer A's grep snippets alone. No MCP connection is required by
+#      this suite at all (zero-config = generic React only; see the design
+#      doc's "generic core + optional repo profile");
+#   4. the cognitive-architectures repo, which supplies flow.fix.react-
+#      antipatterns + its capabilities, scripts, and skills.
+#
+# Validate:
+#   praxec check --config examples/react-antipatterns.yaml
+#
+# Drive -- REPORT mode (default; nothing touched):
+#   set -a; . ~/.config/praxec/providers.env; set +a
+#   praxec orchestrate --config examples/react-antipatterns.yaml \
+#     --model openrouter:deepseek/deepseek-v4-pro \
+#     --definition cognitive/flow.fix.react-antipatterns \
+#     --input '{"repo_path":"/path/to/target-react-repo"}'
+#
+# Drive -- FIX mode (mechanical class auto-applied ONLY behind the regression
+# gate; judgment class is always findings-only):
+#   praxec orchestrate --config examples/react-antipatterns.yaml \
+#     --model openrouter:deepseek/deepseek-v4-pro \
+#     --definition cognitive/flow.fix.react-antipatterns \
+#     --input '{"repo_path":"/path/to/target-react-repo","mode":"fix"}'
+#
+# `repo_path` resolves the run-ambient `$.run.repo_root` every state in this
+# suite reads from (verify.react.static-scan, verify.react.runtime-oracle,
+# and the `file:` tool root).
+version: "1.0.0"
+
+gateway:
+  principal: { subject: operator, roles: [human] }
+  # Affinity/tier -> provider:model chains for the auto-driven agent leaves.
+  models_yaml: /home/mc/.config/praxec/models.yaml
+
+praxec:
+  agents:
+    auto_drive: true
+    # Default leaf affinity; the `reviewing` state overrides to `review`
+    # (senior tier) per cap.review.react-antipatterns.
+    auto_drive_affinity: reasoning
+    auto_drive_max_seconds: 900
+    # The review agent's toolset -- file reads over the target repo ONLY. No
+    # MCP connection: this suite is generic-core, zero external dependency.
+    auto_drive_tools:
+      - "file:{{ $.run.repo_root }}"
+
+audit:
+  sink: stderr
+
+store:
+  kind: sqlite
+  path: /home/mc/.local/share/praxec/react-antipatterns.db
+
+# The cognitive-architectures resource repo: flow.fix.react-antipatterns +
+# its capabilities (cap.review.react-antipatterns, cap.plan.react-feature,
+# cap.plan.diff-proposal, cap.inspect.react-fix-scope,
+# cap.implement.scope-bounded [existing, reused]), its scripts-library
+# entries, and its skills.
+repos:
+  - path: /home/mc/working/cognitive-architectures

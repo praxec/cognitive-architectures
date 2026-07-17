@@ -1,0 +1,42 @@
+# scripts-library/verify.react.regression-gate.yaml
+#
+# The regression gate for flow.fix.react-antipatterns' autonomous-apply path
+# (design: docs/react-antipatterns.review-plan-fix.md, "report-vs-fix
+# config"). Consumes a POST-FIX re-run of `verify.react.runtime-oracle`
+# (reused verbatim -- the flow calls the same Layer C script again after
+# applying the mechanical fixes) and computes the single boolean a mechanical
+# fix needs to survive: oracle ran clean (exit 0) AND zero scraped React
+# runtime warnings. `ran == false` (no oracle in this repo) is a HARD FAIL,
+# not a skip -- "no gate = no autonomous apply" is the invariant this script
+# exists to enforce in code, not in an LLM's judgment.
+#
+# Args: $1 / RUNTIME_JSON -- the post-fix verify.react.runtime-oracle output.
+# Emits JSON: { gate_pass, reason }. Read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  verify.react.regression-gate:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      RUNTIME_JSON="${1:-${RUNTIME_JSON:-}}"
+      [ -z "$RUNTIME_JSON" ] && RUNTIME_JSON='{}'
+      printf '%s' "$RUNTIME_JSON" | jq -e 'type == "object"' >/dev/null 2>&1 \
+        || RUNTIME_JSON='{"ran": false}'
+
+      jq -n --argjson r "$RUNTIME_JSON" '
+        ($r.ran // false) as $ran
+        | ($r.exit_code // -1) as $exit_code
+        | (($r.warnings // []) | length) as $warn_count
+        | if ($ran | not) then
+            {gate_pass: false, reason: "no runtime oracle available post-fix -- cannot confirm regression-free; no gate means no autonomous apply"}
+          elif $exit_code != 0 then
+            {gate_pass: false, reason: ("post-fix oracle run exited " + ($exit_code | tostring) + " -- regression suspected")}
+          elif $warn_count > 0 then
+            {gate_pass: false, reason: (($warn_count | tostring) + " React runtime warning(s) present after the fix -- not warnings-clean")}
+          else
+            {gate_pass: true, reason: "oracle ran clean (exit 0) and zero React runtime warnings"}
+          end
+      '
