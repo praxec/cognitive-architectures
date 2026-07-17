@@ -52,6 +52,25 @@ workflows:
           `acceptance_criteria` (a testable list the built code must satisfy —
           the downstream deliverable-gap + acceptance gates check against it)
           and `risk` (low|medium|high|critical) + `blast_radius`.
+          TWO-PLAN STRUCTURE (docs/plan-types.develop-vs-execute.md): tag each
+          develop deliverable `metadata:{kind:"develop", scope:"<bounded-context>"}`
+          (an assembly / service / FE-tool boundary), then SEPARATE the
+          ExecutionPlan by appending, PER scope, an explicit acyclic
+          verification mini-waterfall so budgeted rework is ON the critical
+          path instead of an invisible loop:
+            D1..Dn(scope)
+              -> B-<scope>  {kind:"build", scope, build_command}; prereqs = all D in scope
+              -> Fb-<scope> {kind:"fix", phase:"build", scope, max_internal_iterations:3};
+                            prereqs=[B-<scope>]; estimated_effort_hours = BUDGETED build rework (~25-35% of scope dev hours)
+              -> T-<scope>  {kind:"test", scope, test_command}; prereqs=[Fb-<scope>]
+              -> Ft-<scope> {kind:"fix", phase:"test", scope, max_internal_iterations:3};
+                            prereqs=[T-<scope>]; estimated_effort_hours = BUDGETED test rework (~25-40% of scope dev hours)
+          B/Fb/T/Ft take unique marker owned_files (`.plan/{build,buildfix,test,testfix}/<scope>`) so
+          disjointness holds; the fix loop lives INSIDE each fix node (bounded
+          iterations) so the graph stays acyclic. A CROSS-SCOPE dependency keys
+          off the producing scope's `Ft-<scope>` (verified-done), never a raw
+          develop node. Owner-decision gates are `metadata:{kind:"gate"}` nodes
+          (no owned code) blocking the work they gate.
         transitions:
           submit_graph:
             target: done
