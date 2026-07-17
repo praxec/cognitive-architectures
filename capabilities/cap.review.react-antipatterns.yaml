@@ -1,0 +1,212 @@
+# capabilities/cap.review.react-antipatterns.yaml
+#
+# The full four-layer React anti-pattern review (design:
+# docs/react-antipatterns.review-plan-fix.md). A self-contained gate, on the
+# precedent of every existing multi-layer gate in this pack (cap.review.fmeca,
+# cap.review.doc-drift, cap.review.use-case-falsification): the fuzzy
+# producer/deterministic adjudicator split lives ENTIRELY inside one
+# capability rather than being spread across an orchestrator boundary.
+#
+#   scanning_static   (deterministic script) -- Layer A, ALWAYS ON. Cheap,
+#                      high-recall candidates: ESLint rules-of-hooks/
+#                      exhaustive-deps when configured (honest degrade when
+#                      not) + grep heuristics.
+#   detecting_runtime (deterministic script) -- Layer C, PLUGGABLE + AUTO-
+#                      DETECTED + OPTIONAL. Real React runtime warnings from
+#                      vitest/jest+RTL or a Storybook test-runner, or an
+#                      honest oracle:"none" degrade. Enhancement only --
+#                      Layers A/B/D alone are a complete, honest capability.
+#   reviewing         (agent, file-read tools via the driving gateway's
+#                      auto_drive_tools) -- Layer B, the senior-React-engineer
+#                      persona + full catalog (review.react.antipatterns).
+#                      Confirms/refutes Layer A candidates with real evidence;
+#                      sweeps independently for what static analysis cannot
+#                      see. Emits RAW findings -- no verdict.
+#   skeptic_pass      (agent) -- Layer D fuzzy half
+#                      (review.react.antipatterns-skeptic). Three independent
+#                      skeptic votes per finding, default-to-refute. No
+#                      verdict decided here either.
+#   adjudicating      (deterministic script) -- Layer D computed half
+#                      (verify.react.adjudicate-findings). Majority-refute
+#                      kills a finding; survivors get CONFIRMED (runtime-
+#                      corroborated) or PLAUSIBLE (not); repo-profile
+#                      suppressions applied. The model never self-certifies.
+#
+# `react_profile` (optional, default {}) is the generic-core + optional-
+# profile hook: `{ extra_rules[], suppressions[], oracle_command }`. Zero-
+# config = generic React only.
+#
+# Requires the `file:{{ $.run.repo_root }}` auto_drive_tools entry (mirrors
+# cap.review.doc-drift) so `reviewing` reads real source, not a digest alone.
+# Verb `review` is cognitive (SPEC §4, V6): mcp | agent | noop leaves allowed.
+
+workflows:
+  cap.review.react-antipatterns:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Four-layer React anti-pattern review: deterministic static scan, an
+      evidence-grounded senior-React-engineer LLM pass, an optional pluggable
+      runtime-warning oracle, and an adversarial skeptic-vote fold. Emits
+      findings verdicted CONFIRMED (runtime-corroborated) or PLAUSIBLE, in the
+      ReportFindings shape (verdict, category, file, line, failure_scenario,
+      summary), never asserting runtime confirmation when nothing ran.
+    snippet:
+      inputs:
+        react_profile: { type: object, default: {} }
+      outputs:
+        findings:      { type: array }
+        killed:        { type: array }
+        suppressed:    { type: array }
+        oracle_status: { type: object }
+        counts:        { type: object }
+    initialState: seeding
+    states:
+
+      # V6 (SPEC §4.1): a cognitive-verb (`review`) capability's INITIAL state
+      # must resolve to kind: mcp | noop | an allowlisted deterministic
+      # executor -- a bare `kind: script` is not permitted as the entry
+      # transition, even though later states in the same capability may use
+      # one freely. This no-op seed satisfies V6; scanning_static (Layer A)
+      # is the real first step.
+      seeding:
+        goal: Seed the pipeline.
+        transitions:
+          seed:
+            target: scanning_static
+            actor: deterministic
+            executor: { kind: noop }
+
+      # Layer A -- deterministic, always on.
+      scanning_static:
+        goal: Run the deterministic static scan; emit candidates.
+        transitions:
+          scan:
+            target: detecting_runtime
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.react.static-scan
+              args:
+                - "$.run.repo_root"
+                - "$.workflow.input.react_profile"
+            output:
+              static_result:     "$.output.json"
+              static_candidates: "$.output.json.candidates"
+
+      # Layer C -- deterministic, pluggable, auto-detected, optional.
+      detecting_runtime:
+        goal: Probe for a real runtime oracle; run it if present, else degrade honestly.
+        transitions:
+          detect:
+            target: reviewing
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.react.runtime-oracle
+              args:
+                - "$.run.repo_root"
+                - "$.workflow.input.react_profile.oracle_command"
+            output:
+              runtime_result: "$.output.json"
+
+      # Layer B -- agent, fuzzy. Evidence-grounded confirm/refute + independent
+      # sweep. Raw findings only, no verdict.
+      reviewing:
+        affinity: review
+        goal: >
+          You are reviewing React source with file-read tools. Read
+          $.context.static_candidates (Layer A's cheap, noisy candidates) and
+          $.context.runtime_result (Layer C's probe, if it ran). For each
+          candidate, open the file and confirm or refute it with real
+          evidence; independently sweep the touched files (and hooks/
+          components they call) for the anti-patterns static analysis cannot
+          see (Effects-as-derived-state, copied-props-into-state, impossible/
+          contradictory state, Effect chains). Submit `findings` per the
+          review.react.antipatterns skill's output contract -- raw, evidence-
+          backed, classified (category + fix_class), NO verdict field.
+        skills: [review.react.antipatterns]
+        transitions:
+          submit_findings:
+            target: skeptic_pass
+            actor: agent
+            inputSchema:
+              type: object
+              required: [findings]
+              properties:
+                findings:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    required: [file, line, category, summary]
+                    properties:
+                      id:               { type: string }
+                      file:             { type: string }
+                      line:             { type: integer }
+                      rule:             { type: string }
+                      category:         { type: string, enum: [correctness, maintainability, performance] }
+                      summary:          { type: string }
+                      failure_scenario: { type: string }
+                      evidence:         { type: string }
+                      confidence:       { type: string, enum: [high, medium, low] }
+                      root_cause:       { type: string }
+                      remediation:      { type: string }
+                      fix_class:        { type: string, enum: [mechanical, judgment] }
+            executor: { kind: noop }
+            output:
+              raw_findings: "$.arguments.findings"
+
+      # Layer D (fuzzy half) -- adversarial skeptic votes. No verdict here.
+      skeptic_pass:
+        goal: >
+          You are three independent skeptics pressure-testing
+          $.context.raw_findings. Default to REFUTE. Cast exactly three votes
+          per finding_id per the review.react.antipatterns-skeptic skill's
+          output contract. Submit `votes` as a flat array.
+        skills: [review.react.antipatterns-skeptic]
+        transitions:
+          submit_votes:
+            target: adjudicating
+            actor: agent
+            inputSchema:
+              type: object
+              required: [votes]
+              properties:
+                votes:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    required: [finding_id, refute]
+                    properties:
+                      finding_id: { type: string }
+                      refute:     { type: boolean }
+                      rationale:  { type: string }
+            executor: { kind: noop }
+            output:
+              skeptic_votes: "$.arguments.votes"
+
+      # Layer D (computed half) -- deterministic majority fold + runtime
+      # corroboration + suppressions. THE verdict is code-computed.
+      adjudicating:
+        goal: Fold skeptic votes and runtime corroboration into the final verdict.
+        transitions:
+          adjudicate:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.react.adjudicate-findings
+              args:
+                - "$.context.raw_findings"
+                - "$.context.skeptic_votes"
+                - "$.context.runtime_result"
+                - "$.workflow.input.react_profile.suppressions"
+            output:
+              findings:      "$.output.json.findings"
+              killed:        "$.output.json.killed"
+              suppressed:    "$.output.json.suppressed"
+              oracle_status: "$.output.json.oracle_status"
+              counts:        "$.output.json.counts"
+      done: { terminal: true }
