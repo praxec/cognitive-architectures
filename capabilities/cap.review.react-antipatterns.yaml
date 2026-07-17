@@ -59,6 +59,14 @@ workflows:
         killed:        { type: array }
         suppressed:    { type: array }
         oracle_status: { type: object }
+        # Flattened top-level mirror of oracle_status.ran, for callers.
+        # Poka-yoke (this pack's documented unresolved-arg-path failure
+        # class, e.g. inspect.stack.yaml): a guard must never read a NESTED
+        # field on a value that might not have been written on every path --
+        # coalesce to a closed, top-level scalar instead. A caller flow
+        # branching on Layer C's oracle result should guard on this field,
+        # not on `oracle_status.ran` directly.
+        oracle_ran:    { type: boolean }
         counts:        { type: object }
     initialState: seeding
     states:
@@ -208,5 +216,6 @@ workflows:
               killed:        "$.output.json.killed"
               suppressed:    "$.output.json.suppressed"
               oracle_status: "$.output.json.oracle_status"
+              oracle_ran:    "$.output.json.oracle_status.ran"
               counts:        "$.output.json.counts"
       done: { terminal: true }

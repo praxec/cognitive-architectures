@@ -68,12 +68,19 @@ workflows:
       # upstream step chain-failed before writing its real output (the
       # documented unresolved-arg-path poka-yoke: never guard directly on a
       # context path that might be absent -- coalesce to a closed value).
-      # `oracle_status.ran` in particular is a guard target in `autonomy_gate`.
+      # `oracle_ran` is `autonomy_gate`'s guard target -- a flattened
+      # TOP-LEVEL boolean (cap.review.react-antipatterns' own mirror of
+      # oracle_status.ran), not a nested field read, per the same poka-yoke:
+      # `praxec fuzz`'s nested mock-sub-workflow execution could leave a
+      # NESTED field on `oracle_status` genuinely unresolved on a simulated
+      # chain-failure path even with `oracle_status` itself seeded; a
+      # top-level scalar has no such nested-resolution gap.
       findings: []
       killed: []
       suppressed: []
       counts: {}
       oracle_status: { ran: false }
+      oracle_ran: false
       mechanical_count: 0
       judgment_count: 0
       judgment_findings: []
@@ -113,6 +120,7 @@ workflows:
                   "$.context.killed":        killed
                   "$.context.suppressed":    suppressed
                   "$.context.oracle_status": oracle_status
+                  "$.context.oracle_ran":    oracle_ran
                   "$.context.counts":        counts
 
       mode_gate:
@@ -173,13 +181,13 @@ workflows:
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.mechanical_count > 0" }
-              - { kind: expr, expr: "$.context.oracle_status.ran == true" }
+              - { kind: expr, expr: "$.context.oracle_ran == true" }
           ungated:
             target: proposing_diffs
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.mechanical_count > 0" }
-              - { kind: expr, expr: "$.context.oracle_status.ran == false" }
+              - { kind: expr, expr: "$.context.oracle_ran == false" }
           unexpected:
             target: failed
             actor: deterministic

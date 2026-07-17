@@ -266,12 +266,20 @@ four layers, then branches on `mode`.
   already does) sidesteps the check, but a wrapping capability is the more
   legible fix for a value multiple downstream states consume.
 - **GUARD_UNSET_SLOT**, caught by `praxec fuzz` (not `praxec check` — this
-  is a *runtime* mock-driven finding, not a static one): a guard reading a
-  nested path (`$.context.oracle_status.ran`) errors if `oracle_status`
-  itself was never written on some path (e.g. an upstream chain failure the
-  fuzzer deliberately injects). Fixed by seeding `oracle_status` (and every
-  other cross-state slot a guard reads) to a closed default in
-  `initialContext`, the same poka-yoke this pack's own `inspect.stack`
-  header comment and `flow.pressure-test.use-cases`'s seeding state already
-  document. After the fix, `praxec fuzz` reports 0 hard errors across all 83
-  loaded definitions (78 pre-existing + 5 new).
+  is a *runtime* mock-driven finding, not a static one), and reproduced only
+  through a NESTED `kind: workflow` call (fuzzing `cap.review.react-
+  antipatterns` standalone was always 100% clean): `autonomy_gate`'s guard on
+  `$.context.oracle_status.ran` intermittently errored under fuzz's mock
+  nested-sub-workflow execution, even with `oracle_status` itself seeded in
+  `initialContext` — the fuzzer's simulated chain-failure path can leave a
+  *nested field* on an otherwise-seeded object slot genuinely unresolved in a
+  way seeding the top-level slot didn't prevent. Fixed for good by following
+  this pack's own poka-yoke literally rather than half-applying it: never
+  guard on a nested field at all. `cap.review.react-antipatterns` now emits a
+  flattened top-level `oracle_ran: boolean` output (a mirror of
+  `oracle_status.ran`) alongside the full `oracle_status` object, and
+  `autonomy_gate` guards on that flat, `initialContext`-seeded scalar
+  instead. Reproduced 4/4 before the flattening, 0/6+ after, confirmed by
+  looping `praxec fuzz` directly (not just the single pass `scripts/
+  validate.sh` runs). After the fix, `praxec fuzz` reports 0 hard errors
+  across all 83 loaded definitions (78 pre-existing + 5 new), repeatably.
