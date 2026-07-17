@@ -12,3 +12,52 @@ skills:
       insert_before_symbol, insert_after_symbol, replace_range, create_file,
       delete_file, modify_manifest, add_test. Never propose shell. Never
       touch paths in `constraints.forbiddenPaths`.
+
+      # GROUND in real symbols — do NOT invent an API (F4)
+      Before you write code that names a type, function, method, trait, enum
+      variant, or module, you MUST have READ its real definition in this repo
+      (or be creating it, in-scope, in this same edit). Cite the file where each
+      cited symbol lives. NEVER invent a parallel API: if the plan mentions
+      `suggest_by_value` / `ModelEntry` / `Affinity`, use THOSE exact symbols as
+      they are actually defined — do not substitute a plausible-sounding
+      `MockCatalog::new()` / `Model::GPT4` / `resolve()` that does not exist.
+      A test (or any edit) that references an undefined symbol is a defect, not
+      a deliverable — it will not compile and it wastes the whole pass.
+
+      # FAIL LOUD when the deliverable is under-scoped (F4)
+      If completing the deliverable FAITHFULLY requires a NEW shared type,
+      function, or grammar that must live OUTSIDE your allowed scope_paths /
+      owned_files (e.g. a `RequirementSpec` / `ResolutionError` in
+      `model_resolver`, or a parse-grammar extension in `walk.rs`), do NOT
+      fabricate a local stand-in and do NOT hallucinate the missing type. STOP
+      and report it verbatim in your result as:
+        "deliverable under-scoped: needs <symbol> in <file> (outside scope)"
+      An honest under-scoped report is a SUCCESSFUL outcome; an invented API is
+      a failure. The orchestrator re-scopes or decomposes; you must not paper
+      over the gap.
+
+      # Rust: test modules MUST be cfg-gated (F4)
+      Any `mod tests` (or `mod test`) you add MUST carry `#[cfg(test)]` (either
+      `#[cfg(test)]` on the line immediately above, or inline
+      `#[cfg(test)] mod tests`). An un-gated test module compiles into the
+      normal build and breaks it. Never emit `mod tests` without the guard.
+
+      # Rust: EDITION 2024 rules (this workspace) (F3)
+      This workspace is edition 2024. Older-edition idioms from training data are
+      HARD ERRORS here — write edition-2024-correct Rust:
+      - `std::env::set_var` / `std::env::remove_var` are `unsafe` in 2024. In
+        tests (and everywhere) you MUST wrap them: `unsafe { std::env::set_var(
+        "K", "v") }`. A bare `set_var`/`remove_var` will NOT compile.
+      - Prefer not mutating process env in tests at all; if you must, keep it in
+        `unsafe {}` and serialize env-touching tests.
+      - Other 2024 tightenings apply (e.g. `gen` is a reserved keyword; unsafe
+        `extern` blocks). When unsure, read a neighboring 2024 file for the
+        current idiom rather than emitting a training-era form.
+      - Format-brace escaping: `{{` / `}}` only doubles inside a FORMAT string
+        (`format!`, `println!`). In a PLAIN string literal (e.g. an argument to
+        `Error::custom("…")`) `{{members}}` stays literally doubled in the output
+        — do not format-escape plain literals.
+      A `format.cargo.edition` fix-pass script (`cargo fix --edition-idioms` +
+      `cargo clippy --fix`) exists to auto-migrate idioms on a COMPILING tree; it
+      is not a substitute for writing 2024-correct code (cargo fix needs the
+      crate to build first).

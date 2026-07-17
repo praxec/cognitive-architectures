@@ -1,0 +1,115 @@
+# scripts-library/lint.rust.test-cfg-guard.yaml
+#
+# CHEAP anti-hallucination lint for the cohort recovery fix pass (F4,
+# 2026-07-17). The dogfood agent added a `mod tests` block WITHOUT
+# `#[cfg(test)]`, so it compiled into the NORMAL build (not just `cargo test`)
+# and broke it. `cargo test`/`clippy` catch an un-gated test module only when it
+# references undefined symbols; a test module that happens to compile still
+# pollutes the production build. This deterministic lint names the exact
+# anti-pattern with file:line BEFORE the recovery re-verify pays a full build.
+#
+# Scoped to the CHANGED files only (fix_scope.files) — it never scans the whole
+# repo, so it cannot newly fail a repo that was already green (no behavior change
+# to existing cohorts; this runs only on the new recovery path).
+#
+# Arg $1 = the fix_scope object as a JSON string (`$.context.fix_scope`); reads
+#          `.files`. Also accepts a bare JSON array of paths, or a
+#          whitespace/newline-separated path list. Repo-relative to repo_root
+#          (the script's workingDirectory).
+#
+# Emits verifyOut-shaped JSON on stdout ($.output.json):
+#   { status: pass|fail, summary, criteria:[…], findings:[{file,line,rule_id,
+#     severity,message}], provenance }
+# status = "fail" (exit 1) iff any un-gated test module is found.
+version: "1.0.0"
+scripts:
+  lint.rust.test-cfg-guard:
+    verb: lint
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Reject `mod tests` / `mod test` declarations lacking `#[cfg(test)]`.
+      #   $1 / FIX_SCOPE_JSON — fix_scope object | path array | path list.
+      set -uo pipefail
+      RAW="${1:-${FIX_SCOPE_JSON:-}}"
+
+      json_escape() {
+        sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+          | awk 'BEGIN{ORS=""} NR>1{printf "\\n"} {printf "%s", $0}'
+      }
+      crit() { printf '{"id":"%s","met":%s,"evidence":"%s"}' "$1" "$2" "$3"; }
+
+      # Resolve the file list: {files:[...]} object → its files; a bare [...] →
+      # itself; otherwise treat as a whitespace/newline path list.
+      files=()
+      if printf '%s' "$RAW" | jq -e 'type == "object" and (.files | type == "array")' >/dev/null 2>&1; then
+        mapfile -t files < <(printf '%s' "$RAW" | jq -r '.files[]')
+      elif printf '%s' "$RAW" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        mapfile -t files < <(printf '%s' "$RAW" | jq -r '.[]')
+      else
+        read -r -a files <<< "$RAW"
+      fi
+
+      findings_items=()
+      diag_text=""
+      violations=0
+      scanned=0
+
+      for f in "${files[@]}"; do
+        [ -n "$f" ] || continue
+        case "$f" in *.rs) ;; *) continue ;; esac
+        [ -f "$f" ] || continue
+        # Integration tests (tests/…) are a separate crate — cfg(test) not needed.
+        case "$f" in tests/*|*/tests/*) continue ;; esac
+        # A file that is entirely test-only via an inner attribute is exempt.
+        if grep -qE '^\s*#!\[cfg\(test\)\]' "$f"; then continue; fi
+        scanned=$((scanned + 1))
+
+        # awk scan: flag `[pub] mod test[s]` whose guard (`cfg(...test...)`) is
+        # neither inline nor on any of the up-to-3 preceding non-blank lines.
+        while IFS=: read -r lineno modline; do
+          [ -n "$lineno" ] || continue
+          efile=$(printf '%s' "$f" | json_escape)
+          emsg=$(printf '%s' "un-gated test module '${modline}' — add #[cfg(test)] (it compiles into the normal build)" | json_escape)
+          findings_items+=("{\"file\":\"$efile\",\"line\":$lineno,\"rule_id\":\"test-cfg-guard\",\"severity\":\"error\",\"message\":\"$emsg\"}")
+          diag_text="${diag_text}- ${f}:${lineno} un-gated mod tests"$'\n'
+          violations=$((violations + 1))
+        done < <(awk '
+          function guarded(s){ return (s ~ /cfg\([^)]*test/) }
+          {
+            # ring buffer of last 3 non-blank lines (before the current one)
+            if ($0 ~ /^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+tests?[[:space:]]*[{;]/) {
+              ok = guarded($0)
+              if (!ok) { for (i=1;i<=n;i++) if (guarded(buf[i])) { ok=1; break } }
+              if (!ok) {
+                line=$0; sub(/^[[:space:]]+/,"",line); sub(/[[:space:]]*$/,"",line)
+                print NR ":" line
+              }
+            }
+            if ($0 ~ /[^[:space:]]/) { buf[3]=buf[2]; buf[2]=buf[1]; buf[1]=$0; if(n<3)n++ }
+          }
+        ' "$f")
+      done
+
+      if [ "${#findings_items[@]}" -gt 0 ]; then
+        findings_json="[$(IFS=,; echo "${findings_items[*]}")]"
+      else
+        findings_json="[]"
+      fi
+
+      if [ "$violations" -gt 0 ]; then
+        STATUS="fail"
+        c=$(crit test_cfg_guard false "${violations} un-gated test module(s)")
+        summary="rust test-cfg-guard: fail — ${violations} un-gated test module(s), add #[cfg(test)]:"$'\n'"${diag_text%$'\n'}"
+      else
+        STATUS="pass"
+        c=$(crit test_cfg_guard true "no un-gated test modules in ${scanned} scanned file(s)")
+        summary="rust test-cfg-guard: pass (${scanned} file(s) scanned)"
+      fi
+      esummary=$(printf '%s' "$summary" | json_escape)
+
+      printf '{"status":"%s","summary":"%s","criteria":[%s],"findings":%s,"provenance":{"stack":"language:rust","source":"pack"}}\n' \
+        "$STATUS" "$esummary" "$c" "$findings_json"
+
+      [ "$STATUS" = "pass" ] && exit 0 || exit 1

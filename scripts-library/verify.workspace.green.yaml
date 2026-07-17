@@ -16,6 +16,23 @@ scripts:
       # `$.output.json` (that cap sets `treatNonZeroAsFailure: false` so a
       # `status: fail` verdict is CAPTURED, not turned into a transition error).
       #
+      # ACTIONABLE FAILURES (F1, 2026-07-17): on a FAILED gate this script does
+      # NOT emit `findings: []`. It PARSES cargo/rustc/clippy diagnostics of the
+      # rustc two-line form
+      #     error[E0308]: mismatched types
+      #        --> crates/praxec-core/src/walk.rs:176:20
+      # (and `error: <msg>` without a code), plus test panic locations
+      #     thread 'tests::x' panicked at crates/x/src/y.rs:42:9:
+      # into ONE structured `finding` per unique location
+      #     { file, line, column, rule_id, severity, message }
+      # AND folds the same error lines into `summary`. Without this file:line the
+      # cohort-verify attribution step (cap.diagnose.attribute-cohort-failure)
+      # has nothing to pin onto the owned_files partition, so a compile-error
+      # cohort dead-ends at failed_attributed with no remediation. The pass/fail
+      # verdict is UNCHANGED (a genuine failure stays a failure); only the failure
+      # payload is enriched — a red->green recovery loop can now scope a fix pass
+      # over the implicated files.
+      #
       # Optional positional $1 = working directory to verify (the verifyIn `cwd`
       # the slot forwards); defaults to the process PWD when absent.
       set -uo pipefail
@@ -23,30 +40,124 @@ scripts:
       cwd="${1:-$PWD}"
       cd "$cwd" 2>/dev/null || true
 
+      # JSON-string-safe body (no surrounding quotes): escape backslash and
+      # doublequote; collapse embedded newlines to a literal \n so a multi-line
+      # value (e.g. the enriched summary) stays a single valid JSON string.
+      json_escape() {
+        sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+          | awk 'BEGIN{ORS=""} NR>1{printf "\\n"} {printf "%s", $0}'
+      }
+
       # Build one verifyOut `criterion` object; met is a JSON bool literal.
       crit() { printf '{"id":"%s","met":%s,"evidence":"%s"}' "$1" "$2" "$3"; }
 
       STATUS="pass"
 
-      if cargo fmt --all -- --check >&2; then
+      # Capture each command's combined output so we can BOTH stream it to stderr
+      # (logs) AND parse rustc/clippy diagnostics out of it for the findings[].
+      fmt_out=""; lint_out=""; test_out=""
+
+      if fmt_out=$(cargo fmt --all -- --check 2>&1); then
+        printf '%s\n' "$fmt_out" >&2
         c_fmt=$(crit format true "cargo fmt --all -- --check clean")
       else
+        printf '%s\n' "$fmt_out" >&2
         c_fmt=$(crit format false "cargo fmt reported formatting violations"); STATUS="fail"
       fi
 
-      if cargo clippy --workspace --all-targets -- -D warnings >&2; then
+      if lint_out=$(cargo clippy --workspace --all-targets -- -D warnings 2>&1); then
+        printf '%s\n' "$lint_out" >&2
         c_lint=$(crit lint true "cargo clippy -D warnings clean")
       else
+        printf '%s\n' "$lint_out" >&2
         c_lint=$(crit lint false "cargo clippy reported warnings/errors"); STATUS="fail"
       fi
 
-      if cargo test --workspace >&2; then
+      if test_out=$(cargo test --workspace 2>&1); then
+        printf '%s\n' "$test_out" >&2
         c_test=$(crit test true "cargo test --workspace green")
       else
+        printf '%s\n' "$test_out" >&2
         c_test=$(crit test false "cargo test --workspace failed"); STATUS="fail"
       fi
 
-      printf '{"status":"%s","summary":"cargo fmt + clippy + test: %s","criteria":[%s,%s,%s],"findings":[],"provenance":{"stack":"language:rust","source":"pack"}}\n' \
-        "$STATUS" "$STATUS" "$c_fmt" "$c_lint" "$c_test"
+      # ── PARSE rustc/clippy diagnostics from the combined clippy+test output ──
+      # rustc emits diagnostics across TWO lines: the `error[CODE]: msg` header
+      # then, on a following line, `  --> file:line:col`. We pair them: an error
+      # header arms `pending`; the first `--> file:line:col` after it emits a
+      # finding. We surface ERROR severities only (the fix-driving diagnostics;
+      # warnings are noise for a red->green loop) and de-dupe on file:line:code
+      # (cargo re-emits per crate/target).
+      all_output=$(printf '%s\n%s\n' "$lint_out" "$test_out" | tr -d '\r')
+
+      re_err='^error(\[E[0-9]+\])?: (.+)$'
+      re_code='^error\[(E[0-9]+)\]'
+      re_loc='^[[:space:]]*--> (.+):([0-9]+):([0-9]+)'
+      re_loc2='^[[:space:]]*--> (.+):([0-9]+)$'
+      re_panic='panicked at (.+):([0-9]+):([0-9]+):'
+
+      declare -A seen=()
+      findings_items=()
+      diag_text=""
+      diag_count=0
+      have_pending=0
+      pending_code=""
+      pending_msg=""
+
+      emit_finding() { # file line col_json rule_id message  -> appends a finding + dedupes
+        local efile="$1" ln="$2" col_json="$3" code="$4" emsg="$5"
+        local key="${efile}:${ln}:${code}"
+        [ -n "${seen[$key]:-}" ] && return 0
+        seen[$key]=1
+        local jf jm
+        jf=$(printf '%s' "$efile" | json_escape)
+        jm=$(printf '%s' "$emsg" | json_escape)
+        findings_items+=("{\"file\":\"$jf\",\"line\":$ln$col_json,\"rule_id\":\"$code\",\"severity\":\"error\",\"message\":\"$jm\"}")
+        diag_text="${diag_text}- ${efile}:${ln} [${code}] ${emsg}"$'\n'
+        diag_count=$((diag_count + 1))
+      }
+
+      while IFS= read -r line; do
+        if [[ "$line" =~ $re_err ]]; then
+          pending_msg="${BASH_REMATCH[2]}"
+          if [[ "$line" =~ $re_code ]]; then
+            pending_code="${BASH_REMATCH[1]}"
+          else
+            pending_code="compile-error"
+          fi
+          have_pending=1
+        elif [[ "$have_pending" -eq 1 && "$line" =~ $re_loc ]]; then
+          emit_finding "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" ",\"column\":${BASH_REMATCH[3]}" "$pending_code" "$pending_msg"
+          have_pending=0
+        elif [[ "$have_pending" -eq 1 && "$line" =~ $re_loc2 ]]; then
+          emit_finding "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "" "$pending_code" "$pending_msg"
+          have_pending=0
+        elif [[ "$line" =~ $re_panic ]]; then
+          emit_finding "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" ",\"column\":${BASH_REMATCH[3]}" "test-panic" "test failed at this location (see log for assertion detail)"
+        fi
+      done <<< "$all_output"
+
+      if [ "${#findings_items[@]}" -gt 0 ]; then
+        findings_json="[$(IFS=,; echo "${findings_items[*]}")]"
+      else
+        findings_json="[]"
+      fi
+
+      # ── SUMMARY ── on pass, the terse verdict; on fail, the verdict PLUS the
+      # concrete per-error lines so a summary-bound `build_issues` is actionable.
+      if [ "$STATUS" = "pass" ]; then
+        summary="cargo fmt + clippy + test: pass"
+      elif [ "$diag_count" -gt 0 ]; then
+        summary="cargo fmt + clippy + test: fail — ${diag_count} diagnostic(s), fix EVERY one:"$'\n'"${diag_text%$'\n'}"
+      else
+        # Genuine failure with no parseable rustc diagnostic (e.g. a fmt-only
+        # violation, or a test assertion the panic parser didn't reach). Keep the
+        # verdict; the streamed stderr log carries the detail.
+        summary="cargo fmt + clippy + test: fail — see build/test log for detail (no rustc diagnostics parsed)"
+      fi
+      esummary=$(printf '%s' "$summary" | json_escape)
+
+      printf '{"status":"%s","summary":"%s","criteria":[%s,%s,%s],"findings":%s,"provenance":{"stack":"language:rust","source":"pack"}}\n' \
+        "$STATUS" "$esummary" "$c_fmt" "$c_lint" "$c_test" "$findings_json"
 
       [ "$STATUS" = "pass" ] && exit 0 || exit 1

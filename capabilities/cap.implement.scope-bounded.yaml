@@ -5,8 +5,10 @@ workflows:
     verb: implement
     lifecycle: experimental
     description: >
-      Apply edits constrained to scope_paths. Out-of-scope writes are
-      refused by the underlying edit tool.
+      Apply edits constrained to scope_paths, GROUNDED in the real cited
+      symbols (never invented). Out-of-scope writes are refused by the
+      underlying edit tool; an under-scoped deliverable is reported honestly,
+      not papered over with a hallucinated API.
     snippet:
       inputs:
         plan:        { type: object, required: true }
@@ -17,7 +19,14 @@ workflows:
     initialState: ready
     states:
       ready:
-        goal: Apply edits constrained to scope_paths.
+        goal: >
+          Apply edits constrained to scope_paths. GROUND every cited symbol in
+          its real definition in this repo (read it first) — never invent a
+          parallel API, and never emit a test that references an undefined
+          symbol. If a faithful implementation needs a new shared type outside
+          scope_paths, STOP and report "deliverable under-scoped: needs <symbol>
+          in <file>" rather than fabricating a local stand-in. Any `mod tests`
+          you add MUST be `#[cfg(test)]`-gated.
         transitions:
           submit_result:
             target: done

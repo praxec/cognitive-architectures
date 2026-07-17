@@ -1,0 +1,73 @@
+# scripts-library/inspect.fix-scope.from-findings.yaml
+#
+# DETERMINISTIC fix-scope derivation for the cohort recovery pass (F2,
+# 2026-07-17). When a shared verify milestone FAILS with structured findings
+# (file:line — produced by verify.workspace.green's F1 parser, or the dotnet
+# gate), a bounded recovery fix pass needs a concrete `scope_paths` array to
+# constrain the editing agent. Extracting the file set from findings[] is a
+# code job, not an LLM judgment ("deterministic tools over LLM math"): this
+# script folds the verifyOut findings into the unique union of cited files and
+# classifies them against the cohort's owned_files partition, so the flow can
+# scope the fix over exactly the implicated files (owned AND blast-radius
+# consumers the original owned_files scope forbade).
+#
+# Arg $1 = the failed verifyOut object as a JSON string (the flow passes
+#          `$.context.milestone_verify`; the script/mcp arg renderer stringifies
+#          an object value — same convention as audit.drift.aggregate's findings
+#          arg and inspect.stack's deliverable arg).
+# Arg $2 = the cohort object as a JSON string (`$.context.cohort`), carrying
+#          deliverables[].owned_files — the disjoint partition. Optional.
+#
+# Emits JSON on stdout, read at $.output.json.*:
+#   { files:[unique finding files], count, owned_files:[union of cohort owned],
+#     out_of_scope:[finding files no member owns — the blast radius],
+#     blast_radius: bool }
+# The recovery gate branches on the scalar `count` (>0 ⇒ there are file:line
+# findings to act on); `blast_radius`/`out_of_scope` are surfaced for evidence.
+version: "1.0.0"
+scripts:
+  inspect.fix-scope.from-findings:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Derive a bounded fix scope (unique file set) from a failed verifyOut.
+      #   $1 / VERIFY_JSON — the verifyOut object (JSON string). Defaults to {}.
+      #   $2 / COHORT_JSON — the cohort object (JSON string). Defaults to {}.
+      set -uo pipefail
+      # NB: keep the `{}` default OFF the parameter-expansion line — a literal
+      # `{}` inside `${x:-...}` leaks a stray brace in bash and corrupts the JSON.
+      VERIFY="${1:-${VERIFY_JSON:-}}"; [ -n "$VERIFY" ] || VERIFY='{}'
+      COHORT="${2:-${COHORT_JSON:-}}"; [ -n "$COHORT" ] || COHORT='{}'
+
+      # Fail-soft: a malformed upstream payload yields an empty, well-formed
+      # scope (count:0) rather than crashing the flow — the recovery gate then
+      # dead-ends honestly (nothing to scope a fix over) instead of hanging.
+      if ! printf '%s' "$VERIFY" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        jq -n --arg raw "$VERIFY" \
+          '{error:"verify arg was not a JSON object", files:[], count:0,
+            owned_files:[], out_of_scope:[], blast_radius:false, raw:$raw}'
+        exit 0
+      fi
+
+      # owned_files union across the cohort partition (defensive: tolerate a
+      # cohort with no deliverables[] / no owned_files).
+      OWNED='[]'
+      if printf '%s' "$COHORT" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        OWNED="$(printf '%s' "$COHORT" | jq -c '
+          [ .. | objects | select(has("owned_files")) | .owned_files[]? ] | unique
+        ' 2>/dev/null || printf '[]')"
+      fi
+
+      printf '%s' "$VERIFY" | jq --argjson owned "$OWNED" '
+        ([ .findings // [] | .[] | .file ] | unique) as $files
+        | ($files - $owned) as $oos
+        | {
+            files:        $files,
+            count:        ($files | length),
+            owned_files:  $owned,
+            out_of_scope: $oos,
+            blast_radius: (($oos | length) > 0)
+          }
+      '
