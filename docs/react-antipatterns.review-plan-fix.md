@@ -242,3 +242,36 @@ verify" state calling back into review internals would not have a clean
 capability to call without duplicating Layer D's contract. `flow.fix.react-
 antipatterns` therefore has one `reviewing` state that already carries all
 four layers, then branches on `mode`.
+
+**Engine constraints hit during implementation** (verified against a live
+`praxec` 0.0.24 binary, not assumed):
+
+- **V6 (SPEC §4.1)**: a cognitive-verb (`review`) capability's *initial*
+  state may not resolve to a bare `kind: script` executor (must be
+  `mcp`/`noop`/an allowlisted deterministic kind) — even though later states
+  in the *same* capability may use `kind: script` freely. `cap.review.react-
+  antipatterns` therefore opens on a trivial `seeding` noop state before
+  Layer A's real script step; this is purely a load-time formality, not a
+  behavior change.
+- **V13**: a plain `kind: script` transition's `output:` block does not seed
+  the flow's static slot table, so a later `use:.inputs` (feeding a nested
+  `kind: workflow` sub-call) cannot resolve a script-computed value directly
+  — confirmed by `praxec check` rejecting an earlier inline-script version of
+  the fix-scope classifier with `UNREACHABLE_SLOT`. This pack already has the
+  fix as an established idiom (`cap.inspect.deliverable-route`'s own header
+  comment names the identical reason); this PR follows it verbatim by adding
+  `cap.inspect.react-fix-scope` to wrap `inspect.react.classify-fix-scope`
+  with a typed `snippet.outputs`. A nested-object literal (e.g.
+  `subject: { digest: "$.context.repo_digest" }`, as `flow.audit-docs`
+  already does) sidesteps the check, but a wrapping capability is the more
+  legible fix for a value multiple downstream states consume.
+- **GUARD_UNSET_SLOT**, caught by `praxec fuzz` (not `praxec check` — this
+  is a *runtime* mock-driven finding, not a static one): a guard reading a
+  nested path (`$.context.oracle_status.ran`) errors if `oracle_status`
+  itself was never written on some path (e.g. an upstream chain failure the
+  fuzzer deliberately injects). Fixed by seeding `oracle_status` (and every
+  other cross-state slot a guard reads) to a closed default in
+  `initialContext`, the same poka-yoke this pack's own `inspect.stack`
+  header comment and `flow.pressure-test.use-cases`'s seeding state already
+  document. After the fix, `praxec fuzz` reports 0 hard errors across all 83
+  loaded definitions (78 pre-existing + 5 new).
