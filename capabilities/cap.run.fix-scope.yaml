@@ -1,0 +1,53 @@
+# capabilities/cap.run.fix-scope.yaml
+#
+# The RECOVERY-SCOPE leaf for the cohort flow (F2, 2026-07-17): deterministically
+# derive the bounded fix scope (the unique union of a failed verify's finding
+# files, classified against the cohort's owned_files partition) as a typed
+# `fix_scope` slot, so a bounded scope-bounded fix pass can be constrained to
+# exactly the implicated files (owned AND blast-radius consumers).
+#
+# Why a cap (not an inline script in flow.cohort.compiled-stack): a flow's slot
+# table (V13) only recognizes slots written by `inputs:` or a child workflow's
+# `use.outputs` — NOT by a transition `output:` block. The recovery fix pass
+# consumes `fix_scope.files` via `use.inputs`, so it must be a first-class slot;
+# wrapping the inspect.fix-scope.from-findings script in this snippet-typed cap
+# is the same move cap.run.codegen-milestone documents for the codegen result.
+#
+# The derivation is CODE, not an LLM judgment ("deterministic tools over LLM
+# math"): the file set is extracted with jq, never guessed.
+
+workflows:
+  cap.run.fix-scope:
+    verb: run
+    lifecycle: experimental
+    description: >
+      Derive the bounded fix scope from a failed verifyOut: the unique union of
+      finding files, classified against the cohort owned_files partition, as
+      {files, count, owned_files, out_of_scope, blast_radius}. Emitted as a typed
+      slot so a scope-bounded recovery pass can be constrained to the cited files.
+    snippet:
+      inputs:
+        # The failed verifyOut (status/summary/criteria/findings/provenance).
+        failure: { type: object, required: true }
+        # The raw cohort (deliverables[].id + owned_files) — the partition.
+        cohort:  { type: object, required: true }
+      outputs:
+        fix_scope: { type: object }
+    initialState: ready
+    states:
+      ready:
+        goal: Derive the unique fix-scope file set from the failed verify findings.
+        transitions:
+          derive:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.fix-scope.from-findings
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.workflow.input.failure"
+                - "$.workflow.input.cohort"
+            output:
+              fix_scope: "$.output.json"
+      done: { terminal: true }

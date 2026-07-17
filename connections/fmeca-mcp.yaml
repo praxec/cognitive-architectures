@@ -2,7 +2,9 @@
 # the deterministic, offline structured-FMECA engine. Can back the plan-FMECA /
 # design-FMECA gates (cap.review.fmeca), the way elicitation backs readiness.
 # Install: `cargo install --path crates/fmeca-mcp`; binary `fmeca-mcp`, MCP/stdio.
-# Tools: session.open, append, state.get, risk.next, readiness.assess, report.export.
+# Tools: session.open, append, state.get, risk.next, readiness.assess, report.export,
+#   scoring.catalog (the fixed observation vocabulary) + analyze (stateless one-shot
+#   FMECA). cap.review.fmeca uses scoring.catalog + analyze (flat args, not an envelope).
 connections:
   fmeca-mcp:
     kind: mcp

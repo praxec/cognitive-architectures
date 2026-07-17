@@ -46,8 +46,15 @@
 #      (cap.diagnose.attribute-cohort-failure): findings are mapped back onto
 #      the owned_files partition so one member's defect is named
 #      (implicated / collateral / clear per member) instead of opaquely
-#      poisoning all N. The flow parks in failed_attributed with verdicts in
-#      context; the operator/driver marks implicated members failed and
+#      poisoning all N.
+#   4. Then ONE bounded RECOVERY attempt (F2, 2026-07-17): the verify gate now
+#      emits structured file:line findings (F1), so cap.run.fix-scope derives the
+#      unique union of implicated files (owned AND blast-radius consumers) and a
+#      single scope-bounded fix pass repairs them, re-verifying once. This is a
+#      straight-line, statically-unrolled second chance — NO back-edge, so at most
+#      one recovery runs (hang-safety). Only if the fix pass still fails to green
+#      the tree does the flow park in failed_attributed with the freshest verdicts
+#      in context; the operator/driver then marks implicated members failed and
 #      re-runs the survivors — it must NOT bulk-fail the cohort.
 #
 # COHORT SELECTION CAVEATS (enforced upstream of this flow, by the planner
@@ -88,18 +95,21 @@
 #     (gap) — until one exists, the terminal marks tolerate lock expiry
 #     (mark_status on an unlocked deliverable is legal for any caller).
 #
-# HANG-SAFETY: editing_0..4 and the attribution states are agent-actor leaves
-# (cap.implement.scope-bounded / cap.diagnose.attribute-cohort-failure). Under
-# the known auto_drive reasoning hang, do NOT auto-drive this flow — drive the
-# deterministic milestones via CLI and park agent states for operator-managed
-# agents. Any cap.verify.dotnet leg needs timeout ≥ 1800s (real build+test is
-# 19–23 min); a shorter timeout is an operator error, not a praxec hang.
+# HANG-SAFETY: editing_0..4, the recovery fix pass (recovering), and the
+# attribution states are agent-actor leaves (cap.implement.scope-bounded /
+# cap.diagnose.attribute-cohort-failure). Under the known auto_drive reasoning
+# hang, do NOT auto-drive this flow — drive the deterministic milestones via CLI
+# and park agent states for operator-managed agents. Any cap.verify.dotnet leg
+# needs timeout ≥ 1800s (real build+test is 19–23 min); a shorter timeout is an
+# operator error, not a praxec hang. The recovery subgraph is acyclic (§4 above):
+# one fix pass + one re-verify, no back-edge — it cannot loop.
 #
 # Requires: the `cpm-planner` connection (acquire + inline mark_status),
 # cognitive/cap.coordinate.cpm-acquire-indexed, cognitive/cap.implement.scope-bounded,
 # cognitive/cap.verify.{dotnet,rust,generic}, cognitive/cap.run.codegen-milestone,
-# cognitive/cap.diagnose.attribute-cohort-failure, and the run.codegen.command /
-# run.git.commit-slice scripts.
+# cognitive/cap.run.fix-scope, cognitive/cap.diagnose.attribute-cohort-failure, and
+# the run.codegen.command / run.git.commit-slice / inspect.fix-scope.from-findings
+# / lint.rust.test-cfg-guard scripts.
 
 workflows:
   flow.cohort.compiled-stack:
@@ -460,7 +470,206 @@ workflows:
       attributing_verify:
         goal: >
           Attribute the failed verify milestone to the implicated cohort
-          member(s) via the owned_files partition.
+          member(s) via the owned_files partition, THEN attempt a bounded
+          recovery (F2) instead of dead-ending — the attribution evidence and
+          the concrete file:line findings (F1) let one scoped fix pass repair a
+          public-type change's blast radius or an edition/hallucination slip.
+        transitions:
+          attribute:
+            target: deriving_fix_scope
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.diagnose.attribute-cohort-failure
+              use:
+                inputs:
+                  failure: "$.context.milestone_verify"
+                  cohort:  "$.context.cohort"
+                outputs:
+                  "$.context.attribution": attribution
+
+      # ── BOUNDED RECOVERY (F2): one scoped fix pass over the implicated files ──
+      # Boundedness by CONSTRUCTION: this is a straight-line, statically-unrolled
+      # SECOND CHANCE, not a loop — every edge below points strictly FORWARD
+      # (deriving_fix_scope → recovery_gate → recovering → linting_recovery →
+      # recovery_lint_gate → reverifying → reverify_gate →
+      # {committing | attributing_verify_final → failed_attributed}).
+      # There is NO back-edge to verifying/milestone_gate, so exactly ONE recovery
+      # attempt can ever run (hang-safety: the flow header forbids cycles because
+      # hop_slot can't bind cwd deterministically). If the single fix pass does not
+      # turn the tree green, the flow dead-ends at failed_attributed as before.
+      deriving_fix_scope:
+        goal: >
+          Deterministically derive the fix scope (unique union of finding files)
+          from the failed verifyOut — code, not an LLM judgment. Files no cohort
+          member owns are the blast radius the original owned_files scope forbade.
+        transitions:
+          derive:
+            target: recovery_gate
+            actor: deterministic
+            # Wrapped in a snippet-typed cap (not an inline script): the recovery
+            # pass consumes `$.context.fix_scope.files` via `use.inputs`, and only
+            # a child's `use.outputs` (or `inputs:`) seed the V13 slot table — a
+            # transition `output:` block does not (the codegen-milestone rule).
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.run.fix-scope
+              use:
+                inputs:
+                  failure: "$.context.milestone_verify"
+                  cohort:  "$.context.cohort"
+                outputs:
+                  "$.context.fix_scope": fix_scope
+
+      recovery_gate:
+        transitions:
+          # Findings carry file:line ⇒ a scoped fix pass has a concrete target.
+          recover:
+            target: recovering
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.fix_scope.count > 0" }
+          # No file:line findings to act on (e.g. a fmt-only violation) — nothing
+          # to scope a fix over. Dead-end honestly with the attribution evidence.
+          dead_end:
+            target: failed_attributed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.fix_scope.count == 0" }
+
+      recovering:
+        goal: >
+          One bounded scope-bounded fix pass over the implicated files
+          (fix_scope.files — owned AND blast-radius consumers), grounded in the
+          concrete verify findings. The edit tool refuses writes outside this
+          widened scope, so the pass can touch the consumer files that broke on a
+          public-type change while staying bounded to the cited surface.
+        transitions:
+          fix:
+            target: linting_recovery
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.scope-bounded
+              use:
+                inputs:
+                  # The failed verifyOut is the plan: its findings[] + enriched
+                  # summary are the concrete red->green work for this pass.
+                  plan:        "$.context.milestone_verify"
+                  scope_paths: "$.context.fix_scope.files"
+                outputs:
+                  "$.context.recovery_edit": result
+
+      # ── CHEAP FIX-PASS LINT (F4): reject un-gated `mod tests` before paying a
+      # full re-verify. Scoped to the just-edited files (fix_scope.files), so it
+      # can only fire on the new recovery path — never on an already-green repo.
+      linting_recovery:
+        goal: >
+          Lint the recovery edits for the hallucination anti-pattern a compile
+          gate can miss: a `mod tests` without `#[cfg(test)]` that compiles into
+          the normal build.
+        transitions:
+          lint:
+            target: recovery_lint_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: lint.rust.test-cfg-guard
+              workingDirectory: "$.run.repo_root"
+              # Capture the fail verdict as data (like the verify caps) instead
+              # of collapsing the transition — the gate branches on the payload.
+              treatNonZeroAsFailure: false
+              args:
+                - "$.context.fix_scope"
+            output:
+              recovery_lint: "$.output.json"
+
+      recovery_lint_gate:
+        transitions:
+          # No un-gated test modules — proceed to the one bounded re-verify.
+          clean:
+            target: reverifying
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.recovery_lint.status == 'pass'" }
+          # The fix pass left/added an un-gated test module — a definite defect a
+          # compile gate can miss. Dead-end with the lint findings (and the
+          # first-pass attribution) in context, rather than commit a build the
+          # gate would let through.
+          violation:
+            target: failed_attributed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.recovery_lint.status != 'pass'" }
+
+      # Re-run the SAME shared verify over the repaired tree (mirrors `verifying`;
+      # writes a DISTINCT slot, milestone_verify_2, so the first verdict is kept).
+      reverifying:
+        goal: >
+          Re-run the single cohort verify milestone over the tree the recovery
+          fix pass repaired. One re-verify only (no back-edge).
+        transitions:
+          verify_dotnet:
+            target: reverify_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.workflow.input.stack == 'dotnet'" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.dotnet
+              use:
+                inputs:
+                  cwd: "$.run.repo_root"
+                outputs:
+                  "$.context.milestone_verify_2": verify
+          verify_rust:
+            target: reverify_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.workflow.input.stack == 'rust'" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.rust
+              use:
+                inputs:
+                  cwd: "$.run.repo_root"
+                outputs:
+                  "$.context.milestone_verify_2": verify
+          # UNGUARDED DEFAULT (linter-blessed switch shape) — generic floor's
+          # honest not_evaluated fails the re-verify gate.
+          verify_floor:
+            target: reverify_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.generic
+              use:
+                inputs:
+                  cwd: "$.run.repo_root"
+                outputs:
+                  "$.context.milestone_verify_2": verify
+
+      reverify_gate:
+        transitions:
+          # Recovery WORKED — the repaired cohort is green; commit it as one slice.
+          advance:
+            target: committing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.milestone_verify_2.status == 'pass'" }
+          # Recovery did NOT green the tree — re-attribute the post-fix findings
+          # for the operator, then dead-end (single attempt exhausted).
+          attribute:
+            target: attributing_verify_final
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.milestone_verify_2.status != 'pass'" }
+
+      attributing_verify_final:
+        goal: >
+          Attribute the STILL-failing verify (post-recovery) to the implicated
+          member(s), so the operator inherits the freshest evidence before the
+          cohort parks. Terminal after this — the single recovery attempt is spent.
         transitions:
           attribute:
             target: failed_attributed
@@ -470,7 +679,7 @@ workflows:
               definitionId: cognitive/cap.diagnose.attribute-cohort-failure
               use:
                 inputs:
-                  failure: "$.context.milestone_verify"
+                  failure: "$.context.milestone_verify_2"
                   cohort:  "$.context.cohort"
                 outputs:
                   "$.context.attribution": attribution
