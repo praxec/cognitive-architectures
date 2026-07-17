@@ -1,0 +1,90 @@
+# scripts-library/format.cargo.edition.yaml
+#
+# EDITION-IDIOM auto-fix pass for Rust (F3, 2026-07-17). Build-loop agents emit
+# training-era Rust that is a HARD ERROR under this workspace's edition 2024
+# (e.g. bare `std::env::set_var` without `unsafe {}`). This script runs the two
+# cheap deterministic auto-fixers — `cargo fix --edition-idioms` and
+# `cargo clippy --fix` — to migrate idioms and apply machine-applicable clippy
+# suggestions, optionally scoped to one package (`-p <crate>`) to stay cheap.
+#
+# NB: `cargo fix` REQUIRES the crate to COMPILE first — it cannot repair a tree
+# that has compile errors. So this is a post-edit idiom/lint cleanup on a green
+# (or at least compiling) tree, NOT a rescue for the F1/F2 broken-tree case. It
+# is intentionally NOT auto-wired into the cohort recovery path (that path runs
+# on a red tree); it is a tool an operator or a green-tree polish step invokes.
+#
+# `--allow-dirty --allow-staged` so it works inside the shared cohort worktree
+# with uncommitted edits present.
+#
+# Positional args (both optional):
+#   $1 = working directory (defaults to PWD)
+#   $2 = cargo package scope, e.g. "praxec-core" (empty ⇒ whole workspace)
+#
+# Emits JSON on stdout ($.output.json):
+#   { status: pass|fail, summary, applied[], provenance }
+# status = "fail" (exit 1) iff a fixer could not run (e.g. tree does not
+# compile); a clean/no-op run is "pass".
+version: "1.0.0"
+scripts:
+  format.cargo.edition:
+    verb: format
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Rust edition-idiom + clippy auto-fix pass.
+      #   $1 = cwd (default PWD); $2 = optional `-p` package scope.
+      set -uo pipefail
+
+      json_escape() {
+        sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+          | awk 'BEGIN{ORS=""} NR>1{printf "\\n"} {printf "%s", $0}'
+      }
+
+      cwd="${1:-$PWD}"
+      pkg="${2:-}"
+      cd "$cwd" 2>/dev/null || true
+
+      scope_args=()
+      if [ -n "$pkg" ]; then scope_args=(-p "$pkg"); scope_desc="package: $pkg"; else scope_desc="workspace"; fi
+
+      STATUS="pass"
+      applied=()
+
+      # 1) Edition-idiom migration (e.g. wraps set_var/remove_var, updates idioms).
+      if fix_out=$(cargo fix --edition-idioms --allow-dirty --allow-staged "${scope_args[@]}" 2>&1); then
+        printf '%s\n' "$fix_out" >&2
+        applied+=("\"cargo fix --edition-idioms\"")
+      else
+        printf '%s\n' "$fix_out" >&2
+        STATUS="fail"
+      fi
+
+      # 2) Machine-applicable clippy suggestions (only if step 1 kept the tree sane).
+      if [ "$STATUS" = "pass" ]; then
+        if clip_out=$(cargo clippy --fix --allow-dirty --allow-staged "${scope_args[@]}" --all-targets 2>&1); then
+          printf '%s\n' "$clip_out" >&2
+          applied+=("\"cargo clippy --fix\"")
+        else
+          printf '%s\n' "$clip_out" >&2
+          STATUS="fail"
+        fi
+      fi
+
+      if [ "${#applied[@]}" -gt 0 ]; then
+        applied_json="[$(IFS=,; echo "${applied[*]}")]"
+      else
+        applied_json="[]"
+      fi
+
+      if [ "$STATUS" = "pass" ]; then
+        summary="cargo edition-idioms + clippy --fix: applied ($scope_desc)"
+      else
+        summary="cargo edition-idioms + clippy --fix: FAILED ($scope_desc) — the tree must COMPILE before cargo fix can run; resolve compile errors first (see log)"
+      fi
+      esummary=$(printf '%s' "$summary" | json_escape)
+
+      printf '{"status":"%s","summary":"%s","applied":%s,"provenance":{"stack":"language:rust","source":"pack"}}\n' \
+        "$STATUS" "$esummary" "$applied_json"
+
+      [ "$STATUS" = "pass" ] && exit 0 || exit 1

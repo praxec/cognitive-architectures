@@ -41,3 +41,23 @@ skills:
       `#[cfg(test)]` on the line immediately above, or inline
       `#[cfg(test)] mod tests`). An un-gated test module compiles into the
       normal build and breaks it. Never emit `mod tests` without the guard.
+
+      # Rust: EDITION 2024 rules (this workspace) (F3)
+      This workspace is edition 2024. Older-edition idioms from training data are
+      HARD ERRORS here — write edition-2024-correct Rust:
+      - `std::env::set_var` / `std::env::remove_var` are `unsafe` in 2024. In
+        tests (and everywhere) you MUST wrap them: `unsafe { std::env::set_var(
+        "K", "v") }`. A bare `set_var`/`remove_var` will NOT compile.
+      - Prefer not mutating process env in tests at all; if you must, keep it in
+        `unsafe {}` and serialize env-touching tests.
+      - Other 2024 tightenings apply (e.g. `gen` is a reserved keyword; unsafe
+        `extern` blocks). When unsure, read a neighboring 2024 file for the
+        current idiom rather than emitting a training-era form.
+      - Format-brace escaping: `{{` / `}}` only doubles inside a FORMAT string
+        (`format!`, `println!`). In a PLAIN string literal (e.g. an argument to
+        `Error::custom("…")`) `{{members}}` stays literally doubled in the output
+        — do not format-escape plain literals.
+      A `format.cargo.edition` fix-pass script (`cargo fix --edition-idioms` +
+      `cargo clippy --fix`) exists to auto-migrate idioms on a COMPILING tree; it
+      is not a substitute for writing 2024-correct code (cargo fix needs the
+      crate to build first).
