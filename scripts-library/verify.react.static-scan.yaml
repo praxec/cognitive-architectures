@@ -1,0 +1,216 @@
+# scripts-library/verify.react.static-scan.yaml
+#
+# Layer A of the React anti-pattern review pipeline (design:
+# docs/react-antipatterns.review-plan-fix.md) — the ALWAYS-ON, no-LLM floor.
+# Two sub-checks:
+#   1. ESLint rules-of-hooks + exhaustive-deps, IF the target repo already has
+#      eslint + eslint-plugin-react-hooks configured. Never installs a new
+#      toolchain into the target repo; degrades honestly (eslint_ran: false)
+#      when absent — mirrors verify.ts.green's "no tsconfig.json -> typecheck
+#      skipped, met=true, evidence says so" discipline. NEVER invents a
+#      violation for a check that did not run.
+#   2. Grep/regex heuristics for patterns ESLint's rule set does not cover:
+#      unstable/object-typed keys, array-index keys, impure calls reachable in
+#      render (Math.random/Date.now/new Date/crypto.randomUUID), a
+#      single-line controlled-input heuristic (value= without onChange),
+#      mutable array ops that may be applied to state, a setState-call
+#      candidate list, and a file-level Effect-cleanup heuristic (a file that
+#      opens a timer/listener/observer/subscription inside useEffect but never
+#      contains a `return () =>` anywhere is flagged; a file that has at least
+#      one cleanup return is still surfaced, at low confidence, since grep
+#      cannot correlate a specific Effect body to its own cleanup).
+#
+# Every heuristic hit is a CANDIDATE, not a finding — cheap, high-recall,
+# often noisy by design (a low `confidence` on a rule says so up front). Layer
+# B (the review.react.antipatterns skill, cap.review.react-antipatterns) is
+# the required evidence-check before anything becomes a real finding.
+#
+# Args (positional first, env fallback — matches search.codebase.ripgrep /
+# inspect.stack's convention):
+#   $1 / REPO_PATH     — repo directory to scan
+#   $2 / PROFILE_JSON  — optional repo profile object; `.extra_rules[]` (each
+#                        { id, pattern, category, message }) are merged in at
+#                        confidence "profile" (the repo profile hook — see the
+#                        design doc's "generic core + optional repo profile").
+#
+# Emits JSON on stdout: { eslint: {ran, tool_present, plugin_detected,
+# violations[]}, candidates[] (file, line, snippet, rule, category,
+# confidence, message), candidate_count, truncated }. Read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  verify.react.static-scan:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      REPO_PATH="${1:-${REPO_PATH:?repo_path required (arg 1 or \$REPO_PATH)}}"
+      PROFILE_JSON="${2:-${PROFILE_JSON:-}}"
+      MAX_CANDIDATES=200
+
+      if [ ! -d "$REPO_PATH" ]; then
+        jq -n --arg p "$REPO_PATH" \
+          '{eslint: {ran:false, tool_present:false, plugin_detected:false, violations: []},
+            candidates: [], candidate_count: 0, truncated: false,
+            error: ("repo_path not found: " + $p)}'
+        exit 1
+      fi
+
+      TMP="$(mktemp -d)"
+      trap 'rm -rf "$TMP"' EXIT
+
+      # ---- ESLint sub-check (honest degrade if not configured) ----
+      eslint_ran=false
+      tool_present=false
+      plugin_detected=false
+      eslint_violations="[]"
+
+      if [ -f "$REPO_PATH/package.json" ] && command -v npx >/dev/null 2>&1; then
+        if [ -x "$REPO_PATH/node_modules/.bin/eslint" ] || npx --no-install eslint --version >/dev/null 2>&1; then
+          tool_present=true
+          has_config=false
+          for f in .eslintrc .eslintrc.js .eslintrc.cjs .eslintrc.json .eslintrc.yaml .eslintrc.yml eslint.config.js eslint.config.mjs eslint.config.cjs eslint.config.ts; do
+            [ -f "$REPO_PATH/$f" ] && has_config=true
+          done
+          if [ "$has_config" = true ]; then
+            ( cd "$REPO_PATH" && CI=1 npx --no-install eslint . \
+                --ext .js,.jsx,.ts,.tsx \
+                --no-error-on-unmatched-pattern \
+                --format json >"$TMP/eslint.json" 2>"$TMP/eslint.stderr" )
+            if [ -s "$TMP/eslint.json" ] && jq -e 'type == "array"' "$TMP/eslint.json" >/dev/null 2>&1; then
+              eslint_ran=true
+              eslint_violations="$(jq -c '
+                [ .[] | .filePath as $f | .messages[]
+                  | select(.ruleId == "react-hooks/rules-of-hooks" or .ruleId == "react-hooks/exhaustive-deps")
+                  | {file: $f, line: .line, rule: .ruleId, message: .message, severity: (if .severity == 2 then "error" else "warning" end)}
+                ]' "$TMP/eslint.json" 2>/dev/null || echo '[]')"
+              [ "$eslint_violations" = "null" ] && eslint_violations="[]"
+              if printf '%s' "$eslint_violations" | jq -e 'length > 0' >/dev/null 2>&1; then
+                plugin_detected=true
+              elif jq -e '[.[].messages[]?.ruleId] | any(startswith("react-hooks/"))' "$TMP/eslint.json" >/dev/null 2>&1; then
+                plugin_detected=true
+              fi
+            fi
+          fi
+        fi
+      fi
+
+      # ---- Grep heuristics ----
+      GREP_FLAGS=(-r -n -E --include=*.tsx --include=*.jsx --include=*.ts --include=*.js
+                  --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build
+                  --exclude-dir=.next --exclude-dir=coverage --exclude-dir=generated
+                  --exclude-dir=.git --exclude=*.d.ts --exclude=*.test.* --exclude=*.spec.*)
+
+      run_grep() { grep "${GREP_FLAGS[@]}" -E "$1" "$REPO_PATH" 2>/dev/null || true; }
+
+      # jq -R -s: parse raw `file:line:text` lines into candidate objects.
+      to_candidates() {
+        local rule="$1" category="$2" confidence="$3" message="$4"
+        jq -R -s --arg rule "$rule" --arg cat "$category" --arg conf "$confidence" --arg msg "$message" '
+          split("\n") | map(select(length > 0))
+          | map(capture("^(?<file>[^:]+):(?<line>[0-9]+):(?<snippet>.*)$")?)
+          | map(select(. != null))
+          | map({file: .file, line: (.line | tonumber),
+                  snippet: (.snippet | .[0:200]),
+                  rule: $rule, category: $cat, confidence: $conf, message: $msg})
+        '
+      }
+
+      declare -a candidate_files=()
+      add_rule() {
+        local raw="$1" rule="$2" category="$3" confidence="$4" message="$5"
+        [ -z "$raw" ] && return
+        local f="$TMP/${rule}.json"
+        printf '%s' "$raw" | to_candidates "$rule" "$category" "$confidence" "$message" > "$f"
+        candidate_files+=("$f")
+      }
+
+      add_rule "$(run_grep 'key=\{String\(')" \
+        react-key-string-wrap correctness high \
+        "key wraps value in String() -- often masks an unstable/object-typed key; verify the underlying value is a stable primitive id"
+
+      add_rule "$(run_grep 'key=\{(index|idx|i)\}')" \
+        react-key-array-index correctness medium \
+        "key is the array index/loop variable -- unstable across insert/remove/reorder; verify the list order is fixed or use a stable domain id"
+
+      add_rule "$(run_grep 'Math\.random\(\)|crypto\.randomUUID\(\)')" \
+        react-random-in-render correctness medium \
+        "impure call -- must not run during render (react.dev: keeping components pure); confirm this executes in an event handler/Effect, not render"
+
+      add_rule "$(run_grep 'Date\.now\(\)|new Date\(\)')" \
+        react-date-in-render correctness low \
+        "Date.now()/new Date() during render is impure unless derived once; high false-positive rate -- confirm actual render-path use"
+
+      add_rule "$(run_grep 'value=\{[^}]+\}')" \
+        react-controlled-value-heuristic correctness low \
+        "value= present on this line without onChange on the SAME line (single-line heuristic only, JSX often spans lines) -- verify this input is not controlled-without-onChange"
+
+      add_rule "$(run_grep '\.(push|pop|shift|unshift|splice|sort|reverse)\(')" \
+        react-mutable-array-op correctness low \
+        "mutating array method call -- if invoked on state (not a local/derived copy), this mutates in place and React will not detect the change; confirm the receiver"
+
+      # Excludes the DOM/timer globals that also match `set[A-Z]` (setInterval,
+      # setTimeout, setImmediate) so the candidate list is state-setter calls.
+      add_rule "$(run_grep '\bset[A-Z][A-Za-z0-9_]*\(' | grep -vE 'setInterval\(|setTimeout\(|setImmediate\(|setSelectionRange\(')" \
+        react-setstate-call-candidate correctness low \
+        "setter call -- verify this executes in an event handler/Effect/callback, not directly in the render body (setState-in-render risks a re-render loop)"
+
+      # Effect-cleanup file-level heuristic: files that open a timer/listener/
+      # observer/subscription inside an Effect. Correlate against whether the
+      # FILE contains any `return () =>` at all (cannot correlate per-Effect via
+      # grep alone -- that precision is Layer B's job).
+      effect_resource_files="$(grep -rl -E \
+        '(setInterval|setTimeout|addEventListener|new WebSocket|new IntersectionObserver|new MutationObserver|new ResizeObserver|\.subscribe\()\(' \
+        --include=*.tsx --include=*.jsx --include=*.ts --include=*.js \
+        --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build --exclude-dir=.next \
+        --exclude-dir=coverage --exclude-dir=generated --exclude-dir=.git \
+        --exclude=*.test.* --exclude=*.spec.* \
+        "$REPO_PATH" 2>/dev/null || true)"
+
+      cleanup_hits=""
+      if [ -n "$effect_resource_files" ]; then
+        while IFS= read -r f; do
+          [ -z "$f" ] && continue
+          if ! grep -qE 'return \(\) =>' "$f" 2>/dev/null; then
+            # No cleanup anywhere in the file: flag every resource-opening line.
+            hits="$(grep -nHE '(setInterval|setTimeout|addEventListener|new WebSocket|new IntersectionObserver|new MutationObserver|new ResizeObserver|\.subscribe\()\(' "$f" 2>/dev/null || true)"
+            [ -n "$hits" ] && cleanup_hits="${cleanup_hits}"$'\n'"${hits}"
+          fi
+        done <<< "$effect_resource_files"
+      fi
+      add_rule "$cleanup_hits" \
+        react-effect-missing-cleanup correctness medium \
+        "file opens a timer/listener/observer/subscription and contains NO 'return () =>' anywhere -- likely a missing Effect cleanup (react.dev: Effects need cleanup for anything that outlives one render)"
+
+      # ---- Merge repo-profile extra_rules (confidence: profile) ----
+      if [ -n "$PROFILE_JSON" ] && printf '%s' "$PROFILE_JSON" | jq -e '.extra_rules? | type == "array"' >/dev/null 2>&1; then
+        while IFS=$'\t' read -r rid rpattern rcat rmsg; do
+          [ -z "$rid" ] && continue
+          add_rule "$(run_grep "$rpattern")" "$rid" "${rcat:-maintainability}" profile "$rmsg"
+        done < <(printf '%s' "$PROFILE_JSON" | jq -r '.extra_rules[] | [.id, .pattern, (.category // "maintainability"), .message] | @tsv')
+      fi
+
+      # ---- Merge, cap, and emit ----
+      if [ "${#candidate_files[@]}" -eq 0 ]; then
+        all="[]"
+      else
+        all="$(jq -s '[.[][]]' "${candidate_files[@]}" 2>/dev/null || echo '[]')"
+      fi
+      total="$(printf '%s' "$all" | jq 'length')"
+      truncated=false
+      if [ "$total" -gt "$MAX_CANDIDATES" ]; then
+        truncated=true
+        all="$(printf '%s' "$all" | jq --argjson n "$MAX_CANDIDATES" '.[0:$n]')"
+      fi
+
+      jq -n \
+        --argjson eslint_ran "$eslint_ran" \
+        --argjson tool_present "$tool_present" \
+        --argjson plugin_detected "$plugin_detected" \
+        --argjson violations "$eslint_violations" \
+        --argjson candidates "$all" \
+        --argjson total "$total" \
+        --argjson truncated "$truncated" \
+        '{ eslint: { ran: $eslint_ran, tool_present: $tool_present, plugin_detected: $plugin_detected, violations: $violations },
+           candidates: $candidates, candidate_count: $total, truncated: $truncated }'
