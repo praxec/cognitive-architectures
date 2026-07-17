@@ -109,7 +109,7 @@
 # cognitive/cap.verify.{dotnet,rust,generic}, cognitive/cap.run.codegen-milestone,
 # cognitive/cap.run.fix-scope, cognitive/cap.diagnose.attribute-cohort-failure, and
 # the run.codegen.command / run.git.commit-slice / inspect.fix-scope.from-findings
-# scripts.
+# / lint.rust.test-cfg-guard scripts.
 
 workflows:
   flow.cohort.compiled-stack:
@@ -491,8 +491,9 @@ workflows:
       # ── BOUNDED RECOVERY (F2): one scoped fix pass over the implicated files ──
       # Boundedness by CONSTRUCTION: this is a straight-line, statically-unrolled
       # SECOND CHANCE, not a loop — every edge below points strictly FORWARD
-      # (deriving_fix_scope → recovery_gate → recovering → reverifying →
-      # reverify_gate → {committing | attributing_verify_final → failed_attributed}).
+      # (deriving_fix_scope → recovery_gate → recovering → linting_recovery →
+      # recovery_lint_gate → reverifying → reverify_gate →
+      # {committing | attributing_verify_final → failed_attributed}).
       # There is NO back-edge to verifying/milestone_gate, so exactly ONE recovery
       # attempt can ever run (hang-safety: the flow header forbids cycles because
       # hop_slot can't bind cwd deterministically). If the single fix pass does not
@@ -545,7 +546,7 @@ workflows:
           public-type change while staying bounded to the cited surface.
         transitions:
           fix:
-            target: reverifying
+            target: linting_recovery
             actor: deterministic
             executor:
               kind: workflow
@@ -558,6 +559,48 @@ workflows:
                   scope_paths: "$.context.fix_scope.files"
                 outputs:
                   "$.context.recovery_edit": result
+
+      # ── CHEAP FIX-PASS LINT (F4): reject un-gated `mod tests` before paying a
+      # full re-verify. Scoped to the just-edited files (fix_scope.files), so it
+      # can only fire on the new recovery path — never on an already-green repo.
+      linting_recovery:
+        goal: >
+          Lint the recovery edits for the hallucination anti-pattern a compile
+          gate can miss: a `mod tests` without `#[cfg(test)]` that compiles into
+          the normal build.
+        transitions:
+          lint:
+            target: recovery_lint_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: lint.rust.test-cfg-guard
+              workingDirectory: "$.run.repo_root"
+              # Capture the fail verdict as data (like the verify caps) instead
+              # of collapsing the transition — the gate branches on the payload.
+              treatNonZeroAsFailure: false
+              args:
+                - "$.context.fix_scope"
+            output:
+              recovery_lint: "$.output.json"
+
+      recovery_lint_gate:
+        transitions:
+          # No un-gated test modules — proceed to the one bounded re-verify.
+          clean:
+            target: reverifying
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.recovery_lint.status == 'pass'" }
+          # The fix pass left/added an un-gated test module — a definite defect a
+          # compile gate can miss. Dead-end with the lint findings (and the
+          # first-pass attribution) in context, rather than commit a build the
+          # gate would let through.
+          violation:
+            target: failed_attributed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.recovery_lint.status != 'pass'" }
 
       # Re-run the SAME shared verify over the repaired tree (mirrors `verifying`;
       # writes a DISTINCT slot, milestone_verify_2, so the first verdict is kept).
