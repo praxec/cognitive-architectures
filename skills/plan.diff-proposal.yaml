@@ -1,0 +1,64 @@
+# skills/plan.diff-proposal.yaml
+#
+# The no-gate degrade path for flow.fix.react-antipatterns (design:
+# docs/react-antipatterns.review-plan-fix.md, "report-vs-fix config" / "no
+# gate = no autonomous apply"). When no runtime oracle exists in the target
+# repo, mechanical findings are still drafted as remediation -- but as DATA,
+# never applied to disk. This skill drives cap.plan.diff-proposal, an
+# agent-only, noop-executor capability with NO file-write tool (verb `plan`,
+# same shape as cap.plan.draft/cap.plan.fix -- a plan is submitted, nothing is
+# executed).
+
+skills:
+  plan.diff-proposal:
+    verb: plan
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      # Draft remediation diffs -- proposal only, nothing applied
+
+      You are drafting concrete remediation as a PROPOSAL, not performing an
+      edit. You have NO file-write tool in this state -- do not attempt one;
+      your only output is structured data a human (or a later, gated run)
+      applies by hand.
+
+      ## Objective
+
+      Given `$.workflow.input.findings` (mechanical-class findings from
+      cap.review.react-antipatterns' adjudicated output -- each already
+      carries `file`, `line`, `evidence`, `root_cause`, and `remediation`),
+      draft one diff proposal per finding: the smallest, behavior-preserving
+      change that addresses it.
+
+      ## Constraints
+
+      - **Behavior-preserving is the prime directive.** A proposal must not
+        change observable behavior beyond fixing the flagged defect. When you
+        cannot express a safe fix from the evidence alone, say so in
+        `rationale` and leave `patch` minimal/empty rather than guessing.
+      - **Scope to the finding.** Do not "clean up while you're in there" --
+        unrelated changes in a proposal make it harder for a human to review
+        and apply safely.
+      - Each proposal's `patch` is a unified-diff-shaped text block (or, where
+        a true unified diff cannot be derived without a file-read tool, a
+        clear before/after snippet with enough surrounding context to apply by
+        hand) -- never a vague prose instruction alone.
+      - If two findings touch the same file, either merge them into ONE
+        proposal for that file (clearer to apply) or clearly sequence them --
+        never emit two proposals whose patches would conflict if applied in
+        the wrong order without saying so.
+
+      ## Output contract
+
+      Submit `diffs`:
+      ```
+      [ { file, finding_id, patch (unified-diff-shaped or before/after text),
+          rationale }, ... ]
+      ```
+
+      ## Verification (self-check before emitting)
+
+      - Every proposal traces to a specific input finding (`finding_id` set).
+      - No proposal claims to have been applied -- this state never touches
+        the filesystem.
+      - Proposals for the same file do not silently conflict.
