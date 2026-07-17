@@ -1,0 +1,57 @@
+# capabilities/cap.plan.react-feature.yaml
+#
+# The proactive half of the React anti-pattern suite (design:
+# docs/react-antipatterns.review-plan-fix.md, "cap.plan.react-feature -- the
+# same catalog, inverted"). Given a feature/change description, emit render-
+# purity / state-modeling / Effects-discipline / stable-identity constraints
+# as first-class planning guidance, so code is born clean instead of being
+# caught by cap.review.react-antipatterns after the fact. Same shape as
+# cap.plan.ux-design / cap.plan.technical-design: single agent state, noop
+# executor, the model submits typed data.
+#
+# Usable two ways (see the design doc): (a) feeding cap.plan.build-graph's
+# deliverable authoring -- the caller threads `constraints` onto the relevant
+# deliverable's `metadata.react_constraints`; (b) standalone, called directly
+# for a design conversation with no plan graph in play.
+
+workflows:
+  cap.plan.react-feature:
+    verb: plan
+    lifecycle: experimental
+    description: >
+      Emit React-specific planning constraints (Effects discipline, state
+      modeling, render purity, stable identity, forms, legacy-hatch
+      avoidance, evidenced-only performance) for a feature/change description,
+      before any code exists. Usable standalone or fed into a deliverable's
+      metadata.react_constraints.
+    snippet:
+      inputs:
+        feature: { type: string, required: true }
+        context: { type: string, default: "" }
+      outputs:
+        constraints: { type: array }
+        guidance:    { type: string }
+    skills: [plan.react.feature-guidance]
+    initialState: ready
+    states:
+      ready:
+        goal: >
+          Read $.workflow.input.feature (and $.workflow.input.context, if
+          given). Emit `constraints` -- concrete, checkable, feature-specific
+          statements per the plan.react.feature-guidance skill's seven
+          categories -- and `guidance`, a short prose brief.
+        transitions:
+          submit_guidance:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [constraints, guidance]
+              properties:
+                constraints: { type: array, items: { type: string } }
+                guidance:    { type: string }
+            executor: { kind: noop }
+            output:
+              constraints: "$.arguments.constraints"
+              guidance:    "$.arguments.guidance"
+      done: { terminal: true }

@@ -1,0 +1,42 @@
+# scripts-library/inspect.react.classify-fix-scope.yaml
+#
+# Deterministic classifier for flow.fix.react-antipatterns (design:
+# docs/react-antipatterns.review-plan-fix.md, "report-vs-fix config"): splits
+# cap.review.react-antipatterns' adjudicated findings by the `fix_class` Layer
+# D already assigned (mechanical | judgment) and collects the unique file set
+# for the mechanical group as `scope_paths` -- the exact input shape
+# cap.implement.scope-bounded expects. Code decides the split (mirrors
+# inspect.stack/inspect.deliverable-route: code routes, the flow branches);
+# the LLM never re-litigates its own fix_class tag here.
+#
+# Args: $1 / FINDINGS_JSON -- the adjudicated findings array (each already
+# carries `fix_class`; see verify.react.adjudicate-findings).
+# Emits JSON: { mechanical[], judgment[], scope_paths[], mechanical_count,
+# judgment_count }. Read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  inspect.react.classify-fix-scope:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      FINDINGS_JSON="${1:-${FINDINGS_JSON:-[]}}"
+
+      if ! printf '%s' "$FINDINGS_JSON" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        jq -n '{error: "FINDINGS_JSON was not a JSON array", mechanical: [], judgment: [], scope_paths: [], mechanical_count: 0, judgment_count: 0}'
+        exit 0
+      fi
+
+      jq -n --argjson findings "$FINDINGS_JSON" '
+        ($findings | map(select(.fix_class == "mechanical"))) as $mech
+        | ($findings | map(select(.fix_class != "mechanical"))) as $judg
+        | {
+            mechanical: $mech,
+            judgment: $judg,
+            scope_paths: ($mech | map(.file) | unique),
+            mechanical_count: ($mech | length),
+            judgment_count: ($judg | length)
+          }
+      '

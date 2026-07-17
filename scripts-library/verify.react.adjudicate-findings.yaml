@@ -1,0 +1,145 @@
+# scripts-library/verify.react.adjudicate-findings.yaml
+#
+# Layer D (computed half) of the React anti-pattern review pipeline (design:
+# docs/react-antipatterns.review-plan-fix.md). Mirrors the fmeca/falsification/
+# doc-drift split already in this pack: the LLM (fuzzy half, the
+# review.react.antipatterns-skeptic skill) supplies raw per-finding skeptic
+# VOTES; this script is the deterministic ADJUDICATOR that folds them into the
+# final verdict. The model never self-certifies its own findings.
+#
+# Per finding:
+#   - refute_count = votes where refute == true. MAJORITY-refute (strictly
+#     more than half the votes for that finding_id) KILLS the finding -- it is
+#     dropped from `findings` and recorded in `killed[]` with the vote tally.
+#     A tie does NOT kill.
+#   - A survivor's verdict is CONFIRMED iff `runtime.ran == true` AND at least
+#     one captured runtime warning correlates to the finding's rule/category
+#     (a small static correlation table -- e.g. an "unstable-list-key" runtime
+#     warning corroborates any `key`-rule finding); otherwise PLAUSIBLE. A
+#     finding is NEVER confirmed when the oracle did not run, no matter the
+#     skeptic tally -- the correctness invariant this whole layer exists for.
+#   - Repo-profile suppressions (finding id or a file glob) are applied FIRST,
+#     before voting is folded -- a consciously-accepted pattern is recorded in
+#     `suppressed[]` with its reason, distinct from a killed finding.
+#
+# Args (positional, each a JSON string):
+#   $1 / FINDINGS_JSON     -- Layer B raw findings (cap.review.react-
+#                             antipatterns' `reviewing` state output)
+#   $2 / VOTES_JSON        -- Layer D skeptic votes, flattened array of
+#                             { finding_id, refute, rationale } (one entry per
+#                             skeptic pass per finding)
+#   $3 / RUNTIME_JSON      -- Layer C's verify.react.runtime-oracle output
+#   $4 / SUPPRESSIONS_JSON -- optional repo-profile `.suppressions[]`
+#                             ({ match (finding id or glob), reason })
+#
+# Emits JSON: { findings[] (ReportFindings shape: verdict, category, file,
+# line, failure_scenario, summary, evidence, confidence, root_cause,
+# remediation, fix_class, id), killed[], suppressed[], oracle_status, counts }.
+# Read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  verify.react.adjudicate-findings:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      FINDINGS_JSON="${1:-${FINDINGS_JSON:-[]}}"
+      VOTES_JSON="${2:-${VOTES_JSON:-[]}}"
+      RUNTIME_JSON="${3:-${RUNTIME_JSON:-}}"
+      [ -z "$RUNTIME_JSON" ] && RUNTIME_JSON='{}'
+      SUPPRESSIONS_JSON="${4:-${SUPPRESSIONS_JSON:-[]}}"
+
+      bad_input=""
+      printf '%s' "$FINDINGS_JSON" | jq -e 'type == "array"' >/dev/null 2>&1 || bad_input="FINDINGS_JSON was not a JSON array"
+      printf '%s' "$VOTES_JSON" | jq -e 'type == "array"' >/dev/null 2>&1 || bad_input="VOTES_JSON was not a JSON array"
+      printf '%s' "$SUPPRESSIONS_JSON" | jq -e 'type == "array"' >/dev/null 2>&1 || bad_input="SUPPRESSIONS_JSON was not a JSON array"
+      if [ -n "$bad_input" ]; then
+        jq -n --arg err "$bad_input" \
+          '{error: $err, findings: [], killed: [], suppressed: [], oracle_status: {}, counts: {}}'
+        exit 0
+      fi
+      printf '%s' "$RUNTIME_JSON" | jq -e 'type == "object"' >/dev/null 2>&1 \
+        || RUNTIME_JSON='{"ran": false, "oracle": "none", "warnings": []}'
+
+      jq -n \
+        --argjson findings "$FINDINGS_JSON" \
+        --argjson votes "$VOTES_JSON" \
+        --argjson runtime "$RUNTIME_JSON" \
+        --argjson suppressions "$SUPPRESSIONS_JSON" \
+        '
+        def suppressed_reason($f):
+          ($suppressions // [])
+          | map(. + {_re: ((.match // "") | sub("\\*\\*"; ".*") | sub("\\*"; "[^/]*"))})
+          | map(select(
+              . as $s
+              | ($s.match == $f.id)
+                or (($f.file // "") | test($s._re))
+            ))
+          | if length > 0 then .[0].reason else null end;
+
+        ($findings | map(. + {id: (.id // (.file + ":" + (.line|tostring) + ":" + (.rule // .summary // "f")))})) as $f0
+        | ($f0 | map(select(suppressed_reason(.) == null))) as $live
+        | ($f0 | map(select(suppressed_reason(.) != null)) | map({id, file, reason: suppressed_reason(.)})) as $sup
+        | ($votes | group_by(.finding_id) | map({key: .[0].finding_id, votes: .})) as $vote_groups
+        | (
+            def votes_for($id): ($vote_groups | map(select(.key == $id)) | if length > 0 then .[0].votes else [] end);
+            def refute_count($id): (votes_for($id) | map(select(.refute == true)) | length);
+            def vote_count($id): (votes_for($id) | length);
+            def is_killed($id): (vote_count($id) > 0) and (refute_count($id) * 2 > vote_count($id));
+            {
+              killed: ($live | map(select(is_killed(.id)))
+                              | map({id, file, line, summary, refute_count: refute_count(.id), vote_count: vote_count(.id)})),
+              survivors: ($live | map(select(is_killed(.id) | not)))
+            }
+          ) as $folded
+        | ($runtime.ran // false) as $oracle_ran
+        | ($runtime.warnings // []) as $rt_warnings
+        | (
+            def pattern_regex($mp):
+              {"unstable-list-key": "key", "duplicate-key": "key",
+               "update-unmounted": "cleanup|subscri|listener|effect|fetch",
+               "update-depth-exceeded": "setstate|effect",
+               "update-while-rendering": "setstate|effect",
+               "uncontrolled-to-controlled": "controlled", "controlled-to-uncontrolled": "controlled",
+               "act-warning": "setstate|effect", "failed-prop-type": "proptype|prop-type"}[$mp] // $mp;
+            def corroborated($f):
+              $oracle_ran and (
+                ($f.rule // $f.summary // "" | ascii_downcase) as $rulekey
+                | $rt_warnings | any(pattern_regex(.matched_pattern) as $re | ($rulekey | test($re)))
+              );
+            $folded.survivors | map(
+              . + {
+                verdict: (if corroborated(.) then "confirmed" else "plausible" end),
+                fix_class: (.fix_class // (
+                  if ((.rule // "") | test("key|controlled|cleanup|mutable")) then "mechanical"
+                  else "judgment" end
+                ))
+              }
+              | {verdict, category: (.category // "correctness"), file, line,
+                 failure_scenario: (.failure_scenario // .summary // "unspecified"),
+                 summary: (.summary // .failure_scenario // "unspecified finding"),
+                 evidence: (.evidence // ""), confidence: (.confidence // "medium"),
+                 root_cause: (.root_cause // ""), remediation: (.remediation // ""),
+                 fix_class, id}
+            )
+          ) as $final
+        | {
+            findings: $final,
+            killed: $folded.killed,
+            suppressed: $sup,
+            oracle_status: {ran: $oracle_ran, oracle: ($runtime.oracle // "none"),
+                            degrade_reason: ($runtime.degrade_reason // null)},
+            counts: {
+              raw: ($findings | length),
+              suppressed: ($sup | length),
+              killed: ($folded.killed | length),
+              survived: ($final | length),
+              confirmed: ($final | map(select(.verdict == "confirmed")) | length),
+              plausible: ($final | map(select(.verdict == "plausible")) | length),
+              mechanical: ($final | map(select(.fix_class == "mechanical")) | length),
+              judgment: ($final | map(select(.fix_class == "judgment")) | length)
+            }
+          }
+        '
