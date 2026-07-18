@@ -52,25 +52,29 @@ workflows:
           `acceptance_criteria` (a testable list the built code must satisfy —
           the downstream deliverable-gap + acceptance gates check against it)
           and `risk` (low|medium|high|critical) + `blast_radius`.
-          TWO-PLAN STRUCTURE (docs/plan-types.develop-vs-execute.md): tag each
-          develop deliverable `metadata:{kind:"develop", scope:"<bounded-context>"}`
-          (an assembly / service / FE-tool boundary), then SEPARATE the
-          ExecutionPlan by appending, PER scope, an explicit acyclic
-          verification mini-waterfall so budgeted rework is ON the critical
-          path instead of an invisible loop:
-            D1..Dn(scope)
-              -> B-<scope>  {kind:"build", scope, build_command}; prereqs = all D in scope
-              -> Fb-<scope> {kind:"fix", phase:"build", scope, max_internal_iterations:3};
-                            prereqs=[B-<scope>]; estimated_effort_hours = BUDGETED build rework (~25-35% of scope dev hours)
-              -> T-<scope>  {kind:"test", scope, test_command}; prereqs=[Fb-<scope>]
-              -> Ft-<scope> {kind:"fix", phase:"test", scope, max_internal_iterations:3};
-                            prereqs=[T-<scope>]; estimated_effort_hours = BUDGETED test rework (~25-40% of scope dev hours)
-          B/Fb/T/Ft take unique marker owned_files (`.plan/{build,buildfix,test,testfix}/<scope>`) so
-          disjointness holds; the fix loop lives INSIDE each fix node (bounded
-          iterations) so the graph stays acyclic. A CROSS-SCOPE dependency keys
-          off the producing scope's `Ft-<scope>` (verified-done), never a raw
-          develop node. Owner-decision gates are `metadata:{kind:"gate"}` nodes
-          (no owned code) blocking the work they gate.
+          TWO-PLAN STRUCTURE (docs/plan-types.develop-vs-execute.md): this cap
+          authors ONLY the DevelopmentPlan — real code deliverables with real
+          file-disjoint dependencies. Tag each with
+          `metadata:{kind:"develop", scope:"<bounded-context>"}` (an assembly /
+          service / FE-tool boundary) so the ExecutionPlan can later GROUP
+          verification by scope. Do NOT author Build / BuildFix / Test /
+          TestFix (or any other barrier/fix) nodes into `graph.deliverables[]`
+          — a verification barrier is not a code deliverable: it has no
+          owned_files a developer edits, and inlining it here as a fake
+          deliverable RE-CONFLATES the two plans this doc exists to keep
+          separate (a mistake this cap made once already — see the doc's
+          changelog). The barrier waterfall (Build -> BuildFix -> Test ->
+          TestFix, budgeted rework on the critical path, the fix loop bounded
+          and INSIDE the fix step) is the ExecutionPlan, and it is owned and
+          run by the EXECUTION FLOWS against the scheduled DevelopmentPlan —
+          `flow.cohort.compiled-stack` (one edit-only cohort -> one codegen
+          milestone -> one verify milestone -> one bounded recovery pass) and
+          `flow.execute-cohorts` (one SCOPED per-deliverable verify each loop
+          + ONE full-suite barrier at plan close, `barrier_verifying`) — never
+          as scheduler-visible nodes on this graph. The ONE exception is an
+          owner-decision gate: `metadata:{kind:"gate"}` (no owned code)
+          blocking the work it gates — that is a genuine plan DEPENDENCY (a
+          human answer this cap cannot resolve), not a build/test barrier.
         transitions:
           submit_graph:
             target: done

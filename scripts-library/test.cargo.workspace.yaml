@@ -6,10 +6,24 @@ scripts:
     source: cognitive-architectures
     body: |
       #!/usr/bin/env bash
-      # Full workspace test sweep. Emits a JSON summary so the workflow's
-      # output mapping can read pass/fail without parsing test runner text.
+      # Full workspace test sweep by default. Emits a JSON summary so the
+      # workflow's output mapping can read pass/fail without parsing test
+      # runner text.
+      #
+      # Optional positional $1 = SCOPE (a crate/package name — e.g.
+      # cap.verify.regression-tests's `scope` input). Non-empty -> narrows to
+      # `-p "$1"` instead of `--workspace` (the fast per-slice path). Empty
+      # (default): UNCHANGED `--workspace` sweep — this remains the barrier
+      # behavior every existing caller already gets.
       set -euo pipefail
-      if cargo test --workspace "$@" 2>&1 | tee /tmp/praxec-test.log; then
+      scope="${1:-}"
+      shift || true
+      if [ -n "${scope// /}" ]; then
+        cargo_target=(-p "$scope")
+      else
+        cargo_target=(--workspace)
+      fi
+      if cargo test "${cargo_target[@]}" "$@" 2>&1 | tee /tmp/praxec-test.log; then
         echo "{\"passed\": true, \"runner\": \"cargo\", \"subject\": \"$PRAXEC_SCRIPT_SUBJECT\"}"
       else
         echo "{\"passed\": false, \"runner\": \"cargo\", \"subject\": \"$PRAXEC_SCRIPT_SUBJECT\"}" >&2

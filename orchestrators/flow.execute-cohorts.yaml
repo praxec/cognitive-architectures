@@ -34,9 +34,32 @@
 # instances of THIS flow with distinct caller_ids (cpm-planner's locks keep them
 # file-disjoint). flow.loom composes elicit→design→plan→execute-cohorts on top.
 #
+# ExecutionPlan BARRIER (docs/plan-types.develop-vs-execute.md — the velocity
+# discipline): each `implementing` pass below marks a deliverable complete on
+# SCOPED evidence (`verify_scope`, threaded to flow.implement.deliverable's
+# ts/dotnet verify arms — "" default keeps every existing caller's exact
+# current full-backstop behavior). The FULL type-check + full test suite is
+# NOT run per deliverable when verify_scope is set — it is deferred to ONE
+# `barrier_verifying` pass that runs when the plan is EXHAUSTED, dispatched by
+# the new `stack` input. `stack == ""` (default) SKIPS the barrier entirely —
+# a caller that hasn't opted into the scoped path (nothing new to pass to
+# supply, e.g. flow.loom today) gets byte-for-byte the OLD behavior: full
+# per-deliverable backstop, straight to `done`, no closing barrier. A caller
+# that supplies BOTH `verify_scope` (narrow the per-deliverable check) AND
+# `stack` (name the barrier's stack) gets the fast per-slice + single-barrier
+# model this doc describes. Do NOT set only one of the two — an unscoped
+# per-deliverable check with a closing barrier on top pays for the full suite
+# TWICE; a scoped per-deliverable check with no barrier never runs the full
+# suite at all. Note: `stack: rust` deliverables already get a full
+# cross-crate backstop per deliverable inside flow.implement.deliverable
+# regardless of verify_scope (cap.verify.rust has no scope input — see that
+# flow's header) — rust cohorts that want the barrier-once model should use
+# `flow.cohort.compiled-stack` instead, which already implements it.
+#
 # Requires the `cpm-planner` connection (connections/cpm-planner.yaml),
-# cognitive/cap.coordinate.acquire-cohort, and cognitive/flow.implement.deliverable
-# (which itself nests cognitive/cap.implement.build-loop).
+# cognitive/cap.coordinate.acquire-cohort, cognitive/flow.implement.deliverable
+# (which itself nests cognitive/cap.implement.build-loop), and
+# cognitive/cap.verify.{ts,rust,dotnet,generic} for the closing barrier.
 
 workflows:
   flow.execute-cohorts:
@@ -44,13 +67,24 @@ workflows:
     description: >
       Drive a cpm-planner plan to completion: repeatedly acquire the next ready
       deliverable, build it via cap.implement.build-loop, and mark it complete,
-      looping until the plan is exhausted. Terminates on the scalar `exhausted`
-      flag; the build spec rides in deliverable.metadata.
+      looping until the plan is exhausted, then run ONE full-suite barrier
+      verify (ExecutionPlan close) unless the caller opted out. Terminates on
+      the scalar `exhausted` flag; the build spec rides in
+      deliverable.metadata.
     inputs:
       plan_id:   { type: string, required: true }
       # This driver's lock-holder identity (distinct per parallel driver so
       # cpm-planner keeps cohorts file-disjoint). Held across acquire → mark.
       caller_id: { type: string, required: true }
+      # Per-deliverable narrowing threaded to flow.implement.deliverable's
+      # ts/dotnet verify arms. "" (default) = unchanged full backstop per
+      # deliverable (safe for callers that predate this input).
+      verify_scope: { type: string, default: "" }
+      # Names the stack for the ONE closing barrier (dotnet | ts | rust); ""
+      # (default) SKIPS the barrier entirely (legacy behavior — see header).
+      # An unrecognized non-empty value falls to cap.verify.generic's honest
+      # not_evaluated, which FAILS the barrier — never a disguised pass.
+      stack: { type: string, default: "" }
     initialState: acquiring
     states:
 
@@ -75,10 +109,14 @@ workflows:
                   "$.context.next_deliverable_id": deliverable_id
 
       # BRANCH on the scalar exhaustion flag (exhaustive over true|false).
+      # `finish` now routes to the barrier gate (not straight to `done`) — see
+      # the header note: `barrier_gate` itself skips the actual verify run
+      # when `stack == ""`, so a caller that never opted in reaches `done` in
+      # exactly one extra no-op hop, byte-for-byte the old outcome.
       cohort_gate:
         transitions:
           finish:
-            target: done
+            target: barrier_gate
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.cohort_exhausted == true" }
@@ -108,9 +146,123 @@ workflows:
                   # Whole-tree backstop — the behavior this flow has always had,
                   # now stated rather than hardcoded inside the callee.
                   backstop_cwd:   "$.run.repo_root"
+                  # Per-deliverable narrowing (see header) — "" preserves the
+                  # exact old full-backstop-per-deliverable behavior.
+                  verify_scope:   "$.workflow.input.verify_scope"
                   plan_id:        "$.workflow.input.plan_id"
                   deliverable_id: "$.context.next_deliverable_id"
                   caller_id:      "$.workflow.input.caller_id"
+
+      # ── ExecutionPlan BARRIER GATE (plan close) ──────────────────────────
+      # `stack == ""` (default): the caller never opted into the scoped path —
+      # skip the barrier entirely and finish exactly as before this input
+      # existed. A non-empty stack routes to the ONE full-suite verify.
+      barrier_gate:
+        transitions:
+          skip_barrier:
+            target: done
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.workflow.input.stack == ''" }
+          run_barrier:
+            target: barrier_verifying
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.workflow.input.stack != ''" }
+
+      # ONE full-suite verify over the WHOLE plan's accumulated changes —
+      # dispatched by `stack`, mirroring flow.implement.deliverable's own
+      # stack arms but called EXACTLY ONCE here (vs once per deliverable
+      # there). Every arm calls its cap with `scope: ""` — the unscoped/full
+      # barrier path (cap.verify.ts/dotnet's own header). An unrecognized
+      # stack falls to the honest cap.verify.generic floor, which FAILS the
+      # gate below (never a disguised pass for an unevaluated barrier).
+      barrier_verifying:
+        goal: >
+          Run the ONE full type-check + full test suite + full lint barrier
+          over the whole plan, now that every deliverable is built and marked
+          on scoped evidence.
+        transitions:
+          verify_dotnet:
+            target: barrier_verify_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.workflow.input.stack == 'dotnet'" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.dotnet
+              use:
+                inputs:
+                  cwd:   "$.run.repo_root"
+                  scope: ""
+                outputs:
+                  "$.context.barrier_verify": verify
+          verify_ts:
+            target: barrier_verify_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.workflow.input.stack == 'ts'" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.ts
+              use:
+                inputs:
+                  cwd:   "$.run.repo_root"
+                  scope: ""
+                outputs:
+                  "$.context.barrier_verify": verify
+          verify_rust:
+            target: barrier_verify_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.workflow.input.stack == 'rust'" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.rust
+              use:
+                inputs:
+                  cwd: "$.run.repo_root"
+                outputs:
+                  "$.context.barrier_verify": verify
+          # UNGUARDED DEFAULT (linter-blessed switch shape) — any stack other
+          # than dotnet/ts/rust lands on the honest generic floor, whose
+          # not_evaluated fails barrier_verify_gate below.
+          verify_floor:
+            target: barrier_verify_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.generic
+              use:
+                inputs:
+                  cwd: "$.run.repo_root"
+                outputs:
+                  "$.context.barrier_verify": verify
+
+      barrier_verify_gate:
+        transitions:
+          advance:
+            target: done
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.barrier_verify.status == 'pass'" }
+          # fail AND not_evaluated both land here — the plan's deliverables are
+          # all individually marked complete (scoped evidence), but the closing
+          # barrier caught something the narrow per-slice checks could not see
+          # (or the stack was unrecognized). $.context.barrier_verify carries
+          # the verdict for the operator; this is NOT a silent pass.
+          abort:
+            target: barrier_failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.barrier_verify.status != 'pass'" }
+
+      # Every deliverable built + marked, but the ONE closing barrier failed
+      # (or was unevaluated). Operator inspects $.context.barrier_verify and
+      # drives a fix — never silently reported as a clean plan completion.
+      barrier_failed:
+        terminal: true
+        outcome: failure
 
       done:
         terminal: true
