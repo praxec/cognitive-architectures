@@ -203,6 +203,13 @@ workflows:
                   # now stated rather than hardcoded inside the callee. Narrow it
                   # here if a program's crates justify a cheaper backstop surface.
                   backstop_cwd:   "$.context.route_repo"
+                  # Explicit "" (not omitted): flow.implement.deliverable now
+                  # declares `verify_scope` — a nested `kind: workflow` call
+                  # does not merge the callee's own default into
+                  # `$.workflow.input` (see flow.execute-cohorts' identical
+                  # note), so this must be passed even to keep today's
+                  # unchanged full-backstop-per-deliverable behavior.
+                  verify_scope:   ""
                   plan_id:        "$.workflow.input.plan_id"
                   deliverable_id: "$.context.next_deliverable_id"
                   caller_id:      "$.workflow.input.caller_id"

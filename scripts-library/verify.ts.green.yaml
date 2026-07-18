@@ -20,6 +20,20 @@ scripts:
       # Optional positional $1 = working directory (the package.json root — the
       # verifyIn `cwd` the slot forwards). Defaults to PWD.
       #
+      # Optional positional $2 = SCOPE (space-separated repo-relative paths —
+      # the slice's affected test file(s) / touched files; cap.verify.ts's
+      # `scope` input). SCOPE PRESENT (non-empty): run the FAST per-slice path
+      # — lint scoped to the touched files + vitest run on the affected test
+      # file(s) ONLY. `tsc --noEmit` and `vite build` are SKIPPED here (not
+      # claimed as passed — they are simply absent from `criteria`, honestly),
+      # because a whole-program typecheck/bundle cannot be scoped to one file
+      # at any less cost than running it whole; that full check stays in the
+      # SCOPE-EMPTY arm below, meant to run ONCE as the cohort/plan BARRIER
+      # (docs/plan-types.develop-vs-execute.md), not per slice. SCOPE EMPTY
+      # (default, backward compatible): unchanged full barrier gate — install +
+      # tsc --noEmit + vite build, exactly as before this cap gained a scope
+      # input.
+      #
       # SELF-SUFFICIENCY (mirrors verify.dotnet.green): do not trust the invoking
       # daemon's env. Prefer a repo-local toolchain if present, run npm
       # non-interactively, and never hang the "deterministic" gate:
@@ -32,6 +46,7 @@ scripts:
       set -uo pipefail
 
       cwd="${1:-$PWD}"
+      scope="${2:-}"
       export PATH="$cwd/node_modules/.bin:${PATH:-}"
       export CI="${CI:-1}"
       export npm_config_fund="${npm_config_fund:-false}"
@@ -53,6 +68,63 @@ scripts:
         exit 1
       fi
 
+      # ── SCOPED PER-SLICE PATH (scope non-empty): lint + affected test(s) only.
+      # No install here — a slice runs mid-plan, after the barrier's own install
+      # has already populated node_modules at least once; if it hasn't, the
+      # scoped tools below simply report themselves absent (honest degrade,
+      # same discipline as the missing-tsconfig arm in the full path).
+      if [ -n "${scope// /}" ]; then
+        STATUS="pass"
+
+        # 1. SCOPED LINT — eslint on the touched files ONLY, if configured.
+        has_config=false
+        for f in .eslintrc .eslintrc.js .eslintrc.cjs .eslintrc.json .eslintrc.yaml .eslintrc.yml eslint.config.js eslint.config.mjs eslint.config.cjs eslint.config.ts; do
+          [ -f "$f" ] && has_config=true
+        done
+        if [ "$has_config" = true ] && (command -v npx >/dev/null 2>&1); then
+          # shellcheck disable=SC2086
+          if npx --no-install eslint $scope --no-error-on-unmatched-pattern >&2 2>&1; then
+            c_lint=$(crit scoped_lint true "eslint clean on touched files")
+          else
+            c_lint=$(crit scoped_lint false "eslint reported violations on touched files"); STATUS="fail"
+          fi
+        else
+          c_lint=$(crit scoped_lint true "no eslint config — scoped lint skipped")
+        fi
+
+        # 2. AFFECTED TEST(S) — vitest run on the scope's test file(s) only, if
+        # the project has a vitest/test script and at least one scope path
+        # looks like a test file. Honestly skip (met=true, evidence says so)
+        # when neither holds — this cap never invents a failure for a slice
+        # that touched no test file.
+        test_paths=""
+        for p in $scope; do
+          case "$p" in *.test.*|*.spec.*|*__tests__*) test_paths="$test_paths $p" ;; esac
+        done
+        has_test_script=false
+        node -e "process.exit(require('./package.json').scripts && require('./package.json').scripts.test ? 0 : 1)" 2>/dev/null && has_test_script=true
+        if [ -n "${test_paths// /}" ] && { [ -x node_modules/.bin/vitest ] || command -v npx >/dev/null 2>&1; }; then
+          # shellcheck disable=SC2086
+          if npx --no-install vitest run $test_paths >&2 2>&1; then
+            c_test=$(crit affected_tests true "vitest run (scoped) green: $test_paths")
+          else
+            c_test=$(crit affected_tests false "vitest run (scoped) failed: $test_paths"); STATUS="fail"
+          fi
+        elif [ -z "${test_paths// /}" ]; then
+          c_test=$(crit affected_tests true "no test file in scope — affected-test check skipped")
+        else
+          c_test=$(crit affected_tests true "no vitest/test runner available — affected-test check skipped")
+        fi
+
+        printf '{"status":"%s","summary":"scoped lint + affected test(s): %s (scope: %s)","criteria":[%s,%s],"findings":[],"provenance":{"stack":"language:ts","source":"pack"}}\n' \
+          "$STATUS" "$STATUS" "$scope" "$c_lint" "$c_test"
+
+        [ "$STATUS" = "pass" ] && exit 0 || exit 1
+      fi
+
+      # ── FULL BARRIER PATH (scope empty, default) — UNCHANGED from before this
+      # cap gained a scope input: install + tsc --noEmit + vite build. Meant to
+      # run ONCE at cohort/plan close (docs/plan-types.develop-vs-execute.md).
       STATUS="pass"
 
       # 1. INSTALL — reproducible `npm ci` when a lockfile is present, else install.

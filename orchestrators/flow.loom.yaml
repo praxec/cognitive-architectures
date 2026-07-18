@@ -109,6 +109,18 @@ workflows:
 
       # Build: drive the plan to completion (acquire → build → mark, looped).
       # caller_id is a literal (bypasses the slot table) — a single loom driver.
+      # verify_scope/stack are explicit EMPTY-STRING literals, not omitted: a
+      # nested `kind: workflow` call does not merge the callee's OWN declared
+      # defaults into `$.workflow.input` (the cargo_scope/min_tests gotcha
+      # documented on flow.shared.mini-vee) — omitting them here would make
+      # flow.execute-cohorts' internal `$.workflow.input.stack`/`verify_scope`
+      # reads unresolved-arg-path errors, not silently "". Passing "" for both
+      # preserves flow.loom's EXACT prior behavior (full per-deliverable
+      # backstop, no closing barrier) — flow.loom does not (yet) know a
+      # heterogeneous brief's stack ahead of scheduling, so it deliberately
+      # does not opt into the scoped/barrier path here. A future revision that
+      # threads a real stack through cap.plan.build-graph's output can opt in
+      # by passing non-"" values instead.
       executing:
         goal: Drive the cpm plan to completion via the cohort executor.
         transitions:
@@ -120,8 +132,10 @@ workflows:
               definitionId: cognitive/flow.execute-cohorts
               use:
                 inputs:
-                  plan_id:   "$.context.schedule.plan_id"
-                  caller_id: "loom-driver"
+                  plan_id:      "$.context.schedule.plan_id"
+                  caller_id:    "loom-driver"
+                  verify_scope: ""
+                  stack:        ""
 
       done:
         terminal: true

@@ -36,6 +36,19 @@ scripts:
       # Optional positional $1 = working directory (a .sln or project dir); the
       # verifyIn `cwd` the slot forwards. Defaults to PWD.
       #
+      # Optional positional $2 = SCOPE (cap.verify.dotnet's `scope` input) — the
+      # per-slice narrowing target. Two forms, disambiguated by disk lookup
+      # relative to $cwd:
+      #   - a PROJECT PATH (a .csproj/.sln or a directory containing one): build
+      #     + test THAT PROJECT ONLY instead of the whole cwd tree.
+      #   - anything else: an ADDITIONAL `dotnet test --filter` fragment, ANDed
+      #     with the base Category filter (still builds the whole cwd tree —
+      #     dotnet has no "build only these files", so a filter-only scope
+      #     narrows the TEST run, not the build).
+      # Empty/absent (default): UNCHANGED full cwd-wide build+test — the
+      # barrier gate this script has always been, meant to run ONCE at
+      # cohort/plan close (docs/plan-types.develop-vs-execute.md), not per slice.
+      #
       # PORTABILITY: uses `dotnet` when it is on PATH. If it is NOT (e.g. praxec
       # hosted under WSL where the SDK lives on the Windows side), it falls back
       # to `powershell.exe -Command "dotnet ..."`, translating a /mnt/<drive>
@@ -75,7 +88,24 @@ scripts:
       export DOTNET_CLI_TELEMETRY_OPTOUT="${DOTNET_CLI_TELEMETRY_OPTOUT:-1}"
 
       cwd="${1:-$PWD}"
+      scope="${2:-}"
       test_filter="${DOTNET_TEST_FILTER:-Category!=IntegrationTest}"
+
+      # Resolve SCOPE's two forms (see header). build_target is what `dn build`
+      # / `dn test` operate on ("" = whole cwd, unchanged); scope_filter is an
+      # extra --filter fragment ANDed onto test_filter (empty = none added).
+      build_target=""
+      scope_filter=""
+      if [ -n "${scope// /}" ]; then
+        if [ -e "$cwd/$scope" ] || [ -e "$scope" ]; then
+          build_target="$scope"
+        else
+          scope_filter="$scope"
+        fi
+      fi
+      if [ -n "$scope_filter" ]; then
+        test_filter="(${test_filter})&(${scope_filter})"
+      fi
 
       # JSON-string-safe body for stdin (no surrounding quotes): escape backslash
       # and doublequote; collapse embedded newlines to a literal \n so a multi-line
@@ -110,22 +140,32 @@ scripts:
       build_out=""
       test_out=""
 
-      if build_out=$(dn build --nologo 2>&1); then
+      if [ -n "$build_target" ]; then
+        build_out=$(dn build --nologo "$build_target" 2>&1); build_rc=$?
+      else
+        build_out=$(dn build --nologo 2>&1); build_rc=$?
+      fi
+      if [ "$build_rc" -eq 0 ]; then
         printf '%s\n' "$build_out" >&2
-        c_build=$(crit build true "dotnet build succeeded")
+        c_build=$(crit build true "dotnet build succeeded${build_target:+ ($build_target)}")
       else
         printf '%s\n' "$build_out" >&2
-        c_build=$(crit build false "dotnet build failed"); STATUS="fail"
+        c_build=$(crit build false "dotnet build failed${build_target:+ ($build_target)}"); STATUS="fail"
       fi
 
       # Only run tests if build passed (a failed build makes test output noise).
       if [ "$STATUS" = "pass" ]; then
-        if test_out=$(dn test --nologo --filter "$test_filter" 2>&1); then
+        if [ -n "$build_target" ]; then
+          test_out=$(dn test --nologo --filter "$test_filter" "$build_target" 2>&1); test_rc=$?
+        else
+          test_out=$(dn test --nologo --filter "$test_filter" 2>&1); test_rc=$?
+        fi
+        if [ "$test_rc" -eq 0 ]; then
           printf '%s\n' "$test_out" >&2
-          c_test=$(crit test true "dotnet test (filter: $test_filter) green")
+          c_test=$(crit test true "dotnet test (filter: $test_filter)${build_target:+ ($build_target)} green")
         else
           printf '%s\n' "$test_out" >&2
-          c_test=$(crit test false "dotnet test (filter: $test_filter) failed"); STATUS="fail"
+          c_test=$(crit test false "dotnet test (filter: $test_filter)${build_target:+ ($build_target)} failed"); STATUS="fail"
         fi
       else
         c_test=$(crit test false "skipped: build failed")

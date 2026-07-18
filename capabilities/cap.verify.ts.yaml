@@ -15,6 +15,20 @@
 # and a frontend deliverable would (wrongly) be run through cargo. This cap is
 # what makes praxec actually verify TypeScript/React/Vite work with its OWN
 # toolchain.
+#
+# SCOPE (docs/plan-types.develop-vs-execute.md — the velocity discipline):
+# `scope` is OPTIONAL and defaults to "" (empty), which is the FULL barrier gate
+# described above, UNCHANGED — every existing caller that doesn't pass it keeps
+# today's behavior exactly. When a caller DOES pass `scope` (space-separated
+# repo-relative paths — the deliverable's affected test file(s) / touched
+# files), the script runs the NARROW per-slice check instead: lint scoped to
+# the touched files + the affected vitest test file(s) ONLY — never the
+# whole-program `tsc --noEmit` (that is inherently whole-program; it cannot be
+# cheaply run against one file) and never `vite build`. Those two stay in the
+# unscoped/barrier arm, run ONCE at cohort/plan close — see
+# `flow.execute-cohorts`'s `barrier_verifying` state and
+# `flow.cohort.compiled-stack`'s verify milestone, the two ExecutionPlan
+# barriers that call this SAME cap with `scope: ""`.
 
 workflows:
   cap.verify.ts:
@@ -24,13 +38,16 @@ workflows:
       TypeScript/Vite correctness gate: npm ci (or install) + tsc --noEmit +
       vite build, emitted as the canonical HOP verifyOut
       (status/summary/criteria/findings/provenance). The verify slot cap for
-      stack: ts.
+      stack: ts. Optional `scope` narrows to lint + the affected vitest
+      test(s) only (the per-slice velocity path) — "" (default) runs the full
+      barrier gate unchanged.
     snippet:
       # verifyIn requires `cwd`; the hop_slot resolver forwards it as the cap's
       # `cwd` input. OPTIONAL here so a deterministic slot call (no actor
       # arguments) degrades to PWD rather than failing the sub-workflow start.
       inputs:
-        cwd: { type: string }
+        cwd:   { type: string }
+        scope: { type: string, default: "" }
       # Convention (Spec A.1 §4.2): a cap.<slot>.<stack> names its HOP output
       # after the slot. The engine maps this into $.context.verify.
       outputs:
@@ -38,7 +55,10 @@ workflows:
     initialState: ready
     states:
       ready:
-        goal: Run the TypeScript/Vite build+typecheck gate; emit verifyOut.
+        goal: >
+          Run the TypeScript/Vite gate; emit verifyOut. Full barrier
+          (install + tsc --noEmit + vite build) when scope is empty; scoped
+          lint + affected-test(s) only when scope names touched files.
         transitions:
           run:
             target: done
@@ -51,6 +71,7 @@ workflows:
               treatNonZeroAsFailure: false
               args:
                 - "$.workflow.input.cwd"
+                - "$.workflow.input.scope"
             output:
               verify: "$.output.json"
       done: { terminal: true }
