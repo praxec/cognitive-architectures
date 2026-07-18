@@ -5,6 +5,16 @@
 # audit trail), but the executor itself just runs the test suite — the
 # author of the fix is responsible for adding a test that covers the
 # repro path (per the `plan.fix.scope-bounded` skill).
+#
+# SCOPE (docs/plan-types.develop-vs-execute.md): this cap's sole current
+# caller (`flow.bugfix-from-error-log`) produces exactly ONE fix per run, so
+# the full `cargo test --workspace` here already plays the role of a single
+# change's ONE barrier — it is not the per-slice-repeated cost the velocity
+# discipline targets. `scope` is added anyway (optional, default "" =
+# unchanged full-workspace run) so a FUTURE cohort-style/batched bugfix flow
+# can request the narrow `-p <crate>` check without a caller having to derive
+# it from `defect_location` (a free-form object with no guaranteed shape) —
+# the caller passes scope explicitly when it has one.
 
 workflows:
   cap.verify.regression-tests:
@@ -13,11 +23,14 @@ workflows:
     description: >
       Run the test suite; confirm passing. The fix author is
       responsible for adding a regression test that covers the
-      repro path; this cap verifies the new test passes.
+      repro path; this cap verifies the new test passes. Optional `scope`
+      (a crate/package name) narrows the run to `-p <scope>`; "" (default)
+      runs the full workspace, unchanged.
     snippet:
       inputs:
         defect_location: { type: object, required: true }
         repro_steps:     { type: array,  required: true }
+        scope:           { type: string, default: "" }
       outputs:
         ok:          { type: boolean }
         tests_added: { type: integer }
@@ -31,6 +44,8 @@ workflows:
             executor:
               kind: script
               subject: test.cargo.workspace
+              args:
+                - "$.workflow.input.scope"
             output:
               ok:          "$.output.passed"
               tests_added: { set: 1 }

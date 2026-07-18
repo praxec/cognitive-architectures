@@ -12,7 +12,21 @@
 # Without this cap, a `stack: dotnet` workflow's verify slot falls back to
 # cap.verify.generic (honest `not_evaluated`) — i.e. no real .NET gate. This cap
 # is what makes praxec actually verify C#/.NET work.
-
+#
+# SCOPE (docs/plan-types.develop-vs-execute.md — the velocity discipline):
+# `scope` is OPTIONAL and defaults to "" (empty) — the FULL `dotnet build` +
+# `dotnet test` over `cwd`, UNCHANGED from before this cap gained the input
+# (every existing caller that omits it keeps today's behavior exactly). When a
+# caller passes `scope` (a project-relative path, e.g. a single `.csproj`/test
+# project directory, OR a `dotnet test --filter` fragment), the underlying
+# script narrows the build+test to that project/filter instead of the whole
+# `cwd` tree — the fast per-slice check. The whole-solution run stays the
+# unscoped/barrier arm, meant to run ONCE at cohort/plan close — see
+# `flow.execute-cohorts`'s `barrier_verifying` state and
+# `flow.cohort.compiled-stack`'s verify milestone. `cwd` itself already lets a
+# caller narrow to a project directory (as `flow.implement.dotnet-slice`'s
+# `scoped_cwd` does) — `scope` is for narrowing FURTHER within a shared `cwd`
+# via an explicit filter, without forcing every caller to also split cwd.
 workflows:
   cap.verify.dotnet:
     verb: verify
@@ -21,13 +35,16 @@ workflows:
       .NET correctness gate: dotnet build + dotnet test (Category!=IntegrationTest
       by default), emitted as the canonical HOP verifyOut
       (status/summary/criteria/findings/provenance). The verify slot cap for
-      stack: dotnet.
+      stack: dotnet. Optional `scope` (a project path or test filter fragment)
+      narrows the per-slice check — "" (default) runs the full barrier gate
+      over `cwd` unchanged.
     snippet:
       # verifyIn requires `cwd`; the hop_slot resolver forwards it as the cap's
       # `cwd` input. OPTIONAL here so a deterministic slot call (no actor
       # arguments) degrades to PWD rather than failing the sub-workflow start.
       inputs:
-        cwd: { type: string }
+        cwd:   { type: string }
+        scope: { type: string, default: "" }
       # Convention (Spec A.1 §4.2): a cap.<slot>.<stack> names its HOP output
       # after the slot. The engine maps this into $.context.verify.
       outputs:
@@ -35,7 +52,9 @@ workflows:
     initialState: ready
     states:
       ready:
-        goal: Run the .NET build+test gate; emit verifyOut.
+        goal: >
+          Run the .NET build+test gate; emit verifyOut. Full cwd-wide gate
+          when scope is empty; scoped to the given project/filter otherwise.
         transitions:
           run:
             target: done
@@ -48,6 +67,7 @@ workflows:
               treatNonZeroAsFailure: false
               args:
                 - "$.workflow.input.cwd"
+                - "$.workflow.input.scope"
             output:
               verify: "$.output.json"
       done: { terminal: true }

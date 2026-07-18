@@ -14,6 +14,21 @@
 #                       rust   → cap.verify.rust   (cargo fmt + clippy + test)
 #                       dotnet → cap.verify.dotnet (dotnet build + test)
 #                     an undetected stack ⇒ `failed` (never a disguised pass).
+#
+# SCOPED-VS-BARRIER (docs/plan-types.develop-vs-execute.md): `verify_scope`
+# (input, default "") lets a caller narrow the ts/dotnet arms above to the
+# deliverable's own affected test(s)/project instead of the full
+# suite/solution — the velocity-critical per-slice path. DEFAULT IS "" =
+# UNCHANGED: every caller that doesn't pass it (e.g. flow.drive-program today)
+# keeps the exact full-backstop behavior this flow has always had. The caller
+# that DOES want the narrow path (`flow.execute-cohorts`) supplies
+# `verify_scope` per run and owns the corresponding FULL-SUITE BARRIER once at
+# plan close — this flow is the per-DELIVERABLE leaf, never the barrier
+# itself. rust is UNCHANGED either way: cap.verify.rust has no scope input (by
+# design — see cap.verify.ts/dotnet's own headers for why rust was left out of
+# this pass), so verify_rust below remains the full cross-crate backstop on
+# every deliverable; rust cohorts that want the barrier-once model should use
+# `flow.cohort.compiled-stack` instead, which already implements it.
 #   marking_complete→ cpm-planner `plan.mark_status` complete (compare-and-swap;
 #                     the caller must hold the deliverable's cohort lock —
 #                     `caller_id`). LOCK_NOT_HELD / a CAS conflict fails the run.
@@ -53,6 +68,11 @@ workflows:
       # be a SUPERSET of the inner loop's `cargo_scope` surface, or the backstop
       # cannot see the breakage it exists to catch.
       backstop_cwd:   { type: string, required: true }
+      # OPTIONAL per-slice narrowing for the ts/dotnet verify arms (see the
+      # SCOPED-VS-BARRIER header note above). "" (default) = unchanged full
+      # backstop. Declared with a default so callers that predate this input
+      # (flow.drive-program) don't need to change.
+      verify_scope:   { type: string, default: "" }
       # cpm-planner coordinates: which plan/deliverable, and the lock holder.
       plan_id:        { type: string, required: true }
       deliverable_id: { type: string, required: true }
@@ -78,8 +98,13 @@ workflows:
         check: "$.context.impl_files_changed >= 1"
       - id: workspace_verified
         statement: >
-          The stack-appropriate verifier (ts | rust | dotnet) passed on the
-          changed repository.
+          The stack-appropriate verifier (ts | rust | dotnet) passed. Full
+          workspace/solution when verify_scope is "" (the default); scoped to
+          the deliverable's affected test(s)/project when the caller opted
+          into the scoped path (ts/dotnet only — see verify_ts/verify_dotnet).
+          A scoped pass here is NOT the plan's final word for that caller: its
+          driver (e.g. flow.execute-cohorts) still owes the ONE full-suite
+          barrier at plan close.
         check: "$.context.ws_verify.status == 'pass'"
     initialState: baselining
     states:
@@ -215,12 +240,19 @@ workflows:
             target: failed
             actor: deterministic
 
-      # TS/Vite verify (npm ci + tsc + vite build). cwd = repo_path (the
-      # package.json root) — threaded explicitly so there is no unresolved
-      # `$.workflow.input.cwd`; cap.verify.ts declares `cwd`, so this use.inputs
-      # binding is V30-contract-clean.
+      # TS/Vite verify. cwd = repo_path (the package.json root) — threaded
+      # explicitly so there is no unresolved `$.workflow.input.cwd`;
+      # cap.verify.ts declares `cwd`, so this use.inputs binding is
+      # V30-contract-clean. `scope` = `$.workflow.input.verify_scope`: "" (the
+      # default every existing caller gets) runs the FULL npm ci + tsc + vite
+      # build, unchanged; a caller that opted in gets the fast scoped-lint +
+      # affected-test(s) path instead (see cap.verify.ts's own header and
+      # flow.execute-cohorts' closing barrier, which is where the full check
+      # then lands ONCE for that caller).
       verify_ts:
-        goal: TypeScript/Vite verify (npm ci + tsc + vite build) before marking complete.
+        goal: >
+          TypeScript/Vite verify before marking complete — full barrier when
+          verify_scope is empty, scoped lint + affected test(s) otherwise.
         transitions:
           verify:
             target: verified_decision
@@ -230,7 +262,8 @@ workflows:
               definitionId: cognitive/cap.verify.ts
               use:
                 inputs:
-                  cwd: "$.run.repo_root"
+                  cwd:   "$.run.repo_root"
+                  scope: "$.workflow.input.verify_scope"
                 outputs:
                   "$.context.ws_verify": verify
 
@@ -238,6 +271,10 @@ workflows:
       # verified the deliverable's OWN crate; scoped `-p crate` can miss
       # reverse-dependency breakage. Run ONE full `cargo test --workspace`
       # (+ fmt + clippy) here (cwd = backstop_cwd) before marking complete.
+      # UNCHANGED by verify_scope: cap.verify.rust has no scope input (rust was
+      # deliberately left out of this pass — see this flow's header); a rust
+      # cohort that wants the barrier-once-per-cohort model should run through
+      # flow.cohort.compiled-stack instead, which already implements it.
       verify_rust:
         goal: Full-workspace rust verify (cross-crate backstop) before marking complete.
         transitions:
@@ -253,10 +290,16 @@ workflows:
                 outputs:
                   "$.context.ws_verify": verify
 
-      # .NET verify (dotnet build + test). cwd = backstop_cwd (the
-      # composition-root / whole-solution surface the caller declared).
+      # .NET verify. cwd = backstop_cwd (the composition-root / whole-solution
+      # surface the caller declared). `scope` = `$.workflow.input.verify_scope`:
+      # "" (default) runs the full dotnet build + test over backstop_cwd,
+      # unchanged; a caller that opted in narrows to a project path or test
+      # filter fragment instead (cap.verify.dotnet's own header) — the full
+      # solution check then lands ONCE at that caller's closing barrier.
       verify_dotnet:
-        goal: .NET verify (dotnet build + test) before marking complete.
+        goal: >
+          .NET verify before marking complete — full backstop when
+          verify_scope is empty, scoped project/filter otherwise.
         transitions:
           verify:
             target: verified_decision
@@ -266,7 +309,8 @@ workflows:
               definitionId: cognitive/cap.verify.dotnet
               use:
                 inputs:
-                  cwd: "$.workflow.input.backstop_cwd"
+                  cwd:   "$.workflow.input.backstop_cwd"
+                  scope: "$.workflow.input.verify_scope"
                 outputs:
                   "$.context.ws_verify": verify
 
