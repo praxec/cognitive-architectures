@@ -1,0 +1,118 @@
+# scripts-library/verify.browser.probe-refs.yaml
+#
+# EMIT-TIME integrity check for cap.diagnose.browser-probe's observations.
+#
+# The dogfood failure this closes: the probe agent wrote
+# `.praxec/qa-artifacts/probe-01.spec.ts` and cited
+# `.praxec/qa-artifacts/probe-obs-001.spec.ts`. The submit schema enforces
+# `probe_ref: { minLength: 1 }` — a string, not a file — so the run sailed
+# on and the deterministic replay gate discovered the mismatch two steps
+# later, where it became a quiet `not_evaluated` and the observation was
+# lost. The same run emitted SIX observations against THREE written probes.
+#
+# A schema cannot stat a file, so this is the poka-yoke that can exist: run
+# it in the PRODUCING cap, immediately after submit, and fail LOUDLY at the
+# step where the mistake was made instead of laundering it downstream.
+#
+# Non-zero exit is the point — the wrapping state leaves
+# `treatNonZeroAsFailure` at its default so a broken probe contract aborts
+# the run. It never edits, repairs, or drops an observation: a fix that
+# silently pruned the bad ones would reintroduce exactly the "fewer
+# findings than reality" failure it exists to prevent.
+version: "1.0.0"
+scripts:
+  verify.browser.probe-refs:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Verify every observation's probe_ref is a real, distinct, in-tree file.
+      #   $1 — observations array (JSON string).
+      #   $2 — observation_count the agent claimed (integer).
+      #   $3 — repo root (run-ambient $.run.repo_root); probe_refs resolve here.
+      #   $4 — storage_state path ("" when the app declares no auth).
+      # Emits a JSON report on stdout. Exit 0 = contract holds; exit 1 = the
+      # probe contract is broken and the run must stop here.
+      set -uo pipefail
+      OBS="${1:-[]}"
+      CLAIMED="${2:-0}"
+      REPO_ROOT="${3:-}"
+      STORAGE_STATE="${4:-}"
+
+      fail() { # $1 = reason, $2 = violations JSON array
+        jq -n --arg reason "$1" --argjson v "${2:-[]}" \
+          '{status: "invalid", reason: $reason, violations: $v,
+            violation_count: ($v | length)}'
+        exit 1
+      }
+
+      command -v jq >/dev/null 2>&1 || fail "jq is not installed" '[]'
+      printf '%s' "$OBS" | jq -e 'type == "array"' >/dev/null 2>&1 \
+        || fail "observations was not a JSON array" '[]'
+      [ -n "$REPO_ROOT" ] && [ -d "$REPO_ROOT" ] \
+        || fail "repo_root '$REPO_ROOT' is not a directory" '[]'
+      cd "$REPO_ROOT" || fail "cannot cd into repo_root '$REPO_ROOT'" '[]'
+
+      COUNT=$(printf '%s' "$OBS" | jq 'length')
+      V='[]'
+      add() { # $1 = observation id, $2 = probe_ref, $3 = problem
+        V=$(printf '%s' "$V" | jq --arg id "$1" --arg p "$2" --arg m "$3" \
+              '. + [{observation_id: $id, probe_ref: $p, problem: $m}]')
+      }
+
+      # --- claimed count must equal the real length (no phantom observations)
+      case "$CLAIMED" in (''|*[!0-9]*) CLAIMED=-1 ;; esac
+      if [ "$CLAIMED" != "$COUNT" ]; then
+        add "" "" "observation_count claimed $CLAIMED but observations has $COUNT entries"
+      fi
+
+      # --- one probe per observation: probe_refs must be DISTINCT ----------
+      # Six observations citing three probes means at least three of them are
+      # not independently replayable, whatever the files on disk say.
+      DUPES=$(printf '%s' "$OBS" \
+        | jq -r '[.[] | .probe_ref // ""] | group_by(.) | map(select(length > 1)) | .[] | .[0]' \
+        | sort -u)
+      if [ -n "$DUPES" ]; then
+        while IFS= read -r d; do
+          [ -n "$d" ] && add "" "$d" "probe_ref is cited by more than one observation (one probe per observation)"
+        done <<< "$DUPES"
+      fi
+
+      # --- per-observation checks ------------------------------------------
+      i=0
+      while [ "$i" -lt "$COUNT" ]; do
+        OB=$(printf '%s' "$OBS" | jq ".[$i]")
+        ID=$(printf '%s' "$OB" | jq -r '.id // ""')
+        PROBE=$(printf '%s' "$OB" | jq -r '.probe_ref // ""')
+        if [ -z "$PROBE" ]; then
+          add "$ID" "" "probe_ref is empty"
+        else
+          case "$PROBE" in
+            (/*|*..*)
+              add "$ID" "$PROBE" "probe_ref must be a repo-root-relative path without .." ;;
+            (*)
+              if [ ! -f "$PROBE" ]; then
+                add "$ID" "$PROBE" "probe file does not exist under repo root (cited but never written)"
+              elif [ ! -s "$PROBE" ]; then
+                add "$ID" "$PROBE" "probe file is empty"
+              elif [ -n "$STORAGE_STATE" ] \
+                   && ! grep -q 'storageState' "$PROBE"; then
+                # The app declared auth. A probe with no storageState replays
+                # in a fresh, signed-out context, lands on the login page, and
+                # can never reproduce — a SILENT false negative. Catch it here,
+                # where the author can still be told what they got wrong.
+                add "$ID" "$PROBE" "app declares auth (storage_state set) but probe never references storageState — replay would run signed out and could never reproduce"
+              fi
+              ;;
+          esac
+        fi
+        i=$((i + 1))
+      done
+
+      if [ "$(printf '%s' "$V" | jq 'length')" -gt 0 ]; then
+        fail "probe contract violated at emit time" "$V"
+      fi
+
+      jq -n --argjson n "$COUNT" \
+        '{status: "ok", observation_count: $n, violations: [], violation_count: 0}'

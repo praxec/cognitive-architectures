@@ -15,6 +15,20 @@
 #                       suspenders, defense against schema drift.
 #   drift_detected    — any finding at all (the app drifted from its
 #                       cited expected behavior).
+#   not_evaluated_count / evaluation_complete
+#                     — the replay gate's HONEST FLOOR, promoted into the
+#                       report. Previously the floor was computed but never
+#                       reached the report, so a run where every probe was
+#                       unreplayable (no playwright, missing probe file, a
+#                       signed-out replay against an authenticated app)
+#                       produced a report that looked EXACTLY like a clean
+#                       one: zero findings, zero blocking, drift_detected
+#                       false. "No defects found" and "could not evaluate
+#                       anything" must not render identically in a harness
+#                       whose product is a trustworthy verdict.
+#                       evaluation_complete is false whenever anything went
+#                       unevaluated; read the report's `not_evaluated` for
+#                       the per-observation reasons.
 version: "1.0.0"
 scripts:
   audit.findings.aggregate:
@@ -27,12 +41,17 @@ scripts:
       #   $1 — findings array (JSON string), default [].
       #   $2 — product_questions array (JSON string), default [].
       #   $3 — discarded array (JSON string), default [].
+      #   $4 — not_evaluated array (JSON string), default []: observations
+      #        the replay gate could NOT evaluate. Kept strictly separate
+      #        from `discarded` — discarded means "we replayed it and it did
+      #        not reproduce", not_evaluated means "we never got to look".
       # Emits JSON on stdout, read at $.output.json.*. Always exits 0 —
       # verdicts are data, not exit codes.
       set -uo pipefail
       FINDINGS="${1:-[]}"
       QUESTIONS="${2:-[]}"
       DISCARDED="${3:-[]}"
+      NOT_EVALUATED="${4:-[]}"
 
       # Fail-soft on malformed upstream payloads: coerce each non-array arg
       # to [] but RECORD the malformation in the report (visible, not
@@ -43,9 +62,11 @@ scripts:
       F="$FINDINGS";  is_array "$F" || { MALFORMED=$(printf '%s' "$MALFORMED" | jq '. + ["findings"]');          F='[]'; }
       Q="$QUESTIONS"; is_array "$Q" || { MALFORMED=$(printf '%s' "$MALFORMED" | jq '. + ["product_questions"]'); Q='[]'; }
       D="$DISCARDED"; is_array "$D" || { MALFORMED=$(printf '%s' "$MALFORMED" | jq '. + ["discarded"]');         D='[]'; }
+      N="$NOT_EVALUATED"; is_array "$N" || { MALFORMED=$(printf '%s' "$MALFORMED" | jq '. + ["not_evaluated"]'); N='[]'; }
 
       jq -n --argjson findings "$F" --argjson questions "$Q" \
-            --argjson discarded "$D" --argjson malformed "$MALFORMED" '
+            --argjson discarded "$D" --argjson notevaluated "$N" \
+            --argjson malformed "$MALFORMED" '
         # Evidence invariants, RECOUNTED in code (never trusted from the
         # agent): a finding is unevidenced unless it cites a closed-enum
         # expectedSource with a non-empty reference, carries the copied
@@ -65,13 +86,22 @@ scripts:
               or ((($e.consoleErrors? // []) | length) > 0)
               or ((($e.failedRequests? // []) | length) > 0));
 
-        ($findings | map(select(evidenced | not))) as $unevidenced
+        # A channel that arrived MALFORMED was coerced to [] above. Counting
+        # an empty coerced array as "0 problems" would let a broken upstream
+        # payload satisfy the very outcomes these scalars gate — a clean
+        # verdict produced by a channel nobody could read. Both counters fall
+        # back to the -1 honest floor instead, the same sentinel the flow
+        # seeds them with, so `== 0` cannot be met by a run that lost data.
+        (($malformed | index("findings")) != null)      as $findings_lost
+        | (($malformed | index("not_evaluated")) != null) as $noteval_lost
+        | ($findings | map(select(evidenced | not))) as $unevidenced
         | {
             total_findings:         ($findings | length),
             blocking_count:         ($findings
               | map(select(.severity == "critical" or .severity == "high"))
               | length),
-            unevidenced_count:      ($unevidenced | length),
+            unevidenced_count:      (if $findings_lost then -1
+                                     else ($unevidenced | length) end),
             by_severity: {
               critical: ($findings | map(select(.severity == "critical")) | length),
               high:     ($findings | map(select(.severity == "high"))     | length),
@@ -81,6 +111,13 @@ scripts:
             drift_detected:         (($findings | length) > 0),
             product_question_count: ($questions | length),
             discarded_count:        ($discarded | length),
+            # The honest floor, promoted to a headline scalar: a report with
+            # zero findings means "clean" ONLY when this is 0 and
+            # evaluation_complete is true.
+            not_evaluated_count:    (if $noteval_lost then -1
+                                     else ($notevaluated | length) end),
+            evaluation_complete:    ((($notevaluated | length) == 0)
+                                     and ($noteval_lost | not)),
             # The offenders, trimmed to what a reviewer acts on first.
             unevidenced: ($unevidenced
               | map({id: (.id? // null), title: (.title? // null),
@@ -88,5 +125,6 @@ scripts:
             malformed_channels:     $malformed,
             findings:               $findings,
             product_questions:      $questions,
-            discarded:              $discarded
+            discarded:              $discarded,
+            not_evaluated:          $notevaluated
           }'

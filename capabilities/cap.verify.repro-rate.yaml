@@ -30,12 +30,20 @@ workflows:
         # Replays per probe (floored at 2 by the script — cannot prove >=2
         # successes with fewer than 2 attempts).
         attempts:     { type: integer, default: 5 }
+        # Operator-saved Playwright storage-state path, or "" when the app
+        # declares no auth. Non-empty makes an UNAUTHENTICATED replay a
+        # detected, loud not_evaluated instead of a silent zero-reproduction.
+        storage_state: { type: string, default: "" }
       outputs:
         # Observations that reproduced (each gains a `reproduction` object
         # the finding cap copies VERBATIM into its Finding).
         reproduced:       { type: array }
         # Evaluated but under the >=2 threshold — not currency.
         discarded:        { type: array }
+        # The HONEST FLOOR, surfaced as a first-class channel and not buried
+        # in repro_report: observations that could not be replayed at all.
+        # "Could not evaluate" must be distinguishable from "nothing wrong".
+        not_evaluated:    { type: array }
         reproduced_count: { type: integer }
         # The full replay report (results, not_evaluated floor, counts).
         repro_report:     { type: object }
@@ -58,9 +66,15 @@ workflows:
                 # run-ambient repo root. A4 FOLLOW-UP: switch to
                 # $.run.artifacts_dir when that scope lands in the engine.
                 - "$.run.repo_root"
+                # Declares the app is behind auth. The script refuses to
+                # replay a probe that does not carry `storageState` (a
+                # signed-out replay can never reproduce) and reports it as
+                # not_evaluated rather than as a clean zero.
+                - "$.workflow.input.storage_state"
             output:
               reproduced:       "$.output.json.reproduced"
               discarded:        "$.output.json.discarded"
+              not_evaluated:    "$.output.json.not_evaluated"
               reproduced_count: "$.output.json.reproduced_count"
               repro_report:     "$.output.json"
       done: { terminal: true }

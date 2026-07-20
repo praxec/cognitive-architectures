@@ -14,6 +14,22 @@
 # to the repo root because `$.run.artifacts_dir` is not yet an engine
 # scope; when it lands, probe authoring (and the replay script's root)
 # move to it.
+#
+# TWO STATES, not one. `probing` mints; `checking_probes` runs the
+# deterministic verify.browser.probe-refs script over what was minted and
+# ABORTS if the probe contract is broken (cited-but-unwritten file,
+# duplicate probe_ref, miscounted observations, missing storageState on an
+# authenticated app). The submit schema can only enforce `minLength: 1` on
+# a path string — it cannot stat a file — so the file-level check has to be
+# code, and it belongs HERE, in the producing cap, where the mistake was
+# made. Discovering it at the replay gate two steps later turned a real
+# observation into a silent `not_evaluated`.
+#
+# SENIOR AFFINITY. This is the hardest reasoning step in the loop —
+# multi-step interactive exploration AND correct Playwright authoring in
+# one turn. Inheriting the default `auto_drive_affinity` burned a full
+# 900s budget across three commodity models with no result. It pins
+# `affinity: review` for the same reason cap.diagnose.finding does.
 
 workflows:
   cap.diagnose.browser-probe:
@@ -34,21 +50,29 @@ workflows:
         surface_map: { type: object, required: true }
         # The app under test.
         app_url:     { type: string, required: true }
+        # Repo-root-relative path to the operator's Playwright storage-state
+        # JSON, or "" when the app declares no auth. A PATH, never a
+        # credential. Non-empty makes `test.use({ storageState })` mandatory
+        # in every probe — enforced in code by verify.browser.probe-refs.
+        storage_state: { type: string, default: "" }
       outputs:
         observations:      { type: array }
         observation_count: { type: integer }
     initialState: probing
     states:
       probing:
+        # SENIOR tier: the loop's hardest reasoning step (see header).
+        affinity: review
         goal: >
           Probe the app for invariant violations, and make every observation
           REPLAYABLE. Read $.context — the charter ($.context.charter), the
-          surface map ($.context.surface_map), and the origin
-          ($.context.app_url). Using the leased browser, exercise the mapped
-          surfaces against the charter's invariants (stay in scope; at most
-          budget.max_probes probes). For EACH suspected anomaly: (1) confirm
-          it once interactively in the browser; (2) with your file tools,
-          write a SELF-CONTAINED Playwright spec under
+          surface map ($.context.surface_map), the origin
+          ($.context.app_url), and the auth path
+          ($.context.storage_state). Using the leased browser, exercise the
+          mapped surfaces against the charter's invariants (stay in scope;
+          at most budget.max_probes probes). For EACH suspected anomaly: (1)
+          confirm it once interactively in the browser; (2) with your file
+          tools, write a SELF-CONTAINED Playwright spec under
           `.praxec/qa-artifacts/` (repo-root-relative path, e.g.
           `.praxec/qa-artifacts/probe-<id>.spec.ts`) that navigates from the
           origin and is authored to PASS exactly WHEN THE ANOMALY IS PRESENT
@@ -58,13 +82,67 @@ workflows:
           if none — such observations become product questions downstream),
           url, steps[], probe_ref (the repo-root-relative spec path you
           actually wrote) }. Do not judge severity or file findings here —
-          observe, mint the probe, move on. Submit `observations` and
-          `observation_count` (the exact length of `observations`).
+          observe, mint the probe, move on.
+
+          NOT EVERY CHARTER ENTRY IS AN INVARIANT. The charter may carry an
+          `unverified_premises` array — claims from the operator's mission
+          whose subject could not be confirmed to exist. Those are NOT
+          invariants. The absence of a surface named in unverified_premises
+          is NOT an anomaly and must never become an observation; the
+          operator was mistaken about the app, and a wrong assumption is not
+          a defect. Probe ONLY against `charter.invariants`.
+
+          PLAYWRIGHT AUTHORING RULES — these are not style preferences.
+          Each one is a way a probe silently can never fire, which reads
+          downstream as "no defect found" rather than as "bad probe":
+
+          1. Register every listener BEFORE the navigation that would emit
+             the event. `page.on('console', ...)` or `page.on('pageerror',
+             ...)` attached AFTER `await page.goto(...)` misses every
+             load-time event, so the assertion always sees an empty array
+             and the probe can never pass. Order is: create the collector
+             array, attach the listeners, THEN goto.
+          2. NEVER use `page.on('requestfailed')` to detect an HTTP status.
+             It fires only on network-level failure (DNS, abort, connection
+             reset) and never for 401/403/404/500 — a server that answers
+             with an error IS a successful request. To assert on status,
+             use the goto/click response directly (`const res = await
+             page.goto(url); expect(res.status()).toBe(401)`), or
+             `page.waitForResponse(r => r.url().includes('/api/x') &&
+             r.status() === 401)`, or collect via `page.on('response', r =>
+             ...)` registered before navigation.
+          3. Assert on a STATE the app reaches, not on elapsed time. Use
+             `expect(locator).toBeVisible()` / `toHaveText()` (they retry)
+             or `page.waitForResponse` / `waitForURL`. A bare
+             `page.waitForTimeout(n)` makes the probe flaky, and flaky
+             probes land under the >=2 reproduction threshold and get
+             discarded as "did not reproduce" even when the defect is real.
+          4. No `test.skip(...)`, no conditional skip, no `test.fixme`. A
+             skipped test is counted by the replay gate as an attempt that
+             did not succeed. If you cannot author a probe for an anomaly,
+             emit no observation for it rather than a probe that skips.
+          5. ONE spec file per observation, each with a DISTINCT
+             `probe_ref`. Two observations may not cite the same file — the
+             gate replays per probe_ref and cannot tell them apart.
+          6. Write the file, then cite the EXACT path you wrote. A cited
+             path that does not exist on disk aborts this cap (checked in
+             code immediately after you submit).
+          7. AUTHENTICATION: if `$.context.storage_state` is non-empty, the
+             app is behind a login wall and the replay runs in a FRESH
+             browser context with no session. Every probe MUST begin with
+             `test.use({ storageState: '<the storage_state value>' });` —
+             without it the replay lands on the login page and can never
+             reproduce, no matter how real the defect is. This is checked in
+             code; a probe missing it aborts this cap. If storage_state is
+             "", do not add the line.
+
+          Submit `observations` and `observation_count` (the exact length of
+          `observations`).
         # Browser lease + file WRITE (probe authoring) — both scoped.
         tools: ["{{ $.run.leased.browser }}", "file:{{ $.run.repo_root }}"]
         transitions:
           submit_observations:
-            target: done
+            target: checking_probes
             actor: agent
             inputSchema:
               type: object
@@ -90,4 +168,24 @@ workflows:
             output:
               observations:      "$.arguments.observations"
               observation_count: "$.arguments.observation_count"
+
+      # DETERMINISTIC emit-time gate. `treatNonZeroAsFailure` is left at its
+      # default (true) ON PURPOSE: a broken probe contract must abort the run
+      # at the step that broke it. The script only reports — it never prunes
+      # or repairs an observation, because silently dropping the bad ones is
+      # the same "fewer findings than reality" failure in a nicer costume.
+      checking_probes:
+        goal: Verify every cited probe_ref is a real, distinct, in-tree spec file.
+        transitions:
+          check_probe_refs:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.browser.probe-refs
+              args:
+                - "$.context.observations"
+                - "$.context.observation_count"
+                - "$.run.repo_root"
+                - "$.workflow.input.storage_state"
       done: { terminal: true }

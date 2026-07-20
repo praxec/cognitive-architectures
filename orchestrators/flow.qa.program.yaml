@@ -72,6 +72,20 @@
 #     charter:  { src_glob, test_glob, budgets: { max_e2e_specs } } }
 # mission.mission / mission.app_url feed explore (explore's `attempts`
 # rides its own default); mission.charter is the PROMOTION charter
+#
+# KNOWN GAP — no auth through the program. flow.qa.explore now takes an
+# optional `storage_state` (a path to an operator-saved Playwright session,
+# for apps behind a login wall) and this driver does NOT thread it. That is
+# deliberate, not an oversight: `use.inputs` resolves every declared key
+# unconditionally, so binding `$.workflow.input.mission.storage_state` from
+# an envelope that omits it inserts an explicit null — and schema defaults
+# only fill ABSENT keys, so the null would win over `default: ""` and
+# silently disable the auth checks it was supposed to enable. Threading it
+# safely needs either an engine-side null-coalesce on use.inputs or a
+# required envelope field. Until then, drive
+# cognitive/flow.qa.explore DIRECTLY for authenticated apps (see
+# examples/qa-explore-run.yaml) and promote its findings with
+# flow.qa.promote-finding.
 # flow.qa.promote-finding requires (path-separability + e2e budget) —
 # distinct from the discovery charter explore mints internally (which is
 # not among explore's declared outputs, so it cannot be threaded through).

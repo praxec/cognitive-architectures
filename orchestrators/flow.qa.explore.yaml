@@ -5,7 +5,11 @@
 #   chartering  → cap.plan.test-charter: mission → bounded, citable charter
 #                 (in/out of scope, invariants with sources, budget).
 #   surveying   → cap.research.ui-surface: leased-browser delegate maps the
-#                 app's surfaces (pages/elements/edges) inside the charter.
+#                 app's surfaces (pages/elements/edges) inside the charter,
+#                 and declares a closed-enum auth_state.
+#   auth_gate   → a survey that never got past a login wall mapped nothing;
+#                 probing it would return zero observations and render as a
+#                 clean report. Aborts loudly instead.
 #   probing     → cap.diagnose.browser-probe: leased-browser delegate hunts
 #                 invariant violations and MINTS each observation as a
 #                 machine-replayable Playwright spec (probe_ref) under
@@ -40,6 +44,24 @@
 # -1 (honest floor: a run that never reached aggregation must not read as
 # clean); only the aggregate script writes 0.
 #
+# AUTHENTICATION is ONE thread of state, declared once as the optional
+# `storage_state` input and threaded to all three steps that need a
+# session: the survey, the probe author, and the deterministic replay. It
+# is a filesystem PATH to an operator-saved Playwright storage-state file,
+# never a credential. Non-empty means "this app is behind auth", which
+# turns three otherwise-silent failures loud:
+#   - the survey lands on a login page       → auth_gate aborts the run
+#   - a probe omits test.use({ storageState }) → refused at emit time by
+#     verify.browser.probe-refs, and again at replay by
+#     verify.browser.repro-rate (which will NOT run it, because running it
+#     would yield an ordinary-looking "0 of 5 reproduced")
+#   - the storage-state file is missing      → the replay gate floors the
+#     whole run rather than replaying everything signed out
+# The second outcome, `fully_evaluated` (not_evaluated_count == 0), is what
+# makes the distinction visible in the result: `evidence_clean` is
+# satisfied by a run that evaluated NOTHING, so "no defects found" and
+# "could not look" need two different scalars to be told apart.
+#
 # Requires (cognitive/*): cap.plan.test-charter, cap.research.ui-surface,
 # cap.diagnose.browser-probe, cap.diagnose.browser-evidence,
 # cap.verify.repro-rate, cap.diagnose.finding; scripts
@@ -49,6 +71,39 @@
 #
 # A4 FOLLOW-UP: probes live under `<repo_root>/.praxec/qa-artifacts/`
 # because `$.run.artifacts_dir` is not yet an engine scope.
+#
+# ---------------------------------------------------------------------------
+# SCOPE LIMIT: this family requires @playwright/test. Read this before
+# pointing it at a repo.
+# ---------------------------------------------------------------------------
+# The reproduction gate's entire claim to trustworthiness is that a MACHINE
+# replays a real spec and a script counts the successes. That machine is
+# `npx playwright test --repeat-each=N --workers=1 --reporter=json`. So:
+#
+#   - The app repo MUST have @playwright/test installed. If it does not, the
+#     gate reports `not_evaluated` for everything — honest, but the run
+#     produces no findings and `fully_evaluated` is not met.
+#   - Repos on cypress, vitest browser mode, .NET/Selenium, or any other
+#     runner sit permanently on that floor. It fails safe, never silently,
+#     but the family cannot currently test them.
+#   - flow.qa.promote-finding additionally requires path-separable
+#     `src/**` and `tests/**`; colocated tests are refused outright.
+#
+# This limitation is DOCUMENTED RATHER THAN ABSTRACTED, deliberately. The
+# orchestrator YAML above is already framework-agnostic — only four
+# scripts-library bodies bind Playwright, and only in two spots each (the
+# invocation and the reporter's stats shape). Generalizing means a
+# per-framework adapter with a normalized {attempts, successfulAttempts}
+# result contract, and it is not the YAML that makes it expensive: it is
+# that every runner reports differently (cypress JSON, vitest JSON, TRX for
+# .NET), each needs its own repeat-N mechanism, and each adapter is
+# worthless until someone has verified it against a real repo — which is
+# the actual cost, not the parsing. A half-generalized adapter that
+# mis-parses a reporter would compute successfulAttempts wrong, and a wrong
+# reproduction count is strictly worse than an honest not_evaluated: it is
+# the one number this whole design refuses to let anyone guess at. Add an
+# adapter when a specific non-Playwright repo needs one, verified against
+# that repo. Until then the floor tells the truth.
 
 workflows:
   flow.qa.explore:
@@ -69,22 +124,42 @@ workflows:
       app_url:  { type: string,  required: true }
       # Replays per probe at the reproduction gate (script floors at 2).
       attempts: { type: integer, default: 5 }
+      # Repo-root-relative path to a Playwright storage-state JSON the
+      # OPERATOR saved from a hand-driven login:
+      #   npx playwright open --save-storage=.praxec/qa-auth.json <app_url>
+      # "" means the app declares NO auth. This is a filesystem PATH and
+      # never a credential — no password, token, or cookie value belongs in
+      # this input or in any YAML. Declared ONCE here and threaded to all
+      # three steps that need it (survey, probe authoring, replay), because
+      # they are the same thread of session state and splitting it is how
+      # you get a survey that logs in and a replay that does not.
+      storage_state: { type: string, default: "" }
     outputs:
       findings:          { type: array }
       product_questions: { type: array }
       discarded:         { type: array }
+      not_evaluated:     { type: array }
       qa_report:         { type: object }
       unevidenced_count: { type: integer }
+      not_evaluated_count: { type: integer }
     # Seed EVERY declared output (V24): the gates can short-circuit past
     # the writers, and the `failed` terminal must still resolve them.
     initialContext:
       findings:          []
       product_questions: []
       discarded:         []
+      not_evaluated:     []
       qa_report:         {}
       # -1 = "never aggregated" — the evidence_clean outcome (== 0) must
       # NOT be met by a run that aborted before the code-side recount ran.
       unevidenced_count: -1
+      # Same honest-floor seeding, same reason: a run that never reached
+      # aggregation must not satisfy `fully_evaluated` (== 0) by default.
+      not_evaluated_count: -1
+      # Seeded so the survey gate has a value to branch on even if the
+      # survey step's contract breaks; "" is not a legal enum member, so
+      # the gate's unguarded default catches it.
+      auth_state:        ""
     outcomes:
       - id: evidence_clean
         statement: >
@@ -93,6 +168,16 @@ workflows:
           replayable probe_ref, and at least one opaque evidence ref
           (unevidenced_count == 0, computed by audit.findings.aggregate).
         check: "$.context.unevidenced_count == 0"
+      - id: fully_evaluated
+        statement: >
+          Every observation actually reached the deterministic replay gate
+          and got a verdict — nothing was left unevaluated by a missing
+          probe file, an uninstalled playwright, or a signed-out replay
+          against an authenticated app (not_evaluated_count == 0, computed
+          by audit.findings.aggregate). Paired with evidence_clean this is
+          what separates "we found no defects" from "we could not look":
+          evidence_clean alone is satisfied by a run that evaluated nothing.
+        check: "$.context.not_evaluated_count == 0"
     initialState: chartering
     states:
 
@@ -118,17 +203,56 @@ workflows:
         goal: Map the app's UI surfaces within the charter's scope.
         transitions:
           survey:
-            target: probing
+            target: auth_gate
             actor: deterministic
             executor:
               kind: workflow
               definitionId: cognitive/cap.research.ui-surface
               use:
                 inputs:
-                  charter: "$.context.charter"
-                  app_url: "$.workflow.input.app_url"
+                  charter:       "$.context.charter"
+                  app_url:       "$.workflow.input.app_url"
+                  storage_state: "$.workflow.input.storage_state"
                 outputs:
                   "$.context.surface_map": surface_map
+                  "$.context.auth_state":  auth_state
+
+      # Split gate state (guards run BEFORE executors). A survey that never
+      # got past a login wall mapped NOTHING — probing it would yield zero
+      # observations and the run would render as a clean, defect-free
+      # report. That is the silent false negative this whole family exists
+      # to not produce, so it aborts instead. Note the direction: this gate
+      # only ever routes an inconclusive run to `failed`, never onward into
+      # observation or finding territory.
+      # The guard grammar has ONE binary operator per expr (no ||), so the
+      # closed enum is enumerated arm-by-arm. That is the better shape here
+      # anyway: every legal auth_state has its own named, explicit arm, and
+      # anything outside the enum can only reach the unguarded default.
+      auth_gate:
+        transitions:
+          open_app:
+            target: probing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.auth_state == 'not_required'" }
+          signed_in:
+            target: probing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.auth_state == 'authenticated'" }
+          # Explicit, not a fallthrough: being stuck at the login wall is a
+          # DIAGNOSED state with an actionable fix (supply storage_state, or
+          # refresh the one you have), not an unexpected contract break.
+          login_wall:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.auth_state == 'unauthenticated'" }
+          # Unguarded DEFAULT (lowest precedence): a null/absent/empty
+          # auth_state means the survey step's contract broke.
+          unexpected:
+            target: failed
+            actor: deterministic
 
       # Leased-browser probing → observations, each minted as a replayable
       # Playwright spec (probe_ref) — the reproduction gate's only currency.
@@ -143,9 +267,10 @@ workflows:
               definitionId: cognitive/cap.diagnose.browser-probe
               use:
                 inputs:
-                  charter:     "$.context.charter"
-                  surface_map: "$.context.surface_map"
-                  app_url:     "$.workflow.input.app_url"
+                  charter:       "$.context.charter"
+                  surface_map:   "$.context.surface_map"
+                  app_url:       "$.workflow.input.app_url"
+                  storage_state: "$.workflow.input.storage_state"
                 outputs:
                   "$.context.observations":      observations
                   "$.context.observation_count": observation_count
@@ -200,11 +325,13 @@ workflows:
               definitionId: cognitive/cap.verify.repro-rate
               use:
                 inputs:
-                  observations: "$.context.observations"
-                  attempts:     "$.workflow.input.attempts"
+                  observations:  "$.context.observations"
+                  attempts:      "$.workflow.input.attempts"
+                  storage_state: "$.workflow.input.storage_state"
                 outputs:
                   "$.context.reproduced":       reproduced
                   "$.context.discarded":        discarded
+                  "$.context.not_evaluated":    not_evaluated
                   "$.context.reproduced_count": reproduced_count
                   "$.context.repro_report":     repro_report
 
@@ -260,13 +387,18 @@ workflows:
                 - "$.context.findings"
                 - "$.context.product_questions"
                 - "$.context.discarded"
+                # The honest floor reaches the report. Without this, a run
+                # where nothing could be replayed renders identically to a
+                # run that found nothing wrong.
+                - "$.context.not_evaluated"
             # Plain script-executor `output:` — LEFT-hand keys are BARE slot
             # names (a `$.context.*`-prefixed key here would write a slot
             # literally named "$.context.qa_report" and leave the real one
             # unset → GUARD_UNSET_SLOT; the flow.audit-docs trap).
             output:
-              qa_report:         "$.output.json"
-              unevidenced_count: "$.output.json.unevidenced_count"
+              qa_report:           "$.output.json"
+              unevidenced_count:   "$.output.json.unevidenced_count"
+              not_evaluated_count: "$.output.json.not_evaluated_count"
 
       # Terminal: $.context.qa_report is the full report; unevidenced_count
       # is the code-computed definition of evidence_clean.
