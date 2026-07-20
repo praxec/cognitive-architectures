@@ -1,0 +1,67 @@
+# capabilities/cap.verify.test-red.yaml
+#
+# THE red-proof gate of the TDD promotion loop (flow.qa.promote-finding).
+# Verb `verify` is DETERMINISTIC (V6: kind script) — the writer's claim "my
+# test is red" is not currency. The verify.test.red-proof script runs the
+# new test with the SAME runner substrate as M1's reproduction gate
+# (`playwright test --workers=1 --reporter=json`) and classifies IN CODE:
+#   red_reason = assertion_failed | infra_error | not_found | tautology
+# Only `assertion_failed` advances the flow (the red_gate guards on it): a
+# test failing because the app is down (infra_error) or passing against the
+# current code (tautology) is NOT a red proof. Honest floor: status
+# `not_evaluated` (red_reason null) when the runner itself could not run —
+# never a disguised verdict.
+#
+# Also emits `replay_obs` — a CODE-BUILT [{id, probe_ref: test_path}] in the
+# exact shape cap.verify.repro-rate consumes — so the downstream green-check
+# and flake-scan replay THE SAME file that was red-proved and pinned; no
+# agent re-asserts the path between gates.
+# `treatNonZeroAsFailure: false` — a red test exits the runner non-zero by
+# design; the verdict is the JSON, not the exit code.
+
+workflows:
+  cap.verify.test-red:
+    verb: verify
+    lifecycle: experimental
+    description: >
+      Deterministically prove the new regression test is RED for the right
+      reason: run it and classify the failure in code (assertion_failed |
+      infra_error | not_found | tautology, honest not_evaluated floor), and
+      mint the code-built replay observation the later green/flake replays
+      consume.
+    snippet:
+      inputs:
+        # The claimed test path (schema-anchored to tests/ upstream;
+        # re-checked in code here).
+        test_path:  { type: string, required: true }
+        # The Finding id, stamped into the replay observation.
+        finding_id: { type: string, default: "finding" }
+      outputs:
+        status:     { type: string }
+        red_reason: { type: ["string", "null"] }
+        red_report: { type: object }
+        replay_obs: { type: array }
+    initialState: proving
+    states:
+      proving:
+        goal: Run the new test and classify the red proof in code.
+        transitions:
+          prove:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.test.red-proof
+              treatNonZeroAsFailure: false
+              args:
+                - "$.workflow.input.test_path"
+                - "$.workflow.input.finding_id"
+                # The runner executes from the run-ambient repo root — a
+                # DIRECT explicit binding, never an actor-supplied cwd.
+                - "$.run.repo_root"
+            output:
+              status:     "$.output.json.status"
+              red_reason: "$.output.json.red_reason"
+              red_report: "$.output.json"
+              replay_obs: "$.output.json.replay_obs"
+      done: { terminal: true }

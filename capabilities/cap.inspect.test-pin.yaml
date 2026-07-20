@@ -1,0 +1,46 @@
+# capabilities/cap.inspect.test-pin.yaml
+#
+# PIN capture of the test-immutability pair (flow.qa.promote-finding).
+# Verb `inspect` (V6: kind script) wrapping inspect.git.test-pin: after the
+# human approves the red-proved test and BEFORE the fixer runs, capture each
+# approved test file's `git hash-object` blob hash. The pin is the DETECTION
+# baseline: cap.verify.test-immutable re-hashes after the fix, and any
+# divergence is a tamper HARD STOP. Input is the CODE-BUILT replay_obs array
+# from the red-proof gate (same refs the green/flake replays use) — never an
+# agent-asserted path list. Fail-closed: an empty or unpinnable set is
+# ok=false (a vacuous pin must not flow onward as a passed check).
+
+workflows:
+  cap.inspect.test-pin:
+    verb: inspect
+    lifecycle: experimental
+    description: >
+      Capture git blob hashes (git hash-object) for the approved regression
+      test paths, from the code-built replay refs, as the tamper-detection
+      baseline the post-fix immutability check compares against; fail-closed
+      on empty or unpinnable input.
+    snippet:
+      inputs:
+        # The red-proof gate's code-built replay refs ([{id, probe_ref}]).
+        test_refs: { type: array, required: true }
+      outputs:
+        ok:  { type: boolean }
+        pin: { type: object }
+    initialState: pinning
+    states:
+      pinning:
+        goal: Hash-pin the approved test files (tamper-detection baseline).
+        transitions:
+          pin:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.git.test-pin
+              args:
+                - "$.workflow.input.test_refs"
+                - "$.run.repo_root"
+            output:
+              ok:  "$.output.json.ok"
+              pin: "$.output.json.pin"
+      done: { terminal: true }

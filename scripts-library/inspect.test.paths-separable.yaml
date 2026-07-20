@@ -1,0 +1,91 @@
+# scripts-library/inspect.test.paths-separable.yaml
+#
+# FAIL-FAST precondition of the TDD promotion loop (flow.qa.promote-finding):
+# test immutability in that flow is enforced STRUCTURALLY — the test writer's
+# leaf gets `tools: ["file:{{ $.run.repo_root }}/tests"]` and the fixer's leaf
+# gets `tools: ["file:{{ $.run.repo_root }}/src"]`, so the fixer physically
+# cannot address the approved test. That enforcement only exists when the
+# repo's tests are PATH-SEPARABLE from its sources. Many web repos colocate
+# (`src/Button.test.tsx` beside `src/Button.tsx`) — in that layout there is NO
+# write-scope that admits the fix but excludes the test, so the pack's
+# prevention half is void and the flow must not run. This script is the
+# deterministic check: given the charter's declared `src_glob` + `test_glob`,
+# are the test paths outside the src write-scope AND aligned with the pack's
+# `src/` + `tests/` scoping roots? Anything else emits `separable: false`
+# (reason prefixed TEST_PATHS_NOT_SEPARABLE) and the flow fails fast at start
+# — it never silently proceeds with no prevention.
+#
+# The pack SUPPORTS path-separable layouts (sources under `src/`, tests under
+# `tests/`) — that is a stated boundary, not an oversight. A colocated repo
+# needs its tests moved (or a future per-layout scoping primitive) first.
+version: "1.0.0"
+scripts:
+  inspect.test.paths-separable:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Deterministic src/test path-separability check.
+      #   $1 — charter object (JSON string) carrying `src_glob` + `test_glob`.
+      # Emits ONE JSON verdict on stdout; ALWAYS exits 0 (the verdict lives in
+      # the JSON — `separable` — never in the exit code).
+      set -uo pipefail
+      # NOTE: not `"${1:-{}}"` — bash closes the expansion at the FIRST `}`,
+      # appending a stray brace to a set $1 and corrupting the JSON.
+      CHARTER="${1-}"
+      [ -n "$CHARTER" ] || CHARTER='{}'
+
+      verdict() { # $1 = separable (true|false), $2 = reason, $3 = src_root, $4 = test_root
+        jq -n --argjson sep "$1" --arg reason "$2" --arg sr "$3" --arg tr "$4" \
+          '{separable: $sep, reason: $reason, src_root: $sr, test_root: $tr}'
+        exit 0
+      }
+
+      command -v jq >/dev/null 2>&1 || { printf '{"separable":false,"reason":"TEST_PATHS_NOT_SEPARABLE: jq is not installed — the check could not run (fail-closed)","src_root":"","test_root":""}\n'; exit 0; }
+      printf '%s' "$CHARTER" | jq -e 'type == "object"' >/dev/null 2>&1 \
+        || verdict false "TEST_PATHS_NOT_SEPARABLE: charter arg was not a JSON object" "" ""
+
+      SRC_GLOB=$(printf '%s' "$CHARTER" | jq -r '.src_glob // empty')
+      TEST_GLOB=$(printf '%s' "$CHARTER" | jq -r '.test_glob // empty')
+      [ -n "$SRC_GLOB" ] && [ -n "$TEST_GLOB" ] \
+        || verdict false "TEST_PATHS_NOT_SEPARABLE: charter must declare both src_glob and test_glob (got src_glob='$SRC_GLOB', test_glob='$TEST_GLOB')" "" ""
+
+      # Static prefix of a glob: strip a leading ./, cut at the first glob
+      # metacharacter, drop a trailing slash. "src/**/*.ts" -> "src";
+      # "*.test.ts" -> "" (unanchored — inseparable by construction).
+      prefix() {
+        printf '%s' "$1" | sed -e 's#^\./##' -e 's/[*?[{].*$//' -e 's#/*$##'
+      }
+      SRC_ROOT=$(prefix "$SRC_GLOB")
+      TEST_ROOT=$(prefix "$TEST_GLOB")
+
+      [ -n "$TEST_ROOT" ] \
+        || verdict false "TEST_PATHS_NOT_SEPARABLE: test_glob '$TEST_GLOB' has no static directory prefix — an unanchored test glob (e.g. colocated *.test.tsx) cannot be excluded from the fixer's write-scope" "$SRC_ROOT" "$TEST_ROOT"
+      [ -n "$SRC_ROOT" ] \
+        || verdict false "TEST_PATHS_NOT_SEPARABLE: src_glob '$SRC_GLOB' has no static directory prefix" "$SRC_ROOT" "$TEST_ROOT"
+
+      # Alignment with the pack's structural write-scopes: the regression-test
+      # writer is scoped to <repo_root>/tests, the fixer to <repo_root>/src.
+      # A separable-but-misaligned layout (e.g. lib/ + spec/) would pass a pure
+      # disjointness check and then fail LATE and confusingly when the scoped
+      # agents cannot write anywhere — fail fast here instead.
+      case "$TEST_ROOT" in
+        tests|tests/*) : ;;
+        *) verdict false "TEST_PATHS_NOT_SEPARABLE: test_glob '$TEST_GLOB' resolves outside the pack's tests/ write-scope (test_root='$TEST_ROOT'); the pack supports path-separable layouts with tests under tests/" "$SRC_ROOT" "$TEST_ROOT" ;;
+      esac
+      case "$SRC_ROOT" in
+        src|src/*) : ;;
+        *) verdict false "TEST_PATHS_NOT_SEPARABLE: src_glob '$SRC_GLOB' resolves outside the pack's src/ write-scope (src_root='$SRC_ROOT'); the pack supports path-separable layouts with sources under src/" "$SRC_ROOT" "$TEST_ROOT" ;;
+      esac
+
+      # Belt-and-braces mutual disjointness (already implied by the two anchors
+      # above; kept so a future loosening of the roots cannot silently drop it).
+      case "$TEST_ROOT/" in
+        "$SRC_ROOT"/*) verdict false "TEST_PATHS_NOT_SEPARABLE: test root '$TEST_ROOT' lies inside src root '$SRC_ROOT' (colocated tests)" "$SRC_ROOT" "$TEST_ROOT" ;;
+      esac
+      case "$SRC_ROOT/" in
+        "$TEST_ROOT"/*) verdict false "TEST_PATHS_NOT_SEPARABLE: src root '$SRC_ROOT' lies inside test root '$TEST_ROOT'" "$SRC_ROOT" "$TEST_ROOT" ;;
+      esac
+
+      verdict true "src and test paths are separable and aligned with the pack's src/ + tests/ write-scopes" "$SRC_ROOT" "$TEST_ROOT"

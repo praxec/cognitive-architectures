@@ -1,0 +1,83 @@
+# scripts-library/inspect.test.layer-budget.yaml
+#
+# DETERMINISTIC half of the layer-selection promotion rule
+# (flow.qa.promote-finding). cap.triage.test-layer (cognitive) picks the
+# SMALLEST layer that pins the root cause; this script machine-checks the
+# pairing the triage claims:
+#   - the layer is a member of the closed ladder
+#     unit < component < integration < contract < e2e;
+#   - choosing `e2e` REQUIRES a non-empty justification (naming a critical
+#     journey — non-emptiness is the machine-checkable floor; its semantic
+#     quality is the human approver's job downstream);
+#   - choosing `e2e` is checked against the charter's e2e spec-count budget
+#     (`charter.budgets.max_e2e_specs`): existing e2e specs under tests/
+#     (path containing `e2e`) + this new one must fit the budget. A charter
+#     that declares NO e2e budget cannot be budget-checked, so an e2e choice
+#     against it FAILS (fail-closed — no silent unlimited).
+# Non-e2e layers pass with no budget applied (e2e fields report -1 =
+# not evaluated, the honest floor — never a fake zero).
+version: "1.0.0"
+scripts:
+  inspect.test.layer-budget:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Machine-check layer <-> justification <-> budget.
+      #   $1 — chosen layer (string).
+      #   $2 — justification (string; may be empty for non-e2e layers).
+      #   $3 — charter object (JSON; e2e budget at .budgets.max_e2e_specs).
+      #   $4 — repo root (the run-ambient $.run.repo_root).
+      # Emits ONE JSON verdict on stdout; ALWAYS exits 0.
+      set -uo pipefail
+      LAYER="${1:-}"
+      JUST="${2:-}"
+      # NOTE: not `"${3:-{}}"` — bash closes the expansion at the FIRST `}`,
+      # appending a stray brace to a set $3 and corrupting the JSON.
+      CHARTER="${3-}"
+      [ -n "$CHARTER" ] || CHARTER='{}'
+      REPO_ROOT="${4:-}"
+
+      verdict() { # $1 = ok, $2 = reason, $3 = e2e_spec_count, $4 = e2e_budget
+        jq -n --argjson ok "$1" --arg reason "$2" --arg layer "$LAYER" \
+              --argjson c "$3" --argjson b "$4" \
+          '{ok: $ok, reason: $reason, layer: $layer,
+            e2e_spec_count: $c, e2e_budget: $b}'
+        exit 0
+      }
+
+      command -v jq >/dev/null 2>&1 || { printf '{"ok":false,"reason":"jq is not installed (fail-closed)","layer":"","e2e_spec_count":-1,"e2e_budget":-1}\n'; exit 0; }
+
+      case "$LAYER" in
+        (unit|component|integration|contract)
+          verdict true "layer '$LAYER' is within the ladder; no e2e budget applies" -1 -1 ;;
+        (e2e) : ;;
+        (*) verdict false "layer '$LAYER' is not in the closed ladder unit|component|integration|contract|e2e" -1 -1 ;;
+      esac
+
+      # e2e path: justification + budget are both machine-checked.
+      TRIMMED=$(printf '%s' "$JUST" | tr -d '[:space:]')
+      # A JSON null threaded through arg resolution arrives as the literal
+      # string "null" — treat it as empty, not as a justification.
+      { [ -n "$TRIMMED" ] && [ "$TRIMMED" != "null" ]; } \
+        || verdict false "layer e2e requires a non-empty justification naming a critical journey" -1 -1
+      BUDGET=$(printf '%s' "$CHARTER" | jq -r 'if (.budgets.max_e2e_specs | type) == "number" then (.budgets.max_e2e_specs | floor) else empty end' 2>/dev/null)
+      [ -n "$BUDGET" ] \
+        || verdict false "charter declares no budgets.max_e2e_specs — an e2e choice cannot be budget-checked (fail-closed)" -1 -1
+      [ -n "$REPO_ROOT" ] && [ -d "$REPO_ROOT" ] \
+        || verdict false "repo_root '$REPO_ROOT' is not a directory (fail-closed)" -1 "$BUDGET"
+      cd "$REPO_ROOT" || verdict false "cannot cd into repo_root '$REPO_ROOT' (fail-closed)" -1 "$BUDGET"
+
+      # Convention: e2e specs live under tests/ on a path containing 'e2e'
+      # (e.g. tests/e2e/checkout.spec.ts). A missing tests/ dir counts 0.
+      COUNT=$(find tests -type f -path '*e2e*' \
+                \( -name '*.spec.ts' -o -name '*.spec.js' -o -name '*.spec.tsx' \
+                   -o -name '*.test.ts' -o -name '*.test.js' -o -name '*.test.tsx' \) \
+                2>/dev/null | wc -l | tr -d '[:space:]')
+      case "$COUNT" in (''|*[!0-9]*) COUNT=0 ;; esac
+
+      if [ $((COUNT + 1)) -le "$BUDGET" ]; then
+        verdict true "e2e justified and within budget ($COUNT existing + 1 new <= $BUDGET)" "$COUNT" "$BUDGET"
+      fi
+      verdict false "e2e spec budget exhausted ($COUNT existing + 1 new > $BUDGET) — pick a smaller layer or raise charter.budgets.max_e2e_specs" "$COUNT" "$BUDGET"

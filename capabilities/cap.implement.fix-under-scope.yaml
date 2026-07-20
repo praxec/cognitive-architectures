@@ -1,0 +1,87 @@
+# capabilities/cap.implement.fix-under-scope.yaml
+#
+# THE FIXER of the TDD promotion loop (flow.qa.promote-finding): make the
+# approved, pinned regression test pass by fixing the defect in src/.
+# Cognitive cap (verb `implement`, V6: noop + actor: agent).
+#
+# WRITE-SCOPE (the load-bearing property): the fixing state declares
+# `tools: ["file:{{ $.run.repo_root }}/src"]` — per-state `tools:` REPLACES
+# the gateway-wide auto-drive set, and the filesystem-aware guard roots this
+# agent at src/ (symlinks included). It PHYSICALLY CANNOT address tests/ —
+# the classic "make the test pass by editing the test" cheat is prevented
+# structurally, not by prompt text (cap.implement.scope-bounded's
+# scope_paths is prompt-only and enforces nothing; this cap exists because
+# the fixer needs the REAL enforcement). Detection backstop: the flow
+# re-hashes the pinned test after this cap runs (cap.verify.test-immutable)
+# and HARD-STOPS on any divergence.
+#
+# Note the deliberate asymmetry with the writer: rooted at src/, this agent
+# cannot READ the test file either — it works from the Finding's contract
+# (expected behavior, root cause it can locate in src/) plus the replay
+# feedback the flow threads in. The test is the oracle, not the spec.
+
+workflows:
+  cap.implement.fix-under-scope:
+    verb: implement
+    lifecycle: experimental
+    description: >
+      Fix the defect a Finding describes by editing application code under
+      src/ only (structurally write-scoped — the fixer cannot touch tests/),
+      guided by the Finding's expected behavior and the deterministic replay
+      feedback, so the pinned regression test goes green.
+    snippet:
+      inputs:
+        # The Finding being fixed (observed/expected/expectedSource).
+        finding:       { type: object, required: true }
+        # The pinned regression test's path — for traceability in the
+        # result; the file itself is OUTSIDE this agent's reach.
+        test_path:     { type: string, required: true }
+        # The red-proof report (what the failing assertion pins).
+        red_proof:     { type: object, default: {} }
+        # The latest replay report ({} on the first round; on retries, the
+        # deterministic green-check output showing what still fails).
+        replay_report: { type: object, default: {} }
+      outputs:
+        fix_summary: { type: object }
+    initialState: fixing
+    states:
+      fixing:
+        goal: >
+          Fix the defect so the pinned regression test passes. Read
+          $.context — the Finding ($.context.finding: observed vs expected
+          with its cited expectedSource), the test path
+          ($.context.test_path — the oracle; it is outside your reach by
+          design), the red proof ($.context.red_proof — the assertion the
+          test pins), and the latest replay feedback
+          ($.context.replay_report — on a retry round, what still fails).
+          Locate the ROOT CAUSE in the application source with your file
+          tools and change the BEHAVIOR to match the Finding's expected
+          behavior. Your file tools are rooted at src/ — you cannot touch
+          tests/ or anything else, and attempting to game the oracle
+          instead of fixing the defect is detected downstream by a git-hash
+          tamper check and hard-stops the run. Keep the diff minimal and
+          behavior-focused. Submit `fix_summary`: { root_cause,
+          changed_paths: [src/... paths you edited], approach }.
+        # src/ WRITE ONLY — the structural half of test immutability.
+        tools: ["file:{{ $.run.repo_root }}/src"]
+        transitions:
+          submit_fix:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [fix_summary]
+              properties:
+                fix_summary:
+                  type: object
+                  required: [root_cause, changed_paths]
+                  properties:
+                    root_cause:    { type: string }
+                    changed_paths:
+                      type: array
+                      items: { type: string, pattern: "^src/" }
+                    approach:      { type: string }
+            executor: { kind: noop }
+            output:
+              fix_summary: "$.arguments.fix_summary"
+      done: { terminal: true }

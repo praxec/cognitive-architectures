@@ -1,0 +1,75 @@
+# scripts-library/verify.test.immutable.yaml
+#
+# DETECT half of the test-immutability pair (flow.qa.promote-finding; capture
+# half = inspect.git.test-pin). After the src-scoped fixer ran, re-hash every
+# pinned test path with `git hash-object` and compare against the approved
+# pin. ANY divergence — changed content, deleted file — is a TAMPER:
+# `ok: false` with the offending paths in `tampered`, and the flow's
+# immutable_gate HARD-STOPS (terminal failed, deliberately no retry arm: a
+# tampered approved test is a governance violation, not a fixable hiccup).
+#
+# Fail-closed floor: an EMPTY pin, a bad repo root, or any hashing failure is
+# `ok: false` too — "could not check" must never read as "unchanged".
+version: "1.0.0"
+scripts:
+  verify.test.immutable:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Re-hash pinned test paths and compare against the approved pin.
+      #   $1 — pin object (JSON): {<repo-root-relative path>: <git blob hash>}.
+      #   $2 — repo root (the run-ambient $.run.repo_root).
+      # Emits ONE JSON verdict on stdout; ALWAYS exits 0.
+      set -uo pipefail
+      # NOTE: not `"${1:-{}}"` — bash closes the expansion at the FIRST `}`,
+      # appending a stray brace to a set $1 and corrupting the JSON.
+      PIN="${1-}"
+      [ -n "$PIN" ] || PIN='{}'
+      REPO_ROOT="${2:-}"
+
+      floor() { # $1 = reason  (fail-closed: could-not-check is never ok)
+        jq -n --arg reason "$1" '{ok: false, tampered: [], checked: 0, reason: $reason}'
+        exit 0
+      }
+
+      command -v jq >/dev/null 2>&1 || { printf '{"ok":false,"tampered":[],"checked":0,"reason":"jq is not installed (fail-closed)"}\n'; exit 0; }
+      printf '%s' "$PIN" | jq -e 'type == "object"' >/dev/null 2>&1 \
+        || floor "pin arg was not a JSON object (fail-closed)"
+      COUNT=$(printf '%s' "$PIN" | jq 'length')
+      [ "$COUNT" -gt 0 ] 2>/dev/null \
+        || floor "pin is empty — nothing was pinned, so immutability cannot be verified (fail-closed)"
+      [ -n "$REPO_ROOT" ] && [ -d "$REPO_ROOT" ] \
+        || floor "repo_root '$REPO_ROOT' is not a directory (fail-closed)"
+      cd "$REPO_ROOT" || floor "cannot cd into repo_root '$REPO_ROOT' (fail-closed)"
+      git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        || floor "repo_root is not a git work tree (fail-closed)"
+
+      PATHS=$(printf '%s' "$PIN" | jq -c 'keys')
+      TAMPERED='[]'
+      i=0
+      while [ "$i" -lt "$COUNT" ]; do
+        P=$(printf '%s' "$PATHS" | jq -r ".[$i]")
+        WANT=$(printf '%s' "$PIN" | jq -r --arg p "$P" '.[$p]')
+        case "$P" in
+          (/*|*..*) TAMPERED=$(printf '%s' "$TAMPERED" | jq --arg p "$P" '. + [$p]') ;;
+          (*)
+            if [ ! -f "$P" ]; then
+              # A deleted pinned test IS a tamper, not a skip.
+              TAMPERED=$(printf '%s' "$TAMPERED" | jq --arg p "$P" '. + [$p]')
+            else
+              GOT=$(git hash-object -- "$P" 2>/dev/null || printf '')
+              if [ -z "$GOT" ] || [ "$GOT" != "$WANT" ]; then
+                TAMPERED=$(printf '%s' "$TAMPERED" | jq --arg p "$P" '. + [$p]')
+              fi
+            fi
+            ;;
+        esac
+        i=$((i + 1))
+      done
+
+      printf '%s' "$TAMPERED" | jq --argjson n "$COUNT" \
+        '{ok: (length == 0), tampered: ., checked: $n,
+          reason: (if length == 0 then "all pinned test files unchanged"
+                   else "pinned test files changed since approval (tamper)" end)}'

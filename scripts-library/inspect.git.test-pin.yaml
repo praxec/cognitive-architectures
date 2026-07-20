@@ -1,0 +1,70 @@
+# scripts-library/inspect.git.test-pin.yaml
+#
+# PIN half of the test-immutability pair (flow.qa.promote-finding). Test
+# immutability is enforced in two layers:
+#   PREVENT — the fixer leaf's `tools: ["file:{{ $.run.repo_root }}/src"]`
+#             write-scope: it physically cannot address tests/ (filesystem-
+#             aware guard, symlinks included).
+#   DETECT  — this pin + verify.test.immutable: capture the human-approved
+#             test file's `git hash-object` BEFORE the fix, re-hash AFTER;
+#             a changed hash = tamper = HARD STOP (no retry arm).
+# This script is the capture: it takes the code-built replay refs (the same
+# array the red-proof gate emitted — never an agent-asserted path list),
+# hashes each file, and emits `{pin: {<path>: <blob-hash>}}`. Any problem
+# (empty refs, missing file, path escape, not a git repo) is `ok: false` —
+# an empty or partial pin must never flow onward as a vacuous immutability
+# check (fail-closed).
+version: "1.0.0"
+scripts:
+  inspect.git.test-pin:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Capture git blob hashes for the approved test paths.
+      #   $1 — refs array (JSON): entries are either observation objects
+      #        carrying `probe_ref` (the red-proof gate's replay_obs) or
+      #        bare path strings.
+      #   $2 — repo root (the run-ambient $.run.repo_root).
+      # Emits ONE JSON result on stdout; ALWAYS exits 0.
+      set -uo pipefail
+      REFS="${1:-[]}"
+      REPO_ROOT="${2:-}"
+
+      fail() { # $1 = reason
+        jq -n --arg reason "$1" '{ok: false, pin: {}, paths: [], reason: $reason}'
+        exit 0
+      }
+
+      command -v jq >/dev/null 2>&1 || { printf '{"ok":false,"pin":{},"paths":[],"reason":"jq is not installed"}\n'; exit 0; }
+      printf '%s' "$REFS" | jq -e 'type == "array"' >/dev/null 2>&1 \
+        || fail "refs arg was not a JSON array"
+      PATHS=$(printf '%s' "$REFS" | jq -c '[.[] | if type == "object" then (.probe_ref // empty) else . end | select(type == "string" and length > 0)] | unique')
+      COUNT=$(printf '%s' "$PATHS" | jq 'length')
+      [ "$COUNT" -gt 0 ] 2>/dev/null \
+        || fail "no test paths to pin — an empty pin would make the immutability check vacuous (fail-closed)"
+      [ -n "$REPO_ROOT" ] && [ -d "$REPO_ROOT" ] \
+        || fail "repo_root '$REPO_ROOT' is not a directory"
+      cd "$REPO_ROOT" || fail "cannot cd into repo_root '$REPO_ROOT'"
+      git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        || fail "repo_root is not a git work tree — git blob hashing unavailable"
+
+      PIN='{}'
+      i=0
+      while [ "$i" -lt "$COUNT" ]; do
+        P=$(printf '%s' "$PATHS" | jq -r ".[$i]")
+        case "$P" in
+          (/*|*..*) fail "path '$P' is not repo-root-relative without .. — refusing to pin" ;;
+          (tests/*) : ;;
+          (*) fail "path '$P' is outside tests/ — only approved regression tests are pinnable" ;;
+        esac
+        [ -f "$P" ] || fail "cannot pin missing file '$P'"
+        H=$(git hash-object -- "$P" 2>/dev/null) || fail "git hash-object failed for '$P'"
+        [ -n "$H" ] || fail "git hash-object emitted no hash for '$P'"
+        PIN=$(printf '%s' "$PIN" | jq --arg p "$P" --arg h "$H" '. + {($p): $h}')
+        i=$((i + 1))
+      done
+
+      jq -n --argjson pin "$PIN" --argjson paths "$PATHS" \
+        '{ok: true, pin: $pin, paths: $paths, reason: "pinned"}'

@@ -1,0 +1,101 @@
+# capabilities/cap.research.ui-surface.yaml
+#
+# Survey step of the E2E discovery loop (flow.qa.explore): charter → a
+# structured SURFACE MAP of the app under test. Cognitive cap (verb
+# `research`, V6: noop + actor: agent) — a DELEGATE agent WITH browser
+# tools, NOT a single `kind: mcp` call: surveying is a multi-step
+# navigate/snapshot/enumerate session, and the browser is reached ONLY via
+# the run-scoped lease (`exclusive_pools: [browser]` +
+# `tools: ["{{ $.run.leased.browser }}"]`, V31). The lease is run-ambient:
+# when flow.qa.explore spawns this cap, it inherits the flow's leased
+# member — declaring the pool here also lets the cap lease standalone.
+# Survey only: this cap OBSERVES structure; it authors no probes and files
+# no findings (those are the probe/finding caps' jobs).
+
+workflows:
+  cap.research.ui-surface:
+    verb: research
+    lifecycle: experimental
+    description: >
+      Survey the app under test with the run's leased browser and emit a
+      bounded surface map — pages, routes, and interactive elements within
+      the charter's scope — the navigation map the probing step targets.
+    exclusive_pools: [browser]
+    snippet:
+      inputs:
+        # The bounded charter (cap.plan.test-charter output) — scope + budget.
+        charter: { type: object, required: true }
+        # The app under test; surveying starts (and stays) at this origin.
+        app_url: { type: string, required: true }
+      outputs:
+        surface_map: { type: object }
+    initialState: surveying
+    states:
+      surveying:
+        goal: >
+          Survey the app's UI surface using the leased browser. Read
+          $.context — the charter ($.context.charter: honor in_scope,
+          out_of_scope, and budget.max_pages) and the app origin
+          ($.context.app_url). Navigate from the origin, take snapshots,
+          and enumerate what EXISTS: pages/routes visited, key interactive
+          elements per page (forms, buttons, links), and navigation edges
+          between them. Stay inside in_scope, never enter out_of_scope
+          surfaces, and stop at budget.max_pages. Observe only — do not
+          submit forms with side effects, author tests, or judge behavior.
+          Emit ONE `surface_map` object: { origin, pages: [ { url, title,
+          elements: [ { kind, label, selector } ], notes } ], edges: [ {
+          from, to, via } ], skipped: [ { url, reason } ] }. Submit
+          `surface_map`.
+        tools: ["{{ $.run.leased.browser }}"]
+        transitions:
+          submit_surface:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [surface_map]
+              properties:
+                surface_map:
+                  type: object
+                  required: [origin, pages]
+                  properties:
+                    origin: { type: string }
+                    pages:
+                      type: array
+                      items:
+                        type: object
+                        required: [url]
+                        properties:
+                          url:   { type: string }
+                          title: { type: string }
+                          elements:
+                            type: array
+                            items:
+                              type: object
+                              required: [kind]
+                              properties:
+                                kind:     { type: string }
+                                label:    { type: string }
+                                selector: { type: string }
+                          notes: { type: string }
+                    edges:
+                      type: array
+                      items:
+                        type: object
+                        required: [from, to]
+                        properties:
+                          from: { type: string }
+                          to:   { type: string }
+                          via:  { type: string }
+                    skipped:
+                      type: array
+                      items:
+                        type: object
+                        required: [url, reason]
+                        properties:
+                          url:    { type: string }
+                          reason: { type: string }
+            executor: { kind: noop }
+            output:
+              surface_map: "$.arguments.surface_map"
+      done: { terminal: true }

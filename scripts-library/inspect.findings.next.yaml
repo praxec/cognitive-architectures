@@ -1,0 +1,120 @@
+# scripts-library/inspect.findings.next.yaml
+#
+# DETERMINISTIC finding picker + unpromoted LEDGER for the QA program driver
+# (flow.qa.program, M3): iterating an array of Findings through the TDD
+# promotion loop is a code job, not an LLM judgment ("deterministic tools
+# over LLM math"). Given the findings array and a monotone cursor, emit the
+# next finding to promote — or a terminal phase when the cursor is past the
+# end (exhausted) or past the promotion budget (capped).
+#
+# The script is also the SINGLE ledger-keeper for `unpromoted` (the engine's
+# transition-output language has no array-append op — `concat` is string
+# concat — so the accumulation lives here, in code):
+#   - `pending` is the finding the PREVIOUS round dispatched, written
+#     speculatively at pick time and cleared ONLY by the driver's
+#     recorded-promotion arm. A non-empty pending at the next pick means
+#     that round never proved promotion (child `failed`, human abort) —
+#     it is appended to the ledger. "Unpromoted unless proven promoted":
+#     no path can silently drop a finding.
+#   - on `capped`, every never-considered finding (index >= cursor) is
+#     appended too — the cap never silently discards the tail.
+#
+# Args (script/mcp arg renderer stringifies object/array values):
+#   $1 — findings array (JSON; array of Finding objects)
+#   $2 — finding_idx (int; the monotone cursor)
+#   $3 — max_promotions (int; the promotion budget)
+#   $4 — unpromoted ledger so far (JSON array)
+#   $5 — pending finding from the previous round (JSON object; {} = none)
+#
+# Emits ONE JSON verdict on stdout, read at $.output.json.*; ALWAYS exits 0
+# (the verdict lives in `phase`, never in the exit code):
+#   { phase: "picked"|"exhausted"|"capped"|"invalid", reason,
+#     next_finding: object ({} unless picked),
+#     next_idx: int (cursor AFTER this pick: idx+1 when picked, else idx;
+#                    -1 on invalid — an honest non-cursor),
+#     remaining: int (findings not yet picked AFTER this pick; -1 on invalid),
+#     total: int (findings array length; -1 on invalid),
+#     unpromoted: array (the UPDATED ledger — authoritative for this phase) }
+#
+# Honesty rules: malformed input is phase "invalid" with the reason named
+# (never a guessed pick); the ledger passthrough on invalid is best-effort
+# (parseable ledger echoed, else []); an out-of-range cursor is a clean
+# `exhausted`, and an empty findings array is a VALID, healthy exhaustion
+# (a clean explore run promotes nothing and succeeds).
+version: "1.0.0"
+scripts:
+  inspect.findings.next:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Deterministic next-finding pick + unpromoted-ledger update.
+      set -uo pipefail
+      # NOTE: literal `{}`/`[]` defaults stay OFF the parameter-expansion line
+      # — bash closes `${x:-{}}` at the FIRST `}`, corrupting a set arg.
+      FINDINGS="${1-}"; [ -n "$FINDINGS" ] || FINDINGS='[]'
+      IDX="${2-}";      [ -n "$IDX" ]      || IDX='0'
+      MAXP="${3-}";     [ -n "$MAXP" ]     || MAXP='5'
+      UNPROM="${4-}";   [ -n "$UNPROM" ]   || UNPROM='[]'
+      PENDING="${5-}";  [ -n "$PENDING" ]  || PENDING='{}'
+      # A null context slot renders as the literal string "null" — no pending.
+      [ "$PENDING" = "null" ] && PENDING='{}'
+
+      command -v jq >/dev/null 2>&1 || { printf '{"phase":"invalid","reason":"jq is not installed - the picker could not run (fail-closed)","next_finding":{},"next_idx":-1,"remaining":-1,"total":-1,"unpromoted":[]}\n'; exit 0; }
+
+      # Best-effort ledger echo for the invalid path: never zero out a
+      # parseable ledger just because a SIBLING arg was malformed.
+      LEDGER_SAFE="$(printf '%s' "$UNPROM" | jq -c 'if type == "array" then . else [] end' 2>/dev/null || printf '[]')"
+
+      invalid() { # $1 = reason
+        jq -n --arg reason "$1" --argjson led "$LEDGER_SAFE" \
+          '{phase:"invalid", reason:$reason, next_finding:{}, next_idx:-1, remaining:-1, total:-1, unpromoted:$led}'
+        exit 0
+      }
+
+      printf '%s' "$FINDINGS" | jq -e 'type == "array" and all(type == "object")' >/dev/null 2>&1 \
+        || invalid "findings arg was not a JSON array of objects"
+      printf '%s' "$UNPROM" | jq -e 'type == "array"' >/dev/null 2>&1 \
+        || invalid "unpromoted ledger arg was not a JSON array"
+      printf '%s' "$PENDING" | jq -e 'type == "object"' >/dev/null 2>&1 \
+        || invalid "pending arg was not a JSON object (got '$PENDING')"
+      printf '%s' "$IDX" | jq -e 'type == "number" and . == floor and . >= 0' >/dev/null 2>&1 \
+        || invalid "finding_idx arg was not a non-negative integer (got '$IDX')"
+      printf '%s' "$MAXP" | jq -e 'type == "number" and . == floor' >/dev/null 2>&1 \
+        || invalid "max_promotions arg was not an integer (got '$MAXP')"
+
+      jq -n \
+        --argjson findings "$FINDINGS" \
+        --argjson idx "$IDX" \
+        --argjson maxp "$MAXP" \
+        --argjson unprom "$UNPROM" \
+        --argjson pending "$PENDING" \
+      '
+        ($findings | length) as $total
+        | ($idx | floor)  as $i
+        | ($maxp | floor) as $cap
+        # Ledger update: a non-empty pending is the previous pick that was
+        # never recorded as promoted — append it (unpromoted unless proven
+        # promoted; the driver clears pending only on a recorded success).
+        | ($unprom + (if ($pending | length) > 0 then [$pending] else [] end)) as $ledger
+        | if $i >= $total then
+            { phase: "exhausted",
+              reason: ("all " + ($total | tostring) + " findings considered"),
+              next_finding: {}, next_idx: $i, remaining: 0, total: $total,
+              unpromoted: $ledger }
+          elif $i >= $cap then
+            { phase: "capped",
+              reason: ("max_promotions cap (" + ($cap | tostring) + ") reached at index "
+                       + ($i | tostring) + " with " + (($total - $i) | tostring)
+                       + " findings never considered"),
+              next_finding: {}, next_idx: $i, remaining: ($total - $i), total: $total,
+              unpromoted: ($ledger + $findings[$i:]) }
+          else
+            { phase: "picked",
+              reason: ("picked finding at index " + ($i | tostring) + " of " + ($total | tostring)),
+              next_finding: $findings[$i], next_idx: ($i + 1),
+              remaining: ($total - $i - 1), total: $total,
+              unpromoted: $ledger }
+          end
+      '

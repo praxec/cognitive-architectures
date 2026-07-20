@@ -1,0 +1,48 @@
+# capabilities/cap.verify.test-immutable.yaml
+#
+# TAMPER DETECTION of the test-immutability pair (flow.qa.promote-finding).
+# Verb `verify` is DETERMINISTIC (V6: kind script) wrapping
+# verify.test.immutable: after the src-scoped fixer ran, re-hash every
+# pinned test path and compare against the approved pin
+# (cap.inspect.test-pin's baseline). PREVENTION is the fixer's
+# `tools: ["file:{{ $.run.repo_root }}/src"]` write-scope (it physically
+# cannot address tests/); THIS cap is the detection half — any changed or
+# deleted pinned file emits ok=false with the paths in `tampered`, and the
+# flow HARD-STOPS (no retry arm: a tampered approved test is a governance
+# violation, not a fixable hiccup). Fail-closed: an empty pin or an
+# uncheckable repo is ok=false — "could not check" never reads "unchanged".
+
+workflows:
+  cap.verify.test-immutable:
+    verb: verify
+    lifecycle: experimental
+    description: >
+      Deterministically re-hash the pinned regression-test files after the
+      fix and compare against the approved pin; any divergence (changed or
+      deleted file) reports tampered paths with ok=false, fail-closed on
+      anything uncheckable.
+    snippet:
+      inputs:
+        # The approved pin: { <repo-root-relative path>: <git blob hash> }.
+        pin: { type: object, required: true }
+      outputs:
+        ok:       { type: boolean }
+        tampered: { type: array }
+    initialState: checking
+    states:
+      checking:
+        goal: Re-hash pinned tests and detect any post-approval change.
+        transitions:
+          check:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.test.immutable
+              args:
+                - "$.workflow.input.pin"
+                - "$.run.repo_root"
+            output:
+              ok:       "$.output.json.ok"
+              tampered: "$.output.json.tampered"
+      done: { terminal: true }

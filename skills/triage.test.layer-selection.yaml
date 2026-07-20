@@ -1,0 +1,58 @@
+# skills/triage.test.layer-selection.yaml
+#
+# The PROMOTION RULE of the TDD promotion loop (flow.qa.promote-finding): a
+# discovered Finding earns a PERMANENT regression test at the SMALLEST layer
+# that pins its root cause. This skill is the discipline the triage agent
+# (cap.triage.test-layer) reads. Its claims are not honor-system: the layer
+# pairing is machine-checked downstream (inspect.test.layer-budget), an
+# ambiguous choice routes to a human, and an e2e choice is budget-gated.
+
+skills:
+  triage.test.layer-selection:
+    verb: triage
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      # Test-layer selection (the promotion rule)
+
+      You are deciding at which layer a discovered defect becomes a
+      PERMANENT regression test. The rule: pick the SMALLEST layer on the
+      ladder that can pin the ROOT CAUSE — not the layer the defect was
+      OBSERVED at. A defect discovered through the browser almost never
+      needs a browser to be pinned.
+
+      ## The ladder (smallest first)
+
+      1. **unit** — the root cause is one function/module's logic
+         (formatting, calculation, branching). Pin it with a direct call.
+      2. **component** — the root cause is one UI component's rendered
+         behavior in isolation (wrong label, missing state, broken
+         handler). Pin it with a component test.
+      3. **integration** — the root cause is the interaction of two or
+         more modules (store + reducer, route + loader) without a full
+         browser journey.
+      4. **contract** — the root cause is a request/response shape
+         mismatch against an API contract. Pin the shape, not the screen.
+      5. **e2e** — ONLY when the root cause is the wiring of a whole
+         user journey that no smaller layer can express.
+
+      ## Discipline
+
+      - Read the Finding's `observed`, `expected`, `expectedSource`, and
+        the probe's steps; read the relevant source with your file tools
+        until you can NAME the root cause. The layer follows the root
+        cause, never the symptom.
+      - Walk the ladder BOTTOM-UP and stop at the first layer that can
+        express the defect. Justify skipping a layer, never assume.
+      - Choosing **e2e** REQUIRES a `justification` that names the
+        critical user journey being protected (e.g. "checkout payment
+        submission"). A deterministic check downstream rejects an e2e
+        choice with an empty justification or an exhausted e2e budget —
+        do not spend the budget on defects a smaller layer can pin.
+      - **Never guess.** If two layers are genuinely defensible and you
+        cannot decide from the code you read, set `is_ambiguous: true`
+        and emit BOTH as `candidates` (each with its justification). An
+        ambiguous choice routes to a human — an over-confident wrong
+        layer produces a permanent test that pins the wrong thing.
+      - The test you are choosing a home for must be expressible under
+        the repo's `tests/` tree (the writer is write-scoped there).

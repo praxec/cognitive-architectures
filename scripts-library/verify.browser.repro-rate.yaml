@@ -1,0 +1,159 @@
+# scripts-library/verify.browser.repro-rate.yaml
+#
+# THE deterministic reproduction gate of the E2E discovery loop
+# (flow.qa.explore). An agent's claim "I saw it fail" is not currency; a
+# machine-replayable probe is. cap.diagnose.browser-probe writes, per
+# observation, a Playwright spec (`probe_ref`, repo-root-relative, under
+# `.praxec/qa-artifacts/`) AUTHORED TO PASS WHEN THE ANOMALY IS PRESENT.
+# This script replays each probe with `playwright test <probe>
+# --repeat-each=N --workers=1 --reporter=json` and computes
+# `successfulAttempts` IN CODE from the JSON reporter's stats — the agent
+# never grades its own homework. Observations partition:
+#   reproduced     — successfulAttempts >= 2 (promotable to a Finding)
+#   discarded      — evaluated but successfulAttempts < 2 (not currency)
+#   not_evaluated  — could not be replayed (missing probe/playwright);
+#                    HONEST FLOOR per cap.verify.generic — never counted
+#                    as reproduced, never disguised as discarded-tested.
+#
+# A4 FOLLOW-UP: probes live under `<repo_root>/.praxec/qa-artifacts/`
+# because `$.run.artifacts_dir` is not yet an engine scope — when it lands,
+# probe authoring + this script's root switch to it.
+version: "1.0.0"
+scripts:
+  verify.browser.repro-rate:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Deterministic reproduction-rate gate.
+      #   $1 — observations array (JSON string); each may carry `probe_ref`
+      #        (repo-root-relative Playwright spec path).
+      #   $2 — attempts per probe (integer; floored at 2 — you cannot prove
+      #        >=2 successes with fewer than 2 attempts).
+      #   $3 — repo root (the run-ambient $.run.repo_root); probes resolve
+      #        against it and playwright runs from it.
+      # Emits ONE JSON report on stdout; ALWAYS exits 0 (the wrapping cap
+      # sets treatNonZeroAsFailure: false; verdicts live in the JSON, not
+      # the exit code).
+      set -uo pipefail
+      OBS="${1:-[]}"
+      ATTEMPTS="${2:-5}"
+      REPO_ROOT="${3:-}"
+
+      # ---- honest floor helpers -------------------------------------------
+      # A top-level not_evaluated report: NOTHING was replayed. Observations
+      # are surfaced in `not_evaluated` — never in `discarded` (that would
+      # claim we tested them and they failed to reproduce, which is a lie).
+      floor() { # $1 = reason
+        # OBS may itself be unparseable — fall back to [] rather than letting
+        # the floor report die on the very malformation it is reporting.
+        SAFE=$(printf '%s' "$OBS" | jq -c 'if type == "array" then . else [] end' 2>/dev/null || printf '[]')
+        jq -n --arg reason "$1" --argjson n "${ATTEMPTS:-5}" --argjson obs "$SAFE" \
+          '{status: "not_evaluated", reason: $reason, attempts: $n,
+            results: [], reproduced: [], discarded: [],
+            not_evaluated: $obs,
+            reproduced_count: 0, discarded_count: 0,
+            not_evaluated_count: ($obs | length)}'
+        exit 0
+      }
+
+      # ---- input sanity ----------------------------------------------------
+      command -v jq >/dev/null 2>&1 || { printf '{"status":"not_evaluated","reason":"jq is not installed","results":[],"reproduced":[],"discarded":[],"not_evaluated":[],"reproduced_count":0,"discarded_count":0,"not_evaluated_count":0}\n'; exit 0; }
+      # Sanitize ATTEMPTS before any floor() call — floor passes it --argjson.
+      case "$ATTEMPTS" in (''|*[!0-9]*) ATTEMPTS=5 ;; esac
+      [ "$ATTEMPTS" -lt 2 ] && ATTEMPTS=2
+      printf '%s' "$OBS" | jq -e 'type == "array"' >/dev/null 2>&1 \
+        || floor "observations arg was not a JSON array"
+      [ -n "$REPO_ROOT" ] && [ -d "$REPO_ROOT" ] \
+        || floor "repo_root '$REPO_ROOT' is not a directory"
+      cd "$REPO_ROOT" || floor "cannot cd into repo_root '$REPO_ROOT'"
+      # Playwright must ALREADY be installed in the target repo (--no-install:
+      # a cold npx fetch inside a verify gate is a supply-chain surprise).
+      if ! npx --no-install playwright --version >/dev/null 2>&1; then
+        floor "playwright is not installed in the target repo (npx --no-install playwright failed)"
+      fi
+
+      # ---- replay each probe ----------------------------------------------
+      RESULTS='[]'
+      COUNT=$(printf '%s' "$OBS" | jq 'length')
+      i=0
+      while [ "$i" -lt "$COUNT" ]; do
+        OB=$(printf '%s' "$OBS" | jq ".[$i]")
+        PROBE=$(printf '%s' "$OB" | jq -r '.probe_ref // empty')
+        R=''
+        if [ -z "$PROBE" ]; then
+          R=$(jq -n --argjson ob "$OB" --argjson n "$ATTEMPTS" \
+            '{observation: $ob, status: "not_evaluated",
+              reason: "observation has no probe_ref",
+              attempts: $n, successfulAttempts: 0, deterministic: false}')
+        else
+          case "$PROBE" in
+            (/*|*..*)
+              # Poka-yoke: probe_ref must stay repo-root-relative — an
+              # absolute or parent-escaping path could replay arbitrary code.
+              R=$(jq -n --argjson ob "$OB" --argjson n "$ATTEMPTS" \
+                '{observation: $ob, status: "not_evaluated",
+                  reason: "probe_ref must be a repo-root-relative path without ..",
+                  attempts: $n, successfulAttempts: 0, deterministic: false}')
+              ;;
+            (*)
+              if [ ! -f "$PROBE" ]; then
+                R=$(jq -n --argjson ob "$OB" --argjson n "$ATTEMPTS" \
+                  '{observation: $ob, status: "not_evaluated",
+                    reason: ("probe file not found: " + $ob.probe_ref),
+                    attempts: $n, successfulAttempts: 0, deterministic: false}')
+              else
+                # Non-zero exit is EXPECTED when a probe does not reproduce
+                # on some attempts — the verdict comes from the JSON stats,
+                # never from the exit code.
+                OUT=$(npx --no-install playwright test "$PROBE" \
+                        --repeat-each="$ATTEMPTS" --workers=1 \
+                        --reporter=json 2>/dev/null || true)
+                if printf '%s' "$OUT" | jq -e '.stats' >/dev/null 2>&1; then
+                  R=$(printf '%s' "$OUT" | jq --argjson ob "$OB" '
+                    (.stats.expected + .stats.flaky) as $ok
+                    | (.stats.expected + .stats.unexpected
+                       + .stats.flaky + .stats.skipped) as $ran
+                    | {observation: $ob, status: "evaluated",
+                       attempts: $ran, successfulAttempts: $ok,
+                       deterministic: ($ran > 0 and $ok == $ran)}')
+                else
+                  R=$(jq -n --argjson ob "$OB" --argjson n "$ATTEMPTS" \
+                    '{observation: $ob, status: "not_evaluated",
+                      reason: "playwright produced no parseable JSON report for this probe",
+                      attempts: $n, successfulAttempts: 0, deterministic: false}')
+                fi
+              fi
+              ;;
+          esac
+        fi
+        RESULTS=$(printf '%s' "$RESULTS" | jq --argjson r "$R" '. + [$r]')
+        i=$((i + 1))
+      done
+
+      # ---- partition (>=2 successes = reproduced; the currency threshold) --
+      printf '%s' "$RESULTS" | jq --argjson n "$ATTEMPTS" '
+        map(select(.status == "evaluated" and .successfulAttempts >= 2)) as $rep
+        | map(select(.status == "evaluated" and .successfulAttempts < 2)) as $dis
+        | map(select(.status == "not_evaluated")) as $nev
+        | {
+            status: "evaluated",
+            attempts: $n,
+            results: map({probe_ref: (.observation.probe_ref // null),
+                          status, reason: (.reason // null),
+                          attempts, successfulAttempts, deterministic}),
+            reproduced: ($rep | map(. as $r | $r.observation
+              + {reproduction: {attempts: $r.attempts,
+                                successfulAttempts: $r.successfulAttempts,
+                                deterministic: $r.deterministic}})),
+            discarded: ($dis | map(. as $r | $r.observation
+              + {reproduction: {attempts: $r.attempts,
+                                successfulAttempts: $r.successfulAttempts,
+                                deterministic: $r.deterministic}})),
+            not_evaluated: ($nev | map(. as $r | $r.observation
+              + {not_evaluated_reason: ($r.reason // "unknown")})),
+            reproduced_count: ($rep | length),
+            discarded_count: ($dis | length),
+            not_evaluated_count: ($nev | length)
+          }'

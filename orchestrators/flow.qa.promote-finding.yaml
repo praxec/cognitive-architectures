@@ -1,0 +1,646 @@
+# orchestrators/flow.qa.promote-finding.yaml
+#
+# TDD PROMOTION loop (M2 of the agentic E2E testing program): turn ONE
+# discovered Finding (flow.qa.explore / cap.diagnose.finding shape) into a
+# PERMANENT regression test plus the fix that makes it green.
+#
+#   checking_separability → deterministic fail-fast: the charter's src_glob/
+#                 test_glob must be path-separable AND aligned with the
+#                 pack's src/ + tests/ write-scopes. Colocated tests
+#                 (Button.test.tsx beside Button.tsx) void the structural
+#                 enforcement below, so the flow REFUSES to run
+#                 (TEST_PATHS_NOT_SEPARABLE) rather than proceed with no
+#                 prevention. The pack supports path-separable layouts —
+#                 sources under src/, tests under tests/ — by design.
+#   triaging    → cap.triage.test-layer: the promotion rule — SMALLEST layer
+#                 (unit<component<integration<contract<e2e) that pins the
+#                 root cause; honest is_ambiguous routes to a HUMAN
+#                 (cap.gate.human-disambiguate), never a guess.
+#   budgeting   → cap.inspect.layer-budget: DETERMINISTIC re-check of the
+#                 claimed pairing (ladder membership, e2e requires a
+#                 critical-journey justification, e2e spec-count budget
+#                 counted on disk against charter.budgets.max_e2e_specs).
+#   writing     → cap.implement.regression-test: ONE failing test, written
+#                 by an agent whose tools are `file:<repo_root>/tests` ONLY.
+#   proving_red → cap.verify.test-red: the RED PROOF is real — the runner
+#                 executes the test and classifies IN CODE; only
+#                 red_reason == assertion_failed advances (a compile error,
+#                 an app-down failure, or a passing tautology is NOT red).
+#   reviewing   → cap.review.assertion-quality: behavioral-assertion
+#                 judgment (bounded to ONE rewrite round, then the open
+#                 issues go to the human approver — never an infinite
+#                 writer/reviewer loop).
+#   approving   → cap.gate.human-signoff on the promotion packet.
+#   pinning     → cap.inspect.test-pin: git-blob-hash the APPROVED test
+#                 (detection baseline), from the CODE-BUILT replay refs.
+#   fixing      → cap.implement.fix-under-scope: the fixer's tools are
+#                 `file:<repo_root>/src` ONLY — it PHYSICALLY cannot edit
+#                 the test (prevention half of test immutability; enforced
+#                 by the filesystem-aware tool guard, not by prompt text).
+#   checking_immutability → cap.verify.test-immutable: re-hash the pinned
+#                 test after EVERY fix round; ANY divergence = tamper =
+#                 HARD STOP to `failed` — deliberately NO retry arm.
+#   verifying_fix → cap.verify.repro-rate on the code-built replay ref: the
+#                 test must now PASS (deterministic replay, attempts=2).
+#                 Bounded fix retries (max_fix_rounds), then HUMAN
+#                 escalation (intervene out-of-band and resume — which
+#                 re-runs the tamper check first — or stop).
+#   flake_scanning → cap.verify.repro-rate again with --repeat-each
+#                 flake_attempts: the green test must pass EVERY attempt
+#                 (deterministic == true). A flaky regression test is a
+#                 future false alarm — it FAILS promotion.
+#   promoted    → terminal success (promoted_ok set only by the flake
+#                 gate's stable arm — the code-computed definition of done).
+#
+# DESIGN NOTES (FMECA-derived):
+#   - NO hop_slot for any verify: hop_slot binds slot inputs from
+#     $.arguments (actor-supplied) and degrades cwd to the gateway PWD —
+#     verifying the WRONG directory and reporting pass. Every verify here
+#     is a DIRECT `kind: workflow` call with explicit bindings, and every
+#     script roots itself at $.run.repo_root.
+#   - Test immutability = per-state `tools:` file-root scoping (prevent) +
+#     git-hash pin/re-check (detect). cap.implement.scope-bounded's
+#     scope_paths is prompt-text only and is deliberately NOT used here.
+#   - The green/flake replays consume `replay_obs` — built IN CODE by the
+#     red-proof script from the same test_path that gets pinned — so no
+#     agent can re-point the oracle between gates.
+#   - Takes exactly ONE finding; no parallel human gates.
+#
+# Requires (cognitive/*): cap.triage.test-layer, cap.inspect.layer-budget,
+# cap.implement.regression-test, cap.verify.test-red,
+# cap.review.assertion-quality, cap.gate.human-disambiguate,
+# cap.gate.human-signoff, cap.inspect.test-pin, cap.implement.fix-under-scope,
+# cap.verify.test-immutable, cap.verify.repro-rate; scripts
+# inspect.test.paths-separable, inspect.test.layer-budget,
+# verify.test.red-proof, inspect.git.test-pin, verify.test.immutable,
+# verify.browser.repro-rate; skills triage.test.layer-selection,
+# review.test.assertion-quality, implement.tdd.discipline; a gateway config
+# with auto_drive (see examples/qa-promote-run.yaml).
+#
+# A4 FOLLOW-UP: like flow.qa.explore, artifacts stay repo-root-relative
+# because `$.run.artifacts_dir` is not yet an engine scope.
+
+workflows:
+  flow.qa.promote-finding:
+    lifecycle: experimental
+    description: >
+      TDD promotion loop: turn one deterministically-reproduced Finding into
+      a permanent regression test — fail-fast path-separability check,
+      smallest-layer triage with human disambiguation, deterministic budget
+      check, tests/-scoped test authoring, code-classified red proof,
+      assertion-quality review, human approval, git-hash pin, src/-scoped
+      fix with tamper hard-stop, bounded green verification with human
+      escalation, and a repeat-each flake scan before promotion.
+    inputs:
+      # ONE Finding (cap.diagnose.finding shape: id, observed, expected,
+      # expectedSource, reproduction, probe_ref, evidence).
+      finding:        { type: object,  required: true }
+      # The promotion charter: src_glob + test_glob (separability) and
+      # budgets.max_e2e_specs (the e2e budget the layer check enforces).
+      charter:        { type: object,  required: true }
+      # Fix attempts after the first before human escalation.
+      max_fix_rounds: { type: integer, default: 2 }
+      # Replays in the flake scan (the repro-rate script floors at 2).
+      flake_attempts: { type: integer, default: 5 }
+    # Top-level outputs (flows have no `snippet:`) — terminal context slots.
+    outputs:
+      test_path:    { type: string }
+      layer:        { type: string }
+      fix_summary:  { type: object }
+      pin:          { type: object }
+      flake_report: { type: object }
+    # Seed EVERY declared output (V24) + the loop counters. promoted_ok is
+    # seeded false (honest floor): only the flake gate's stable arm — after
+    # red proof, approval, tamper-free fix, and a deterministic all-pass
+    # replay — ever sets it true.
+    initialContext:
+      test_path:      ""
+      layer:          ""
+      fix_summary:    {}
+      pin:            {}
+      flake_report:   {}
+      red_proof:      {}
+      replay_report:  {}
+      review_issues:  []
+      fix_rounds:     0
+      rewrite_rounds: 0
+      promoted_ok:    false
+    outcomes:
+      - id: regression_promoted
+        statement: >
+          The Finding is pinned by a permanent regression test that was
+          proven RED on an assertion against the defective code, approved by
+          a human, hash-pinned and unmodified through the src/-scoped fix,
+          and proven deterministically GREEN across every flake-scan attempt
+          (promoted_ok is set only by that gate's stable arm).
+        check: "$.context.promoted_ok == true"
+    initialState: checking_separability
+    states:
+
+      # FAIL-FAST precondition: the structural write-scope enforcement below
+      # only exists when tests are path-separable from sources. Inputs
+      # (finding/charter/max_fix_rounds/flake_attempts) are auto-seeded into
+      # $.context by the engine — no manual seeding state is needed.
+      checking_separability:
+        goal: Fail fast unless the charter's test paths are separable from src.
+        transitions:
+          check:
+            target: separability_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.test.paths-separable
+              args:
+                - "$.workflow.input.charter"
+            # Plain script-executor `output:` — LEFT-hand keys are BARE slot
+            # names (the flow.audit-docs trap: a `$.context.*`-prefixed key
+            # would write a literal slot named "$.context.…").
+            output:
+              paths_separable: "$.output.json.separable"
+              sep_reason:      "$.output.json.reason"
+
+      # Split gate state — guards run BEFORE executors, so branching on the
+      # check's output needs its own state.
+      separability_gate:
+        transitions:
+          separable:
+            target: triaging
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.paths_separable == true" }
+          # TEST_PATHS_NOT_SEPARABLE (reason in $.context.sep_reason):
+          # colocated layouts get a LOUD refusal, never a run with the
+          # prevention half missing.
+          blocked:
+            target: failed
+            actor: deterministic
+
+      # The promotion rule: smallest layer that pins the root cause.
+      triaging:
+        goal: Choose the smallest test layer that pins the Finding's root cause.
+        transitions:
+          triage:
+            target: layer_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.triage.test-layer
+              use:
+                inputs:
+                  finding: "$.workflow.input.finding"
+                  charter: "$.workflow.input.charter"
+                outputs:
+                  "$.context.layer":               layer
+                  "$.context.layer_justification": justification
+                  "$.context.layer_ambiguous":     is_ambiguous
+                  "$.context.layer_candidates":    candidates
+
+      # Ambiguity routes to a HUMAN — an over-confident wrong layer pins the
+      # wrong thing permanently. Never guess.
+      layer_gate:
+        transitions:
+          clear:
+            target: budgeting
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.layer_ambiguous == false" }
+          ambiguous:
+            target: disambiguating
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.layer_ambiguous == true" }
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      disambiguating:
+        goal: Human picks the layer from the triage candidates.
+        transitions:
+          ask:
+            target: adopting
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.gate.human-disambiguate
+              use:
+                inputs:
+                  candidates: "$.context.layer_candidates"
+                  prompt: "Layer triage is ambiguous for this Finding. Pick the smallest layer that pins the root cause (chosen: { layer, justification })."
+                outputs:
+                  "$.context.chosen_layer": chosen
+
+      # Adopt the human's choice into the same slots the machine check and
+      # the writer read — one downstream shape for both routes.
+      adopting:
+        goal: Adopt the human-chosen layer into the working slots.
+        transitions:
+          adopt:
+            target: budgeting
+            actor: deterministic
+            executor: { kind: noop }
+            output:
+              layer:               "$.context.chosen_layer.layer"
+              layer_justification: "$.context.chosen_layer.justification"
+
+      # DETERMINISTIC re-check of the claimed pairing — the triage (or the
+      # human) never advances on say-so.
+      budgeting:
+        goal: Machine-check the layer choice against justification + e2e budget.
+        transitions:
+          check:
+            target: budget_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.inspect.layer-budget
+              use:
+                inputs:
+                  layer:         "$.context.layer"
+                  justification: "$.context.layer_justification"
+                  charter:       "$.workflow.input.charter"
+                outputs:
+                  "$.context.budget_ok":     ok
+                  "$.context.budget_reason": reason
+
+      budget_gate:
+        transitions:
+          within:
+            target: writing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.budget_ok == true" }
+          # Unjustified/over-budget e2e (or a broken pairing) aborts loudly
+          # (reason in $.context.budget_reason).
+          over:
+            target: failed
+            actor: deterministic
+
+      # ONE failing test, written under tests/ ONLY (the writer's tools are
+      # rooted there — it physically cannot touch src/).
+      writing:
+        goal: Write one failing regression test at the chosen layer.
+        transitions:
+          write:
+            target: proving_red
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.regression-test
+              use:
+                inputs:
+                  finding:       "$.workflow.input.finding"
+                  charter:       "$.workflow.input.charter"
+                  layer:         "$.context.layer"
+                  justification: "$.context.layer_justification"
+                  review_issues: "$.context.review_issues"
+                outputs:
+                  "$.context.test_path": test_path
+
+      # THE red proof — code runs the test, code classifies the failure.
+      proving_red:
+        goal: Prove the new test fails NOW on an assertion (real red).
+        transitions:
+          prove:
+            target: red_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.test-red
+              use:
+                inputs:
+                  test_path:  "$.context.test_path"
+                  finding_id: "$.context.finding.id"
+                outputs:
+                  "$.context.red_status": status
+                  "$.context.red_reason": red_reason
+                  "$.context.red_proof":  red_report
+                  "$.context.replay_obs": replay_obs
+
+      # ONLY assertion_failed advances: tautology (passes now), infra_error
+      # (app down / compile error), not_found, and the not_evaluated honest
+      # floor all fall through to failed — none of them proves the test
+      # pins the defect.
+      red_gate:
+        transitions:
+          red:
+            target: reviewing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.red_reason == 'assertion_failed'" }
+          not_red:
+            target: failed
+            actor: deterministic
+
+      # Behavioral-assertion judgment (separate reviewer agent).
+      reviewing:
+        goal: Judge the test's assertions behavioral, not structural.
+        transitions:
+          review:
+            target: review_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.assertion-quality
+              use:
+                inputs:
+                  test_path: "$.context.test_path"
+                  layer:     "$.context.layer"
+                  finding:   "$.workflow.input.finding"
+                outputs:
+                  "$.context.review_verdict": verdict
+                  "$.context.review_issues":  issues
+
+      # Bounded rewrite: ONE writer round on reviewer issues (the rewritten
+      # test re-earns its red proof), then the HUMAN approver sees the open
+      # issues — never an infinite writer/reviewer loop.
+      review_gate:
+        transitions:
+          pass:
+            target: approving
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.review_verdict == 'pass'" }
+          rewrite:
+            target: writing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.review_verdict == 'rewrite'" }
+              - { kind: expr, expr: "$.context.rewrite_rounds < 1" }
+            output:
+              rewrite_rounds: { add: ["$.context.rewrite_rounds", 1] }
+          exhausted:
+            target: approving
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.review_verdict == 'rewrite'" }
+              - { kind: expr, expr: "$.context.rewrite_rounds >= 1" }
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      # HITL: the human approves the promotion packet (red-proved test +
+      # review verdict/issues) before it becomes the pinned oracle.
+      approving:
+        goal: Human sign-off on the red-proved regression test.
+        transitions:
+          ask:
+            target: approve_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.gate.human-signoff
+              use:
+                inputs:
+                  artifact:
+                    test_path:      "$.context.test_path"
+                    layer:          "$.context.layer"
+                    red_proof:      "$.context.red_proof"
+                    review_verdict: "$.context.review_verdict"
+                    review_issues:  "$.context.review_issues"
+                  prompt: "Approve this red-proved regression test for promotion? Once approved it is hash-pinned; the fixer cannot (and must not) modify it."
+                outputs:
+                  "$.context.approve_decision": decision
+
+      approve_gate:
+        transitions:
+          approved:
+            target: pinning
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.approve_decision == 'approved'" }
+          rejected:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.approve_decision == 'rejected'" }
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      # DETECTION baseline: git-blob-hash the approved test, from the
+      # CODE-BUILT replay refs (never an agent-asserted path list).
+      pinning:
+        goal: Hash-pin the approved test (tamper-detection baseline).
+        transitions:
+          pin:
+            target: pin_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.inspect.test-pin
+              use:
+                inputs:
+                  test_refs: "$.context.replay_obs"
+                outputs:
+                  "$.context.pin_ok": ok
+                  "$.context.pin":    pin
+
+      pin_gate:
+        transitions:
+          pinned:
+            target: fixing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.pin_ok == true" }
+          # Fail-closed: an unpinnable test must not proceed to a fix round
+          # whose immutability check would be vacuous.
+          unpinnable:
+            target: failed
+            actor: deterministic
+
+      # The fix, under src/ ONLY (the fixer's tools cannot reach tests/).
+      fixing:
+        goal: Fix the defect under src/ so the pinned test goes green.
+        transitions:
+          fix:
+            target: checking_immutability
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.fix-under-scope
+              use:
+                inputs:
+                  finding:       "$.workflow.input.finding"
+                  test_path:     "$.context.test_path"
+                  red_proof:     "$.context.red_proof"
+                  replay_report: "$.context.replay_report"
+                outputs:
+                  "$.context.fix_summary": fix_summary
+
+      # Re-hash the pinned test after EVERY fix round (and after any human
+      # out-of-band intervention on resume).
+      checking_immutability:
+        goal: Detect any post-approval change to the pinned test.
+        transitions:
+          check:
+            target: immutable_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.test-immutable
+              use:
+                inputs:
+                  pin: "$.context.pin"
+                outputs:
+                  "$.context.immutable_ok": ok
+                  "$.context.tampered":     tampered
+
+      # A changed/deleted pinned test is a governance violation, not a
+      # fixable hiccup: HARD STOP — deliberately NO retry arm here.
+      immutable_gate:
+        transitions:
+          intact:
+            target: verifying_fix
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.immutable_ok == true" }
+          tampered:
+            target: failed
+            actor: deterministic
+
+      # DIRECT verify call (never hop_slot: hop_slot binds from
+      # $.arguments and degrades cwd to the gateway PWD — it would verify
+      # the wrong directory and report pass). The repro-rate script roots
+      # itself at $.run.repo_root and replays the CODE-BUILT replay_obs —
+      # the same file that was red-proved and pinned. attempts=2 is the
+      # script's proof floor: the test must pass twice to count green.
+      verifying_fix:
+        goal: Deterministically verify the pinned test now passes.
+        transitions:
+          verify:
+            target: green_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.repro-rate
+              use:
+                inputs:
+                  observations: "$.context.replay_obs"
+                  attempts:     2
+                outputs:
+                  "$.context.green_count":   reproduced_count
+                  "$.context.replay_report": repro_report
+
+      # Bounded retry (fix_rounds vs max_fix_rounds — both context-resolved;
+      # inputs are auto-seeded into $.context), then HUMAN escalation.
+      green_gate:
+        transitions:
+          green:
+            target: flake_scanning
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.green_count == 1" }
+          retry:
+            target: fixing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.green_count == 0" }
+              - { kind: expr, expr: "$.context.fix_rounds < $.context.max_fix_rounds" }
+            output:
+              fix_rounds: { add: ["$.context.fix_rounds", 1] }
+          exhausted:
+            target: escalating
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.green_count == 0" }
+              - { kind: expr, expr: "$.context.fix_rounds >= $.context.max_fix_rounds" }
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      # NEVER silent on exhaustion: the human intervenes out-of-band and
+      # resumes (which re-runs the TAMPER CHECK first — a human edit to the
+      # pinned test also hard-stops), or stops the promotion.
+      escalating:
+        goal: Fix rounds exhausted — human intervenes and resumes, or stops.
+        transitions:
+          ask:
+            target: escalate_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.gate.human-signoff
+              use:
+                inputs:
+                  artifact:
+                    finding:       "$.context.finding"
+                    test_path:     "$.context.test_path"
+                    fix_summary:   "$.context.fix_summary"
+                    replay_report: "$.context.replay_report"
+                  prompt: "Automated fix rounds are exhausted and the pinned regression test still fails. Intervene out-of-band (fix src/ manually) and APPROVE to re-verify (the test pin is re-checked first), or REJECT to stop the promotion."
+                outputs:
+                  "$.context.escalate_decision": decision
+
+      escalate_gate:
+        transitions:
+          resume:
+            target: checking_immutability
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.escalate_decision == 'approved'" }
+          stop:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.escalate_decision == 'rejected'" }
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      # A green-but-flaky regression test is a future false alarm: replay
+      # --repeat-each=flake_attempts; EVERY attempt must pass.
+      flake_scanning:
+        goal: Replay the green test repeatedly; only deterministic passes promote.
+        transitions:
+          scan:
+            target: flake_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.repro-rate
+              use:
+                inputs:
+                  observations: "$.context.replay_obs"
+                  attempts:     "$.workflow.input.flake_attempts"
+                outputs:
+                  "$.context.flake_pass_count": reproduced_count
+                  "$.context.flake_report":     repro_report
+
+      # Two chained gates: the second reads INTO the replay result
+      # (results[0].deterministic), which only provably exists once the
+      # first confirmed the test replayed at all ($.context misses fail
+      # fast in guards — so presence is gated before the nested read).
+      flake_gate:
+        transitions:
+          replayed:
+            target: flake_det_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.flake_pass_count == 1" }
+          regressed:
+            target: failed
+            actor: deterministic
+
+      flake_det_gate:
+        transitions:
+          stable:
+            target: promoted
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.flake_report.results[0].deterministic == true" }
+            # The ONLY writer of promoted_ok — the code-computed "done".
+            output:
+              promoted_ok: { set: true }
+          flaky:
+            target: failed
+            actor: deterministic
+
+      promoted:
+        terminal: true
+        outcome: success
+
+      # Guard fallthroughs, tamper detection, human rejection, and every
+      # non-advancing verdict land here — loudly, never as a fake green.
+      failed:
+        terminal: true
+        outcome: failure

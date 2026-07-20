@@ -1,0 +1,119 @@
+# examples/qa-program-run.yaml
+#
+# Gateway config that DRIVES cognitive/flow.qa.program live — the top-level
+# QA program (M3): discovery (flow.qa.explore) then per-finding TDD
+# promotion (flow.qa.promote-finding). It is the union of what the two
+# halves need (see examples/qa-explore-run.yaml + qa-promote-run.yaml for
+# the per-half rationale):
+#
+#   1. a `browser` EXCLUSIVE POOL — the program declares
+#      `exclusive_pools: [browser]` (it transitively drives the browser
+#      through flow.qa.explore): ONE member is leased at the PROGRAM's run
+#      boundary and inherited by the explore child (never re-acquired);
+#      the promotion half doesn't lease (playwright replays launch their
+#      own browsers);
+#   2. auto_drive ON — charter/survey/probe/finding leaves (discovery) and
+#      triage/writer/reviewer/fixer leaves (promotion) are delegate agents.
+#      The gateway-wide `auto_drive_tools` is file reach over the target
+#      repo only; browser reach and the tests/-only / src/-only write
+#      scopes come from the per-state `tools:` declared inside the two
+#      sub-flows' capabilities (per-state `tools:` REPLACES this set);
+#   3. a model binding (gateway.models_yaml);
+#   4. a DURABLE store (sqlite) — the promotion loop parks on human gates
+#      (approval + escalation), and a failed promotion parks the program
+#      at its `promoting` state with recovery links (retry `promote` /
+#      `skip` to record the finding as unpromoted and continue), so runs
+#      must survive process restarts;
+#   5. the cognitive-architectures repo — the WHOLE pack, so the program,
+#      both sub-flows, their caps/scripts/skills, and the
+#      inspect.findings.next picker all resolve;
+#   6. the TARGET repo as the writable repo: `$.run.repo_root` resolves
+#      here. It needs everything both halves need — a git work tree with
+#      @playwright/test installed and a PATH-SEPARABLE layout (sources
+#      under src/, tests under tests/, per mission.charter's src_glob /
+#      test_glob) or each promotion fails fast with
+#      TEST_PATHS_NOT_SEPARABLE by design.
+#
+# Validate:
+#   praxec check --config examples/qa-program-run.yaml
+#
+# Drive (headless up to the promotion human gates; approve via the HITL
+# surface). `mission` is the program envelope — mission.mission +
+# mission.app_url feed explore, mission.charter is the PROMOTION charter:
+#   set -a; . ~/.config/praxec/providers.env; set +a
+#   praxec orchestrate --config examples/qa-program-run.yaml \
+#     --definition cognitive/flow.qa.program \
+#     --input '{"mission": {"mission": "explore the checkout flow for defects",
+#               "app_url": "http://localhost:3000",
+#               "charter": {"src_glob": "src/**", "test_glob": "tests/**",
+#                           "budgets": {"max_e2e_specs": 10}}},
+#               "max_promotions": 5, "max_fix_rounds": 2}'
+
+version: "1.0.0"
+
+gateway:
+  principal: { subject: operator, roles: [human] }
+  # Affinity/tier -> provider:model chains for the auto-driven agent leaves.
+  models_yaml: /home/mc/.config/praxec/models.yaml
+
+praxec:
+  # Free lexical discovery — no embedding endpoint spend for a QA run.
+  embeddings:
+    enabled: false
+  # The repo the run operates ON: the app under test AND under promotion.
+  # $.run.repo_root resolves here — probe specs land under
+  # <root>/.praxec/qa-artifacts/, regression tests under <root>/tests/,
+  # fixes under <root>/src/, and every deterministic gate runs from this
+  # root. Adjust to your app; it must be a git work tree with
+  # @playwright/test installed.
+  _writableRepos:
+    - root: "."
+      push: false
+  agents:
+    auto_drive: true
+    # Default leaf affinity; senior-judgment states inside the sub-flows
+    # (finding adjudication, assertion-quality review) pin `review`.
+    auto_drive_affinity: reasoning
+    # Browser sessions and writer/fixer sessions are both long.
+    auto_drive_max_seconds: 900
+    # Gateway-wide DEFAULT toolset: file tools over the target repo only.
+    # Deliberately NO browser here — browser reach exists solely on the
+    # explore states that declare `tools: ["{{ $.run.leased.browser }}"]`,
+    # and the promotion write-scopes (tests/-only writer, src/-only fixer)
+    # are the per-state `tools:` inside flow.qa.promote-finding's caps.
+    auto_drive_tools:
+      - "file:{{ $.run.repo_root }}"
+
+audit:
+  sink: stderr
+
+store:
+  kind: sqlite
+  path: /home/mc/.local/share/praxec/qa-program-run.db
+
+# The `browser` exclusive pool the program leases at its run boundary —
+# connection shape from examples/praxec-browser.yaml. Each member is ONE
+# browser server process; two members = two concurrent program runs.
+connections:
+  browser_chrome_1:
+    kind: mcp
+    command: npx
+    args: ["chrome-devtools-mcp@latest", "--isolated"]
+    exclusive: true
+    pool: browser
+    startupTimeoutMs: 120000
+    idleTimeoutMs: 180000
+  browser_chrome_2:
+    kind: mcp
+    command: npx
+    args: ["chrome-devtools-mcp@latest", "--isolated"]
+    exclusive: true
+    pool: browser
+    startupTimeoutMs: 120000
+    idleTimeoutMs: 180000
+
+# The cognitive-architectures resource repo: the program + both sub-flows +
+# their caps, scripts (incl. inspect.findings.next), and skills (loaded
+# namespace-prefixed `cognitive/*`).
+repos:
+  - path: ..

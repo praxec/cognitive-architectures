@@ -1,0 +1,66 @@
+# capabilities/cap.verify.repro-rate.yaml
+#
+# THE deterministic reproduction gate of the E2E discovery loop
+# (flow.qa.explore). Verb `verify` is DETERMINISTIC (V6: kind script) —
+# this is intentionally NOT an agent self-report ("I saw it twice") and NOT
+# a fake browser-replay-in-bash: the probe step minted real Playwright
+# specs (probe_ref), and the verify.browser.repro-rate script shells
+# `playwright test <probe> --repeat-each=N --workers=1 --reporter=json`,
+# computing `successfulAttempts` IN CODE from the reporter's stats.
+# Partition: reproduced (>= 2 successes — promotable), discarded (< 2),
+# not_evaluated (unreplayable — HONEST FLOOR per cap.verify.generic: never
+# a disguised pass, never a disguised "tested and failed").
+# `treatNonZeroAsFailure: false` — probes that fail to reproduce exit
+# playwright non-zero; the verdict is the JSON, not the exit code.
+
+workflows:
+  cap.verify.repro-rate:
+    verb: verify
+    lifecycle: experimental
+    description: >
+      Deterministically replay each observation's Playwright probe
+      (--repeat-each, single worker, JSON reporter), compute per-observation
+      { attempts, successfulAttempts, deterministic } in code, and partition
+      observations into reproduced (>=2 successes), discarded (<2), and an
+      honest not_evaluated floor when replay is impossible.
+    snippet:
+      inputs:
+        # Probe-step observations; each carries a repo-root-relative probe_ref.
+        observations: { type: array,   required: true }
+        # Replays per probe (floored at 2 by the script — cannot prove >=2
+        # successes with fewer than 2 attempts).
+        attempts:     { type: integer, default: 5 }
+      outputs:
+        # Observations that reproduced (each gains a `reproduction` object
+        # the finding cap copies VERBATIM into its Finding).
+        reproduced:       { type: array }
+        # Evaluated but under the >=2 threshold — not currency.
+        discarded:        { type: array }
+        reproduced_count: { type: integer }
+        # The full replay report (results, not_evaluated floor, counts).
+        repro_report:     { type: object }
+    initialState: replaying
+    states:
+      replaying:
+        goal: Deterministically replay every probe and partition by reproduction rate.
+        transitions:
+          replay:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.browser.repro-rate
+              treatNonZeroAsFailure: false
+              args:
+                - "$.workflow.input.observations"
+                - "$.workflow.input.attempts"
+                # Probes resolve against (and playwright runs from) the
+                # run-ambient repo root. A4 FOLLOW-UP: switch to
+                # $.run.artifacts_dir when that scope lands in the engine.
+                - "$.run.repo_root"
+            output:
+              reproduced:       "$.output.json.reproduced"
+              discarded:        "$.output.json.discarded"
+              reproduced_count: "$.output.json.reproduced_count"
+              repro_report:     "$.output.json"
+      done: { terminal: true }
