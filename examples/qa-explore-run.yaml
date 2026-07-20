@@ -16,8 +16,11 @@
 #      the global set) naming the lease token — so the surveyor/prober hold
 #      the leased browser, the charter/finding agents physically cannot
 #      browse, and nobody holds a hardcoded browser connection (V31);
-#   3. a model binding (gateway.models_yaml) — the probe/survey leaves ride
-#      the default affinity; cap.diagnose.finding's state pins `review`;
+#   3. a model binding (gateway.models_yaml) — the survey leaf rides the
+#      default affinity; cap.diagnose.browser-probe and cap.diagnose.finding
+#      both pin `review` (probing is the loop's hardest reasoning step:
+#      interactive exploration AND correct Playwright authoring in one turn,
+#      and on a commodity chain it burns the full budget with no result);
 #   4. a durable store (sqlite) so the run survives process restarts;
 #   5. the cognitive-architectures repo (flow.qa.explore + its caps,
 #      the verify.browser.repro-rate + audit.findings.aggregate scripts,
@@ -32,11 +35,40 @@
 # Validate:
 #   praxec check --config examples/qa-explore-run.yaml
 #
-# Drive (headless, to the evidence_clean outcome):
+# Drive (headless, to the evidence_clean + fully_evaluated outcomes):
 #   set -a; . ~/.config/praxec/providers.env; set +a
 #   praxec orchestrate --config examples/qa-explore-run.yaml \
 #     --definition cognitive/flow.qa.explore \
 #     --input '{"mission":"explore the checkout flow for defects","app_url":"http://localhost:3000","attempts":5}'
+#
+# ---------------------------------------------------------------------------
+# APPS BEHIND A LOGIN WALL
+# ---------------------------------------------------------------------------
+# The browser agents cannot log in — typing credentials is a side-effecting
+# form submission, and they hold no credentials. Log in ONCE by hand and save
+# the session, from the app repo root:
+#
+#   npx playwright open --save-storage=.praxec/qa-auth.json http://localhost:3000
+#   # log in in the window that opens, then close it
+#
+# Then pass the PATH (never a credential) as `storage_state`:
+#
+#   --input '{"mission":"...","app_url":"http://localhost:3000",
+#             "storage_state":".praxec/qa-auth.json"}'
+#
+# and give the browser pool members the same file so the leased session
+# starts authenticated — for @playwright/mcp append:
+#   "--storage-state", "<abs path>/.praxec/qa-auth.json"
+#
+# Setting storage_state also turns on three fail-loud checks: the survey
+# aborts the run if it still lands on a login page, and both the emit-time
+# probe check and the replay gate REFUSE a probe that omits
+# `test.use({ storageState })` — because such a probe replays signed out and
+# returns a completely ordinary-looking "did not reproduce".
+#
+# Sessions expire. If `fully_evaluated` is unmet and the report's
+# `not_evaluated` entries mention storage state, re-save the file.
+# Keep `.praxec/qa-auth.json` out of git — it holds live session cookies.
 
 version: "1.0.0"
 

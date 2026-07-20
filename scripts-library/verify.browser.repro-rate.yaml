@@ -33,6 +33,13 @@ scripts:
       #        >=2 successes with fewer than 2 attempts).
       #   $3 — repo root (the run-ambient $.run.repo_root); probes resolve
       #        against it and playwright runs from it.
+      #   $4 — storage_state path ("" = the app declares no auth). Non-empty
+      #        means EVERY probe must carry `test.use({ storageState })`;
+      #        a replay runs in a fresh signed-out context, so a probe
+      #        without it lands on the login page and can never reproduce.
+      #        That is a SILENT FALSE NEGATIVE — the run reports "no
+      #        findings" for a defect it simply never reached. This script
+      #        refuses to run such a probe and reports it not_evaluated.
       # Emits ONE JSON report on stdout; ALWAYS exits 0 (the wrapping cap
       # sets treatNonZeroAsFailure: false; verdicts live in the JSON, not
       # the exit code).
@@ -40,6 +47,7 @@ scripts:
       OBS="${1:-[]}"
       ATTEMPTS="${2:-5}"
       REPO_ROOT="${3:-}"
+      STORAGE_STATE="${4:-}"
 
       # ---- honest floor helpers -------------------------------------------
       # A top-level not_evaluated report: NOTHING was replayed. Observations
@@ -68,6 +76,19 @@ scripts:
       [ -n "$REPO_ROOT" ] && [ -d "$REPO_ROOT" ] \
         || floor "repo_root '$REPO_ROOT' is not a directory"
       cd "$REPO_ROOT" || floor "cannot cd into repo_root '$REPO_ROOT'"
+      # Auth is checked BEFORE playwright: it is the cheaper check and the
+      # more specific diagnosis, and an operator whose storage-state path is
+      # wrong deserves to be told THAT rather than a generic install error.
+      # An app that declared auth whose storage-state file is gone would
+      # replay EVERY probe signed out and return a uniform, entirely
+      # believable "nothing reproduced". Floor the whole run instead.
+      if [ -n "$STORAGE_STATE" ]; then
+        case "$STORAGE_STATE" in
+          (/*|*..*) floor "storage_state must be a repo-root-relative path without .. (got '$STORAGE_STATE')" ;;
+        esac
+        [ -f "$STORAGE_STATE" ] \
+          || floor "app declares auth but storage_state file '$STORAGE_STATE' does not exist under the repo root — every replay would run signed out and could not evaluate anything"
+      fi
       # Playwright must ALREADY be installed in the target repo (--no-install:
       # a cold npx fetch inside a verify gate is a supply-chain surprise).
       if ! npx --no-install playwright --version >/dev/null 2>&1; then
@@ -102,6 +123,16 @@ scripts:
                 R=$(jq -n --argjson ob "$OB" --argjson n "$ATTEMPTS" \
                   '{observation: $ob, status: "not_evaluated",
                     reason: ("probe file not found: " + $ob.probe_ref),
+                    attempts: $n, successfulAttempts: 0, deterministic: false}')
+              elif [ -n "$STORAGE_STATE" ] && ! grep -q 'storageState' "$PROBE"; then
+                # DO NOT RUN IT. Running it would produce a perfectly
+                # ordinary "0 of 5 succeeded" and the observation would be
+                # discarded as "did not reproduce" — indistinguishable from a
+                # false alarm. It never got past the login page. Refusing is
+                # the only way this stays visible.
+                R=$(jq -n --argjson ob "$OB" --argjson n "$ATTEMPTS" \
+                  '{observation: $ob, status: "not_evaluated",
+                    reason: ("probe does not use test.use({ storageState }) but the app declares auth; a signed-out replay could never reproduce: " + $ob.probe_ref),
                     attempts: $n, successfulAttempts: 0, deterministic: false}')
               else
                 # Non-zero exit is EXPECTED when a probe does not reproduce

@@ -51,6 +51,17 @@ skills:
         blue" without a source is an opinion; leave it out. Downstream, an
         observation with no citable expected behavior becomes a
         product_question, not a Finding — that is by design, not a gap.
+      - The MISSION IS NOT EVIDENCE. It is what the operator believes about
+        the app, and operators are sometimes wrong about their own product.
+        When the mission names a specific surface or control ("the tag
+        filter", "the export button"), confirm it exists in the repo before
+        writing any invariant about it. If you cannot, it goes in
+        `unverified_premises` — never in `invariants`. An operator's
+        mistaken assumption must not become a reported defect, and a probe
+        aimed at a surface that never existed will "find" its absence every
+        time. Note the distinction: this is about EXISTENCE, not
+        documentation. A surface you can see in the code but that no spec
+        describes is still a legitimate `charter_invariant`.
 
       ## Shape
       Emit a single `charter` object:
@@ -60,6 +71,9 @@ skills:
       - `invariants` — array of `{ id, statement, source: { kind, reference } }`
         where `kind` is one of: charter_invariant | acceptance_criterion |
         spec | adr | api_contract | wcag | story.
+      - `unverified_premises` — array of `{ premise, why_unverified }` for
+        mission claims whose subject you could not confirm exists. Required;
+        an empty array is a claim that you checked.
       - `budget` — `{ max_pages, max_probes }`, both integers.
 
       ## Self-check
@@ -69,3 +83,6 @@ skills:
         surfaces adjacent to the mission.
       - The budget is executable in one session (single-digit probes for a
         first pass).
+      - Every surface named in an invariant was actually found in the repo.
+        Anything the mission asserted but you could not locate is in
+        `unverified_premises`, not in `invariants`.

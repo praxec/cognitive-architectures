@@ -11,6 +11,33 @@
 #
 # Split-host: append ["--cdp-endpoint", "http://<host-ip>:9222"] to attach to a
 # remote Chrome instead of launching locally.
+#
+# ---------------------------------------------------------------------------
+# BROWSER SELECTION — the two flags that cost real dogfood runs
+# ---------------------------------------------------------------------------
+# `--browser` accepts ONLY: chrome | firefox | webkit | msedge. It is a CHANNEL
+# name, not a path and not a Playwright browser id — "chromium" is rejected.
+#
+# The DEFAULT (`chrome`) hunts for a system-installed Google Chrome. On WSL and
+# on most bare Linux containers there is no such install, so the server starts,
+# accepts the lease, and then every navigate fails — which surfaces as a survey
+# that maps nothing rather than as a launch error. Two working fixes:
+#
+#   a) point at the Playwright-managed Chromium you already downloaded:
+#      args: ["@playwright/mcp@latest", "--isolated",
+#             "--executable-path", "/home/<you>/.cache/ms-playwright/chromium-*/chrome-linux/chrome"]
+#      (`npx playwright install chromium` first; glob the real versioned dir —
+#      the arg takes a literal path, it is not shell-expanded.)
+#
+#   b) use a channel that IS installed, e.g. `--browser firefox` after
+#      `npx playwright install firefox`.
+#
+# Verify BEFORE wiring a pool member — a 30-second check beats a burned run:
+#   npx @playwright/mcp@latest --isolated --executable-path <path> --version
+#
+# On WSL specifically, prefer attaching to Windows-side Chrome over installing a
+# Linux browser: see browser-chrome-devtools.yaml's split-host section, which
+# applies verbatim (swap `--browser-url` for `--cdp-endpoint` here).
 
 connections:
   browser_playwright_1:

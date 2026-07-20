@@ -65,7 +65,16 @@ workflows:
           { question, context, surface, probe_ref } in `product_questions`
           instead. Every reproduced observation lands in exactly one of the
           two channels; inventing a reference to force a Finding is the one
-          forbidden move. Submit `findings` and `product_questions`.
+          forbidden move.
+
+          The charter's `unverified_premises` are NOT invariants and are NOT
+          a citable source. They are operator assumptions whose subject
+          could not be confirmed to exist. An observation that amounts to
+          "the thing the operator described is not there" is not a defect —
+          route it to `product_questions` if it is worth asking about, and
+          never cite a premise as `charter_invariant`.
+
+          Submit `findings` and `product_questions`.
         # File READ over the target repo: confirm doc references exist
         # before citing them. No browser — adjudication does not explore.
         tools: ["file:{{ $.run.repo_root }}"]
