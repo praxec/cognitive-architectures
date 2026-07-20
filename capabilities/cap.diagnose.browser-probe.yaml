@@ -1,0 +1,93 @@
+# capabilities/cap.diagnose.browser-probe.yaml
+#
+# Probe step of the E2E discovery loop (flow.qa.explore): surface map →
+# typed OBSERVATIONS, each carrying a machine-replayable `probe_ref`.
+# Cognitive cap (verb `diagnose`, V6: noop + actor: agent) — a DELEGATE
+# agent WITH tools: the leased browser (multi-step exploration; V31 lease
+# shape) PLUS `file:` write over the target repo, because the currency this
+# cap mints is NOT its own testimony — it is a Playwright spec file written
+# at OBSERVATION TIME that the deterministic verify.browser.repro-rate
+# script replays later. An observation without a probe_ref cannot pass the
+# reproduction gate and can never become a Finding.
+#
+# A4 FOLLOW-UP: probes are written under `.praxec/qa-artifacts/` relative
+# to the repo root because `$.run.artifacts_dir` is not yet an engine
+# scope; when it lands, probe authoring (and the replay script's root)
+# move to it.
+
+workflows:
+  cap.diagnose.browser-probe:
+    verb: diagnose
+    lifecycle: experimental
+    description: >
+      Probe the surveyed surfaces with the leased browser for behavior that
+      violates the charter's invariants, and mint each observation as a
+      machine-replayable Playwright spec (probe_ref) written under the repo's
+      .praxec/qa-artifacts/ — the only currency the deterministic
+      reproduction gate accepts.
+    exclusive_pools: [browser]
+    snippet:
+      inputs:
+        # The bounded charter — invariants to probe against + budget.max_probes.
+        charter:     { type: object, required: true }
+        # The survey's navigation map (cap.research.ui-surface output).
+        surface_map: { type: object, required: true }
+        # The app under test.
+        app_url:     { type: string, required: true }
+      outputs:
+        observations:      { type: array }
+        observation_count: { type: integer }
+    initialState: probing
+    states:
+      probing:
+        goal: >
+          Probe the app for invariant violations, and make every observation
+          REPLAYABLE. Read $.context — the charter ($.context.charter), the
+          surface map ($.context.surface_map), and the origin
+          ($.context.app_url). Using the leased browser, exercise the mapped
+          surfaces against the charter's invariants (stay in scope; at most
+          budget.max_probes probes). For EACH suspected anomaly: (1) confirm
+          it once interactively in the browser; (2) with your file tools,
+          write a SELF-CONTAINED Playwright spec under
+          `.praxec/qa-artifacts/` (repo-root-relative path, e.g.
+          `.praxec/qa-artifacts/probe-<id>.spec.ts`) that navigates from the
+          origin and is authored to PASS exactly WHEN THE ANOMALY IS PRESENT
+          (assert the wrong behavior you saw, so a passing replay = a
+          reproduction); (3) emit an observation { id, summary,
+          invariant_id (the charter invariant it appears to violate, or null
+          if none — such observations become product questions downstream),
+          url, steps[], probe_ref (the repo-root-relative spec path you
+          actually wrote) }. Do not judge severity or file findings here —
+          observe, mint the probe, move on. Submit `observations` and
+          `observation_count` (the exact length of `observations`).
+        # Browser lease + file WRITE (probe authoring) — both scoped.
+        tools: ["{{ $.run.leased.browser }}", "file:{{ $.run.repo_root }}"]
+        transitions:
+          submit_observations:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [observations, observation_count]
+              properties:
+                observations:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    required: [id, summary, url, probe_ref]
+                    properties:
+                      id:           { type: string }
+                      summary:      { type: string }
+                      invariant_id: { type: ["string", "null"] }
+                      url:          { type: string }
+                      steps:
+                        type: array
+                        items: { type: string }
+                      probe_ref:    { type: string, minLength: 1 }
+                observation_count: { type: integer, minimum: 0 }
+            executor: { kind: noop }
+            output:
+              observations:      "$.arguments.observations"
+              observation_count: "$.arguments.observation_count"
+      done: { terminal: true }

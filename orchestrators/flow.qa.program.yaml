@@ -1,0 +1,369 @@
+# orchestrators/flow.qa.program.yaml
+#
+# THE QA PROGRAM DRIVER (M3): run discovery (flow.qa.explore), then promote
+# each discovered Finding into a permanent regression test
+# (flow.qa.promote-finding), one at a time, with a BOUNDED, structurally
+# progressing per-finding loop — no `kind: parallel` (the promotion loop
+# holds human gates: approval + escalation; parking those inside parallel
+# branches is hostile), and provably no livelock.
+#
+#   exploring  → cognitive/flow.qa.explore on the mission: findings +
+#                product_questions + discarded + qa_report land in context.
+#   picking    → cognitive/cap.inspect.next-finding (co-located below): the
+#                deterministic picker/ledger step. ONE call both (a) picks
+#                findings[finding_idx] (or reports exhausted/capped) and
+#                (b) ADVANCES THE CURSOR (finding_idx := next_idx) and
+#                (c) updates the `unpromoted` ledger in code.
+#   pick_gate  → phase-scalar branch: picked → promoting; exhausted/capped
+#                → done (with `unpromoted` already explicit); anything else
+#                (phase "invalid" = malformed findings/cursor) → failed.
+#   promoting  → cognitive/flow.qa.promote-finding on the picked finding.
+#   recording  → noop bookkeeping on SUCCESS: promoted_count += 1 and the
+#                speculative `pending` mark is cleared; back-edge to picking.
+#
+# STRUCTURAL PROGRESS (the livelock proof, stronger than incrementing on
+# each outcome arm): the cursor advances AT PICK TIME — `picking` writes
+# finding_idx := idx+1 via the cap's use.outputs BEFORE the promotion is
+# even dispatched — so success, child failure, and human abort ALL observe
+# the advanced cursor; no outcome can rewind it, every loop round strictly
+# increases it, and the round count is bounded by min(total findings,
+# max_promotions). Re-promoting the same finding is possible ONLY by an
+# explicit operator retry (below), never automatically.
+#
+# FAILURE SEMANTICS (engine ground truth): a `kind: workflow` child that
+# terminates `failed` has NO in-flow failure arm — the executor returns
+# ExecutorError::Permanent, the parent chain fails (CHAIN_FAILED), and the
+# parent parks NON-TERMINALLY at `promoting` with recovery links. The two
+# legal recoveries are exactly the honest choices:
+#   - re-submit `promote`  → retry the SAME finding (bounded by the human);
+#   - submit    `skip`     → resume the loop; the failed finding is STILL
+#     marked `pending` (set speculatively at pick time), so the next pick
+#     appends it to `unpromoted` in code.
+# "Unpromoted unless proven promoted": only the success path (`recording`)
+# clears the pending mark, so a finding whose promotion failed or was
+# abandoned can NEVER silently vanish — it is in `unpromoted` or the run is
+# visibly failed/parked. Findings skipped past max_promotions are appended
+# to `unpromoted` by the picker's `capped` phase for the same reason.
+#
+# WHY THE PICKER IS A CO-LOCATED CAPABILITY (not an inline script): a
+# flow's slot table (V13) only recognizes slots written by `inputs:` or by
+# a child workflow's `use.outputs` — NOT by a transition `output:` block —
+# so an inline `kind: script` pick could not feed `next_finding` into the
+# promotion's `use.inputs` (the same constraint that produced
+# cap.coordinate.acquire-cohort for flow.execute-cohorts). Wrapping
+# inspect.findings.next in a snippet-typed cap makes next_finding /
+# finding_idx / pending / unpromoted first-class slots. It lives in THIS
+# file because it exists solely as this driver's loop plumbing.
+#
+# BROWSER LEASE: `exclusive_pools: [browser]` — the program transitively
+# drives the browser through flow.qa.explore, so the lease is acquired ONCE
+# at THIS run's boundary and inherited by the explore child (which declares
+# the pool per V31 and never re-acquires). flow.qa.promote-finding does not
+# lease (its playwright replays launch their own browsers).
+#
+# NO CYCLE: the reference graph is flow.qa.program → {flow.qa.explore,
+# flow.qa.promote-finding, cap.inspect.next-finding}; none of the three
+# references the program (a DAG — the loop is a state back-edge, not a
+# definition cycle).
+#
+# INPUT SHAPE: `mission` is the program envelope object:
+#   { mission:  "<coverage mission string for explore>",
+#     app_url:  "<origin under test>",
+#     charter:  { src_glob, test_glob, budgets: { max_e2e_specs } } }
+# mission.mission / mission.app_url feed explore (explore's `attempts`
+# rides its own default); mission.charter is the PROMOTION charter
+# flow.qa.promote-finding requires (path-separability + e2e budget) —
+# distinct from the discovery charter explore mints internally (which is
+# not among explore's declared outputs, so it cannot be threaded through).
+#
+# Requires (cognitive/*): flow.qa.explore (+ its caps/scripts/skills),
+# flow.qa.promote-finding (+ its caps/scripts/skills), and script
+# inspect.findings.next; a gateway config with a `browser` exclusive pool +
+# auto_drive + durable store (see examples/qa-program-run.yaml).
+
+workflows:
+
+  # ---------------------------------------------------------------------
+  # The deterministic picker/ledger step, snippet-typed so its outputs are
+  # first-class slots (V13). Verb `inspect` (V6: kind script), wrapping
+  # inspect.findings.next. See the header for why this is a cap.
+  # ---------------------------------------------------------------------
+  cap.inspect.next-finding:
+    verb: inspect
+    lifecycle: experimental
+    description: >
+      Deterministically pick the next Finding to promote from the findings
+      array (or report exhausted/capped/invalid), advance the monotone
+      cursor, and update the unpromoted ledger in code — a non-empty
+      pending finding (dispatched last round, never recorded promoted) is
+      appended, and on capped every never-considered finding is appended.
+    snippet:
+      inputs:
+        # The full findings array from flow.qa.explore.
+        findings:       { type: array,   required: true }
+        # The monotone cursor (index of the next finding to consider).
+        finding_idx:    { type: integer, required: true }
+        # The promotion budget: cursor >= max_promotions ends the loop.
+        max_promotions: { type: integer, required: true }
+        # The ledger so far (appended-to in code; concat is string-only in
+        # the transition-output language, so accumulation lives here).
+        unpromoted_in:  { type: array,   required: true }
+        # The finding dispatched last round, {} if none or if its
+        # promotion was recorded. Non-empty here = it never proved
+        # promotion — it joins the ledger.
+        pending:        { type: object,  required: true }
+      outputs:
+        # picked | exhausted | capped | invalid — the gate branches on this
+        # scalar (guard-expr language can't test array emptiness).
+        phase:        { type: string }
+        # The picked finding; {} unless phase == picked.
+        next_finding: { type: object }
+        # The advanced cursor (idx+1 when picked, idx on exhausted/capped,
+        # -1 on invalid).
+        next_idx:     { type: integer }
+        # Findings not yet picked after this pick (0 on exhausted; > 0 on
+        # capped; -1 on invalid) — the program_complete outcome scalar.
+        remaining:    { type: integer }
+        # findings array length (-1 on invalid).
+        total:        { type: integer }
+        # The UPDATED ledger — authoritative for this phase.
+        unpromoted:   { type: array }
+    initialState: picking
+    states:
+      picking:
+        goal: Pick the next finding, advance the cursor, update the ledger.
+        transitions:
+          pick:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.findings.next
+              args:
+                - "$.workflow.input.findings"
+                - "$.workflow.input.finding_idx"
+                - "$.workflow.input.max_promotions"
+                - "$.workflow.input.unpromoted_in"
+                - "$.workflow.input.pending"
+            # Plain script-executor `output:` — LEFT-hand keys are BARE slot
+            # names (a `$.context.*`-prefixed key here would write a slot
+            # literally named "$.context.…"; the flow.audit-docs trap).
+            output:
+              phase:        "$.output.json.phase"
+              next_finding: "$.output.json.next_finding"
+              next_idx:     "$.output.json.next_idx"
+              remaining:    "$.output.json.remaining"
+              total:        "$.output.json.total"
+              unpromoted:   "$.output.json.unpromoted"
+      done: { terminal: true }
+
+  # ---------------------------------------------------------------------
+  # The program driver.
+  # ---------------------------------------------------------------------
+  flow.qa.program:
+    lifecycle: experimental
+    description: >
+      Top-level QA program: run browser-testing discovery (flow.qa.explore)
+      on a mission, then promote each discovered Finding into a permanent
+      regression test (flow.qa.promote-finding) through a bounded,
+      structurally progressing per-finding loop — the cursor advances at
+      pick time so no outcome can re-run a finding automatically, promotion
+      failures surface in an explicit unpromoted ledger (never silently
+      dropped), and max_promotions caps the round count.
+    exclusive_pools: [browser]
+    inputs:
+      # The program envelope: { mission, app_url, charter } — see header.
+      mission:        { type: object,  required: true }
+      # Promotion budget (cohort precedent: 5). Findings past the cap are
+      # surfaced in `unpromoted`, never silently skipped.
+      max_promotions: { type: integer, default: 5 }
+      # Passed through to flow.qa.promote-finding (fix attempts after the
+      # first before its human escalation gate).
+      max_fix_rounds: { type: integer, default: 2 }
+    # Top-level outputs (flows have no `snippet:`) — terminal context slots.
+    outputs:
+      # Discovery channels, straight from flow.qa.explore.
+      findings:          { type: array }
+      product_questions: { type: array }
+      discarded:         { type: array }
+      qa_report:         { type: object }
+      # The loop ledger: how many findings were PROVEN promoted, and the
+      # explicit list of findings that did NOT get a regression test
+      # (promotion failed/abandoned, or skipped past max_promotions).
+      promoted_count:    { type: integer }
+      unpromoted:        { type: array }
+      # Loop closure scalars: remaining == 0 ⇔ every finding was considered.
+      remaining:         { type: integer }
+      total:             { type: integer }
+    # Seed EVERY declared output (V24) + the loop slots the first pick
+    # reads. remaining/total are seeded -1 (honest floor: a run that never
+    # picked must not read as complete); pending {} = nothing in flight.
+    initialContext:
+      findings:          []
+      product_questions: []
+      discarded:         []
+      qa_report:         {}
+      promoted_count:    0
+      unpromoted:        []
+      remaining:         -1
+      total:             -1
+      finding_idx:       0
+      pending:           {}
+      pick_phase:        ""
+      next_finding:      {}
+    outcomes:
+      - id: program_complete
+        statement: >
+          Every discovered Finding was considered by the promotion loop —
+          the picker exhausted the findings array (remaining == 0, written
+          only by the code-side picker). A clean explore with ZERO findings
+          meets this (the program succeeds having promoted nothing); a
+          promotion FAILURE does not unmeet it (the finding is considered —
+          it surfaces in `unpromoted`); findings skipped past
+          max_promotions DO leave it unmet (remaining > 0 on capped).
+        check: "$.context.remaining == 0"
+    initialState: exploring
+    states:
+
+      # Discovery: the leased-browser explore loop. The lease acquired at
+      # THIS run's boundary is inherited — the child never re-acquires.
+      exploring:
+        goal: Run the discovery loop; land the findings channels in context.
+        transitions:
+          explore:
+            target: picking
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.qa.explore
+              use:
+                inputs:
+                  mission: "$.workflow.input.mission.mission"
+                  app_url: "$.workflow.input.mission.app_url"
+                outputs:
+                  "$.context.findings":          findings
+                  "$.context.product_questions": product_questions
+                  "$.context.discarded":         discarded
+                  "$.context.qa_report":         qa_report
+
+      # THE pick: one deterministic call picks findings[finding_idx] (or
+      # reports exhausted/capped), ADVANCES the cursor, and updates the
+      # unpromoted ledger. `pending` is (re)written HERE, speculatively, to
+      # the picked finding — "unpromoted unless proven promoted" — and the
+      # picker appended the PREVIOUS pending (if still set: its promotion
+      # failed or was abandoned) to the ledger this same call. On
+      # exhausted/capped the {} next_finding clears pending, so nothing is
+      # ever double-appended.
+      picking:
+        goal: Pick the next finding, advance the cursor, keep the ledger.
+        transitions:
+          pick:
+            target: pick_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.inspect.next-finding
+              use:
+                inputs:
+                  findings:       "$.context.findings"
+                  finding_idx:    "$.context.finding_idx"
+                  max_promotions: "$.workflow.input.max_promotions"
+                  unpromoted_in:  "$.context.unpromoted"
+                  pending:        "$.context.pending"
+                outputs:
+                  "$.context.pick_phase":   phase
+                  "$.context.next_finding": next_finding
+                  # Speculative unpromoted mark — same cap output bound to a
+                  # second host slot; cleared only by `recording` (success).
+                  "$.context.pending":      next_finding
+                  # The structural cursor advance: written at PICK time, so
+                  # success/failure/abort all observe the advanced cursor.
+                  "$.context.finding_idx":  next_idx
+                  "$.context.remaining":    remaining
+                  "$.context.total":        total
+                  "$.context.unpromoted":   unpromoted
+
+      # Split gate state — guards run BEFORE executors, so branching on the
+      # pick's output needs its own state. Exhausted AND capped both close
+      # the loop to `done`: `unpromoted` is already explicit (the picker
+      # appended the capped tail in code) and `remaining` distinguishes
+      # them (0 vs > 0) for the program_complete outcome. Phase "invalid"
+      # (malformed findings/cursor — a broken step contract) falls through
+      # the unguarded default and aborts loudly.
+      pick_gate:
+        transitions:
+          promote:
+            target: promoting
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.pick_phase == 'picked'" }
+          finished:
+            target: done
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.pick_phase == 'exhausted'" }
+          capped:
+            target: done
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.pick_phase == 'capped'" }
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      # Promote ONE finding. On child success → recording (the only place
+      # the pending mark clears). On child FAILURE the chain fails and this
+      # state parks with recovery links — the guarded `promote` arm is the
+      # auto-selected retry, `skip` (unguarded default, never auto-selected
+      # while promote's guard holds) is the operator's record-and-continue:
+      # it re-enters `picking`, where the still-set pending finding joins
+      # the unpromoted ledger. The cursor already advanced at pick time, so
+      # NEITHER recovery can loop on the same finding structurally.
+      promoting:
+        goal: Promote the picked finding to a permanent regression test.
+        transitions:
+          promote:
+            target: recording
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.pick_phase == 'picked'" }
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.qa.promote-finding
+              use:
+                inputs:
+                  finding:        "$.context.next_finding"
+                  charter:        "$.workflow.input.mission.charter"
+                  max_fix_rounds: "$.workflow.input.max_fix_rounds"
+          skip:
+            target: picking
+            actor: deterministic
+            executor: { kind: noop }
+
+      # SUCCESS bookkeeping (the ONLY writer that clears pending): the
+      # promotion was proven (flow.qa.promote-finding's single success
+      # terminal sits behind its red-proof, human approval, tamper check,
+      # green verify, and flake scan) — count it and clear the speculative
+      # unpromoted mark before looping back to pick the next finding.
+      recording:
+        goal: Record the proven promotion; clear the pending mark; loop.
+        transitions:
+          record:
+            target: picking
+            actor: deterministic
+            executor: { kind: noop }
+            output:
+              promoted_count: { add: ["$.context.promoted_count", 1] }
+              pending:        { set: {} }
+
+      # Terminal: promoted_count + the explicit unpromoted ledger are the
+      # program's honest accounting; remaining == 0 ⇔ program_complete.
+      done:
+        terminal: true
+        outcome: success
+
+      # Phase-contract breaks (invalid pick) land here loudly — never a
+      # silent success with findings unaccounted for.
+      failed:
+        terminal: true
+        outcome: failure

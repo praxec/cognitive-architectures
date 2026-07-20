@@ -1,0 +1,31 @@
+# connections/browser-playwright.yaml
+#
+# Playwright MCP — journey / interaction / accessibility-snapshot driving and
+# locator + test codegen for the discovery loop. Reference copy: paste + grant.
+#
+# EXCLUSIVE + POOLED under the SAME `browser` pool as chrome-devtools, so a run
+# leases ONE browser server process and both tool surfaces (if both are granted)
+# would need to share it — in practice grant ONE browser MCP per deployment and
+# size its pool for your parallelism. See browser-chrome-devtools.yaml for the
+# topology/lease rationale (identical here).
+#
+# Split-host: append ["--cdp-endpoint", "http://<host-ip>:9222"] to attach to a
+# remote Chrome instead of launching locally.
+
+connections:
+  browser_playwright_1:
+    kind: mcp
+    command: npx
+    args: ["@playwright/mcp@latest", "--isolated"]
+    exclusive: true
+    pool: browser
+    startupTimeoutMs: 120000
+    idleTimeoutMs: 180000
+  browser_playwright_2:
+    kind: mcp
+    command: npx
+    args: ["@playwright/mcp@latest", "--isolated"]
+    exclusive: true
+    pool: browser
+    startupTimeoutMs: 120000
+    idleTimeoutMs: 180000

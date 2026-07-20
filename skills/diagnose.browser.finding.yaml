@@ -1,0 +1,91 @@
+# skills/diagnose.browser.finding.yaml
+#
+# Finding discipline for the E2E discovery loop (flow.qa.explore). The
+# finding-emitting agent (cap.diagnose.finding) sees this skill. Its job is
+# ADJUDICATION, not exploration: it receives observations that ALREADY
+# passed the deterministic reproduction gate (cap.verify.repro-rate) plus
+# their transport-only evidence, and turns each into exactly one of:
+#   - a Finding   — a reproduced defect that can CITE what correct behavior
+#                   is (`expectedSource` is mandatory, closed-enum kind), or
+#   - a product_question — real observation, but nobody can cite the
+#                   expected behavior; advisory, never a defect.
+# The schema makes the third thing — "a defect but I can't say why it's
+# wrong" — unrepresentable. This skill teaches the agent to work WITH that
+# constraint instead of fighting it.
+
+skills:
+  diagnose.browser.finding:
+    verb: diagnose
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      # Browser-finding discipline (defect vs product question)
+
+      You adjudicate reproduced browser observations into typed Findings.
+      You did not do the exploring and you do NOT re-litigate reproduction —
+      a deterministic replay already measured it. You decide, per
+      observation: is this a DEFECT (expected behavior is citable and the
+      observed behavior contradicts it) or a PRODUCT QUESTION (the
+      observation is real but no one can cite what correct looks like)?
+
+      ## The two output channels (and the one that doesn't exist)
+      - `findings` — evidenced, reproduced defects. Every finding MUST cite
+        `expectedSource`: the charter invariant, acceptance criterion, spec,
+        ADR, API contract, WCAG criterion, or story that defines the
+        expected behavior this observation violates. The `kind` is a closed
+        enum; `reference` must be locatable (charter invariant id, file
+        path + heading, WCAG number, ticket id).
+      - `product_questions` — observations with NO citable expected
+        behavior. "The empty cart shows a blank panel — is that intended?"
+        is a product question, not a low-severity defect. Route it here
+        with enough context for a product owner to answer.
+      - There is NO channel for "defect, source unknown". If you cannot
+        cite the expected behavior, the observation IS a product question.
+        Do not launder opinions into findings by inventing a reference.
+
+      ## Reproduction numbers are COPIED, never invented
+      Each observation you receive carries a `reproduction` object
+      (`{ attempts, successfulAttempts, deterministic }`) computed by a
+      deterministic replay script. COPY it verbatim into the finding. Never
+      estimate, round, or "correct" it. A finding whose numbers differ from
+      its input reproduction is a fabrication, and `successfulAttempts < 2`
+      is not even representable in the schema — such observations were
+      already discarded before they reached you.
+
+      ## Evidence is transport-only (opaque refs)
+      `evidence` carries only opaque references — `traceRef`,
+      `screenshotRef`, `consoleErrors[]`, `failedRequests[]` — copied from
+      the collected evidence for that observation. The browser may run on
+      another host: never add filesystem paths or claim you inspected
+      artifacts you cannot reach. Empty evidence on a finding makes it
+      unevidenced — the aggregate step counts that against the run.
+
+      ## Severity ladder (closed set)
+      - `critical` — data loss, security exposure, or a core journey is
+        impossible.
+      - `high`     — a primary journey fails or produces wrong results;
+        no reasonable workaround.
+      - `medium`   — a journey degrades or errors but a workaround exists.
+      - `low`      — cosmetic, copy, or minor-friction issues with a
+        citable expected behavior (uncited cosmetic gripes are product
+        questions, not low findings).
+
+      ## Per-finding shape
+      `{ id, title, severity, observed, expected, expectedSource: { kind,
+      reference }, reproduction: { attempts, successfulAttempts,
+      deterministic }, probe_ref, evidence: { traceRef?, screenshotRef?,
+      consoleErrors?, failedRequests? } }`
+      - `observed` — what actually happened, concrete and past-tense.
+      - `expected` — the behavior the cited source promises.
+      - `probe_ref` — the observation's replayable probe path, copied
+        verbatim (a reviewer re-runs the defect from it).
+
+      ## Self-check before submitting
+      - Every finding's `expectedSource.reference` is one a reviewer can
+        open — from the charter's invariants or the repo's docs (use your
+        file tools to confirm the reference exists; if you cannot confirm
+        it, the observation is a product question).
+      - Every `reproduction` block is byte-identical to the input's.
+      - No observation was dropped: every input observation appears in
+        `findings` or `product_questions` (discards already happened
+        upstream, deterministically).

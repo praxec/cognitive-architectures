@@ -1,0 +1,77 @@
+# capabilities/cap.review.assertion-quality.yaml
+#
+# ASSERTION-QUALITY judgment of the TDD promotion loop
+# (flow.qa.promote-finding). Verb `review` — this is deliberately NOT a
+# `verify` cap: "are these assertions behavioral?" is agent JUDGMENT, and V6
+# reserves `verify` for deterministic checks. The deterministic facts about
+# the test (it runs, it fails on an assertion) were already established by
+# cap.verify.test-red; this cap judges the QUALITY of what it asserts:
+# user-facing handles (getByRole/getByLabel), web-first auto-waiting
+# assertions, expected-behavior orientation — not CSS selectors, sleeps, or
+# tautologies. SENIOR tier (`affinity: review`), producer != evaluator: the
+# reviewer is a separate leaf from the writer, with READ reach over tests/
+# only (it judges the test file; it neither browses nor edits).
+
+workflows:
+  cap.review.assertion-quality:
+    verb: review
+    lifecycle: experimental
+    description: >
+      Judge whether the new regression test's assertions are behavioral
+      (user-facing locators, web-first assertions, pinned to the Finding's
+      expected behavior) rather than structural (CSS selectors, sleeps,
+      tautologies); emit pass or rewrite with one typed issue per problem.
+    snippet:
+      inputs:
+        # The red-proved test under review (repo-root-relative, tests/...).
+        test_path: { type: string, required: true }
+        # The chosen layer (component/e2e expectations differ).
+        layer:     { type: string, default: "" }
+        # The Finding it must pin (expected behavior + id traceability).
+        finding:   { type: object, required: true }
+      outputs:
+        verdict: { type: string, enum: [pass, rewrite] }
+        issues:  { type: array }
+    skills: [review.test.assertion-quality]
+    initialState: reviewing
+    states:
+      reviewing:
+        # SENIOR reviewer tier: judgment, not production.
+        affinity: review
+        goal: >
+          Review the regression test for assertion quality. Read $.context —
+          the test path ($.context.test_path), the layer ($.context.layer),
+          and the Finding it pins ($.context.finding). Read the test file
+          with your file tools and judge it per the skill: behavioral
+          user-facing assertions pinning the Finding's EXPECTED behavior
+          pass; CSS/XPath structural selectors, fixed sleeps, tautologies,
+          conditional assertions, or asserting the buggy observed output
+          require rewrite. Submit `verdict` (pass | rewrite) and `issues`
+          (one { where, what, fix } per problem; [] when passing). Do not
+          edit the file — the writer owns it; you own the judgment.
+        # READ the test under review — tests/ reach only.
+        tools: ["file:{{ $.run.repo_root }}/tests"]
+        transitions:
+          submit_review:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [verdict]
+              properties:
+                verdict: { type: string, enum: [pass, rewrite] }
+                issues:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    required: [what]
+                    properties:
+                      where: { type: string }
+                      what:  { type: string }
+                      fix:   { type: string }
+            executor: { kind: noop }
+            output:
+              verdict: "$.arguments.verdict"
+              issues:  "$.arguments.issues"
+      done: { terminal: true }

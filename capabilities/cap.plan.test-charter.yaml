@@ -1,0 +1,94 @@
+# capabilities/cap.plan.test-charter.yaml
+#
+# Charter step of the E2E discovery loop (flow.qa.explore): mission → a
+# BOUNDED, citable coverage charter. Cognitive cap (verb `plan`, V6: noop +
+# actor: agent) guided by the `plan.test.charter` skill. No browser here —
+# chartering precedes the lease-scoped exploration; the agent's only reach
+# is `file:` READ over the target repo so the charter's invariants cite
+# REAL docs (spec/ADR/README headings) rather than invented references.
+# Those invariants are the only legal `expectedSource` values downstream
+# (cap.diagnose.finding), so the citation discipline starts here.
+
+workflows:
+  cap.plan.test-charter:
+    verb: plan
+    lifecycle: experimental
+    description: >
+      Turn an open-ended browser-testing mission into a bounded, budgeted
+      charter: explicit in-scope and out-of-scope surfaces, invariants each
+      citing a source (charter_invariant | acceptance_criterion | spec | adr
+      | api_contract | wcag | story), and a page/probe budget — the contract
+      every downstream discovery step is scoped and judged against.
+    snippet:
+      inputs:
+        # The open-ended coverage mission (e.g. "test the checkout flow").
+        mission:     { type: string, required: true }
+        # The app under test — the charter binds scope to this origin.
+        app_url:     { type: string, required: true }
+        # Optional operator constraints (env caveats, forbidden actions).
+        constraints: { type: object, default: {} }
+      outputs:
+        charter: { type: object }
+    skills: [plan.test.charter]
+    initialState: chartering
+    states:
+      chartering:
+        goal: >
+          Charter a bounded E2E discovery session. Read $.context — the
+          mission ($.context.mission), the app under test
+          ($.context.app_url), and operator constraints
+          ($.context.constraints). Use your file tools to read the target
+          repo's specs/ADRs/README before writing invariants, so each
+          invariant cites a real reference; where docs are silent, state the
+          invariant yourself with source kind `charter_invariant`. Emit ONE
+          `charter` object: { mission, in_scope[], out_of_scope[],
+          invariants[] each { id, statement, source: { kind, reference } },
+          budget: { max_pages, max_probes } }. Name out-of-scope surfaces
+          explicitly (destructive operations, third-party frames, real
+          payments); keep the budget executable in one session. Submit
+          `charter`.
+        # File READ over the target repo only — charters cite docs; they do
+        # not browse. (Per-state `tools:` REPLACES the gateway-wide set.)
+        tools: ["file:{{ $.run.repo_root }}"]
+        transitions:
+          submit_charter:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [charter]
+              properties:
+                charter:
+                  type: object
+                  required: [mission, in_scope, out_of_scope, invariants, budget]
+                  properties:
+                    mission:      { type: string }
+                    in_scope:     { type: array, items: { type: string } }
+                    out_of_scope: { type: array, items: { type: string } }
+                    invariants:
+                      type: array
+                      items:
+                        type: object
+                        required: [id, statement, source]
+                        properties:
+                          id:        { type: string }
+                          statement: { type: string }
+                          source:
+                            type: object
+                            required: [kind, reference]
+                            additionalProperties: false
+                            properties:
+                              kind:
+                                type: string
+                                enum: [charter_invariant, acceptance_criterion, spec, adr, api_contract, wcag, story]
+                              reference: { type: string }
+                    budget:
+                      type: object
+                      required: [max_pages, max_probes]
+                      properties:
+                        max_pages:  { type: integer, minimum: 1 }
+                        max_probes: { type: integer, minimum: 1 }
+            executor: { kind: noop }
+            output:
+              charter: "$.arguments.charter"
+      done: { terminal: true }

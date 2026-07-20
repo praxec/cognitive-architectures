@@ -1,0 +1,49 @@
+# connections/browser-chrome-devtools.yaml
+#
+# Chrome DevTools MCP — console / network / performance / Lighthouse diagnostics
+# for the agentic E2E discovery loop (flow.qa.explore). Reference copy: operators
+# paste this into their gateway config and grant it.
+#
+# EXCLUSIVE + POOLED. A chrome-devtools-mcp server has ONE global `select_page`
+# pointer per process, so two runs sharing a connection silently corrupt each
+# other (and any reproduction measurement taken through it). `exclusive: true`
+# makes the engine REQUIRE a run-scoped lease (validator V31); `pool: browser`
+# groups interchangeable members so many runs distribute across distinct server
+# processes without colliding. Declare N members (browser_chrome_1..N) for N-way
+# parallelism; a flow leases one via `tools: ["{{ $.run.leased.browser }}"]`.
+#
+# TOPOLOGY LIVES HERE, NOT IN THE FLOW — the flow YAML is identical everywhere;
+# only these args change:
+#   all-local (Linux / Mac / Windows):
+#     args: ["chrome-devtools-mcp@latest", "--isolated"]
+#   WSL agent + Windows Chrome (or any split host):
+#     args: ["chrome-devtools-mcp@latest", "--browser-url", "http://<host-ip>:9222"]
+#     Start Chrome on the Windows side with:
+#       --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0
+#     and use the WSL host IP (`ip route show default | awk '{print $3}'`), NOT
+#     localhost (WSL2's localhost does not reach the Windows host). Each pool
+#     member attaches to a DISTINCT Chrome process on a distinct port — only
+#     separate processes isolate the select_page pointer and the perf-trace
+#     singleton; one Chrome with multiple contexts does not.
+#
+# The MCP server runs AGENT-SIDE; only the browser is remote. Every `filePath` a
+# tool writes is therefore an agent-side path — which is what makes transport-only
+# evidence work in the split topology.
+
+connections:
+  browser_chrome_1:
+    kind: mcp
+    command: npx
+    args: ["chrome-devtools-mcp@latest", "--browser-url", "http://172.24.16.1:9222"]
+    exclusive: true
+    pool: browser
+    startupTimeoutMs: 120000   # cold npx fetch + browser attach; start here, tune
+    idleTimeoutMs: 180000      # inactivity window (not a total cap) for long sessions
+  browser_chrome_2:
+    kind: mcp
+    command: npx
+    args: ["chrome-devtools-mcp@latest", "--browser-url", "http://172.24.16.1:9223"]
+    exclusive: true
+    pool: browser
+    startupTimeoutMs: 120000
+    idleTimeoutMs: 180000

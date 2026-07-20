@@ -1,0 +1,81 @@
+# capabilities/cap.diagnose.browser-evidence.yaml
+#
+# Evidence step of the E2E discovery loop (flow.qa.explore): observations →
+# TRANSPORT-ONLY evidence. Cognitive cap (verb `diagnose`, V6: noop +
+# actor: agent) — a DELEGATE agent with ONLY the leased browser (V31 lease
+# shape; chrome-devtools-class diagnostics: console, network, screenshots,
+# traces). Evidence is OPAQUE REFS ONLY — traceRef / screenshotRef /
+# consoleErrors[] / failedRequests[] with `additionalProperties: false` and
+# deliberately NO filesystem `path` field: the browser may run on another
+# host (split WSL/Windows topology), so a local path would be a lie the
+# schema refuses to represent. This cap collects; it does not judge —
+# reproduction is the deterministic gate's job and adjudication is
+# cap.diagnose.finding's.
+
+workflows:
+  cap.diagnose.browser-evidence:
+    verb: diagnose
+    lifecycle: experimental
+    description: >
+      Re-visit each probed observation with the leased browser and collect
+      transport-only diagnostic evidence — console errors, failed network
+      requests, screenshot/trace refs — as opaque references keyed by
+      observation id, never filesystem paths.
+    exclusive_pools: [browser]
+    snippet:
+      inputs:
+        # The probe step's typed observations (each has id + url + steps).
+        observations: { type: array, required: true }
+      outputs:
+        evidence: { type: array }
+    initialState: evidencing
+    states:
+      evidencing:
+        goal: >
+          Collect diagnostic evidence for each observation. Read $.context —
+          the observations array ($.context.observations). For EACH
+          observation: with the leased browser, navigate to its url, replay
+          its steps, and capture what the transport shows — console error
+          messages, failed/4xx/5xx network requests, a screenshot, a trace
+          if available. Report each artifact as an OPAQUE REFERENCE (the
+          identifier/name the browser tool returned), NEVER a filesystem
+          path — the browser may be on another host and you must not claim
+          reach you do not have. If an observation cannot be re-visited,
+          emit its entry with empty refs and say why in `note`. Emit ONE
+          `evidence` array: one entry per observation, { observation_id,
+          evidence: { traceRef, screenshotRef, consoleErrors[],
+          failedRequests[] }, note }. Submit `evidence`.
+        tools: ["{{ $.run.leased.browser }}"]
+        transitions:
+          submit_evidence:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [evidence]
+              properties:
+                evidence:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    required: [observation_id, evidence]
+                    properties:
+                      observation_id: { type: string }
+                      evidence:
+                        type: object
+                        additionalProperties: false
+                        properties:
+                          traceRef:      { type: string }
+                          screenshotRef: { type: string }
+                          consoleErrors:
+                            type: array
+                            items: { type: string }
+                          failedRequests:
+                            type: array
+                            items: { type: string }
+                      note: { type: string }
+            executor: { kind: noop }
+            output:
+              evidence: "$.arguments.evidence"
+      done: { terminal: true }

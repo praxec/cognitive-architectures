@@ -1,0 +1,121 @@
+# scripts-library/verify.test.red-proof.yaml
+#
+# THE red-proof gate of the TDD promotion loop (flow.qa.promote-finding): the
+# newly-written regression test must FAIL NOW, and fail for the RIGHT reason.
+# An agent's claim "my test is red" is not currency — this script runs the
+# test (`playwright test <path> --workers=1 --reporter=json`, same runner
+# substrate as M1's verify.browser.repro-rate) and classifies IN CODE:
+#
+#   assertion_failed — the runner ran the test and it failed on an ASSERTION
+#                      (error text carries `expect(` / AssertionError). The
+#                      ONLY classification that advances the flow: it proves
+#                      the test pins the defect's expected behavior against
+#                      the current (buggy) code.
+#   tautology        — the test PASSES against the current code. Not a red
+#                      proof: it can never detect the regression it claims to.
+#   not_found        — the runner matched no test at the path (or the path is
+#                      missing / escapes tests/).
+#   infra_error      — the test failed, but NOT on an assertion (compile /
+#                      import / runner crash / connection refused). A test
+#                      failing because the app is down is not a red proof.
+#                      Unclassifiable error text also lands here (fail-closed:
+#                      only PROVEN assertion failures advance).
+#
+# status is not_evaluated (red_reason null — HONEST FLOOR per
+# cap.verify.generic) when the runner itself could not run (playwright/jq
+# missing, bad repo root): never a disguised red, never a disguised
+# "evaluated and rejected".
+#
+# The verdict JSON also carries `replay_obs` — a CODE-BUILT observation array
+# [{id, probe_ref: <test_path>}] in the exact shape cap.verify.repro-rate
+# consumes, so the downstream green-check and flake-scan replay THE SAME file
+# that was red-proved and pinned (the agent never re-asserts the path).
+version: "1.0.0"
+scripts:
+  verify.test.red-proof:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Red-proof classifier for a single new regression test.
+      #   $1 — test path (repo-root-relative, must live under tests/).
+      #   $2 — finding id (stamped into replay_obs; defaults to "finding").
+      #   $3 — repo root (the run-ambient $.run.repo_root).
+      # Emits ONE JSON verdict on stdout; ALWAYS exits 0 (the wrapping cap
+      # sets treatNonZeroAsFailure: false; verdicts live in the JSON).
+      set -uo pipefail
+      TEST="${1:-}"
+      FID="${2:-finding}"
+      REPO_ROOT="${3:-}"
+      [ -n "$FID" ] || FID="finding"
+
+      emit() { # $1 = status, $2 = red_reason (or null), $3 = reason text, $4 = stats json
+        local RR
+        if [ "$2" = "null" ]; then RR='null'; else RR="\"$2\""; fi
+        jq -n --arg t "$TEST" --arg fid "$FID" --arg reason "$3" \
+              --argjson rr "$RR" --argjson stats "$4" --arg status "$1" \
+          '{status: $status, red_reason: $rr, reason: $reason,
+            failing_test: $t,
+            replay_obs: (if $status == "evaluated" and $rr == "assertion_failed"
+                         then [{id: $fid, probe_ref: $t}] else [] end),
+            stats: $stats}'
+        exit 0
+      }
+
+      command -v jq >/dev/null 2>&1 || { printf '{"status":"not_evaluated","red_reason":null,"reason":"jq is not installed","failing_test":"","replay_obs":[],"stats":{}}\n'; exit 0; }
+      [ -n "$TEST" ] || emit not_evaluated null "no test path supplied" '{}'
+      # Poka-yoke: the path must be repo-root-relative, under tests/, no `..`
+      # (defense-in-depth behind the cap schema's ^tests/ pattern — a path
+      # outside the writer's tests/ scope is not a promotable test).
+      case "$TEST" in
+        (/*|*..*) emit evaluated not_found "test path must be repo-root-relative without .. (got '$TEST')" '{}' ;;
+        (tests/*) : ;;
+        (*) emit evaluated not_found "test path must live under tests/ (got '$TEST')" '{}' ;;
+      esac
+      [ -n "$REPO_ROOT" ] && [ -d "$REPO_ROOT" ] \
+        || emit not_evaluated null "repo_root '$REPO_ROOT' is not a directory" '{}'
+      cd "$REPO_ROOT" || emit not_evaluated null "cannot cd into repo_root '$REPO_ROOT'" '{}'
+      # Playwright must ALREADY be installed in the target repo (--no-install:
+      # a cold npx fetch inside a verify gate is a supply-chain surprise).
+      if ! npx --no-install playwright --version >/dev/null 2>&1; then
+        emit not_evaluated null "playwright is not installed in the target repo (npx --no-install playwright failed)" '{}'
+      fi
+      [ -f "$TEST" ] || emit evaluated not_found "no file at '$TEST'" '{}'
+
+      # A failing test exits playwright non-zero — that is EXPECTED here; the
+      # verdict comes from the JSON report, never the exit code.
+      OUT=$(npx --no-install playwright test "$TEST" --workers=1 \
+              --reporter=json 2>/dev/null || true)
+      if ! printf '%s' "$OUT" | jq -e '.stats' >/dev/null 2>&1; then
+        # No parseable report at all: transform/compile error or runner crash.
+        emit evaluated infra_error "playwright produced no parseable JSON report (compile/transform error or runner crash) — not an assertion failure" '{}'
+      fi
+      STATS=$(printf '%s' "$OUT" | jq -c '.stats')
+      RAN=$(printf '%s' "$STATS" | jq '(.expected + .unexpected + .flaky + .skipped)')
+      FAILED=$(printf '%s' "$STATS" | jq '.unexpected')
+      if ! [ "$RAN" -gt 0 ] 2>/dev/null; then
+        # Zero tests ran. A suite LOAD error (broken import / transform
+        # failure) surfaces as top-level `errors` with empty stats — that is
+        # infrastructure, not a missing test.
+        LOADERRS=$(printf '%s' "$OUT" | jq '(.errors // []) | length' 2>/dev/null || printf 0)
+        if [ "$LOADERRS" -gt 0 ] 2>/dev/null; then
+          emit evaluated infra_error "the suite failed to LOAD (broken import / transform error) — not an assertion failure" "$STATS"
+        fi
+        emit evaluated not_found "runner matched no tests at '$TEST'" "$STATS"
+      fi
+      if [ "$FAILED" -eq 0 ] 2>/dev/null; then
+        emit evaluated tautology "the test PASSES against the current code — it cannot be a red proof for this defect" "$STATS"
+      fi
+
+      # Classify the failure from the report's error messages. Playwright
+      # assertion failures (including web-first assertion timeouts) carry
+      # `expect(` in the message; generic assertion libs carry AssertionError.
+      # Anything else (Cannot find module, ReferenceError, net::ERR_*,
+      # page.goto failures, bare test timeouts) is infrastructure — and
+      # UNCLASSIFIABLE error text is infra_error too (fail-closed).
+      ERRS=$(printf '%s' "$OUT" | jq -r '[.. | objects | .message? // empty | select(type=="string")] | join("\n")' 2>/dev/null || printf '')
+      if printf '%s' "$ERRS" | grep -qiE 'expect\(|assertionerror'; then
+        emit evaluated assertion_failed "the test fails NOW on an assertion against the current code — a real red proof" "$STATS"
+      fi
+      emit evaluated infra_error "the test failed but not on a recognizable assertion (compile/import/infra failure or unclassifiable error text) — not a red proof" "$STATS"

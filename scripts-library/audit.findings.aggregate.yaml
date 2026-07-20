@@ -1,0 +1,92 @@
+# scripts-library/audit.findings.aggregate.yaml
+#
+# DETERMINISTIC rollup for flow.qa.explore: fold the adjudicated channels —
+# findings (evidenced defects), product_questions (expected behavior
+# unknown; advisory), discarded (did not reproduce) — into one QA report.
+# The verdict scalars a flow branches / an outcome gates on are computed in
+# CODE, never by the LLM ("deterministic tools over LLM math"):
+#   blocking_count    — findings at severity critical|high.
+#   unevidenced_count — findings that FAIL the evidence invariants on
+#                       recount (missing/uncitable expectedSource, copied
+#                       successfulAttempts < 2, no probe_ref, or zero
+#                       evidence refs). The schema upstream should make
+#                       this 0; this is the independent, code-side recount
+#                       the `evidence_clean` outcome gates on — belt AND
+#                       suspenders, defense against schema drift.
+#   drift_detected    — any finding at all (the app drifted from its
+#                       cited expected behavior).
+version: "1.0.0"
+scripts:
+  audit.findings.aggregate:
+    verb: audit
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # Aggregate the discovery loop's three channels into a QA report.
+      #   $1 — findings array (JSON string), default [].
+      #   $2 — product_questions array (JSON string), default [].
+      #   $3 — discarded array (JSON string), default [].
+      # Emits JSON on stdout, read at $.output.json.*. Always exits 0 —
+      # verdicts are data, not exit codes.
+      set -uo pipefail
+      FINDINGS="${1:-[]}"
+      QUESTIONS="${2:-[]}"
+      DISCARDED="${3:-[]}"
+
+      # Fail-soft on malformed upstream payloads: coerce each non-array arg
+      # to [] but RECORD the malformation in the report (visible, not
+      # silent), mirroring audit.drift.aggregate's stance. Checked inline —
+      # a $(subshell) helper could not write MALFORMED back.
+      MALFORMED='[]'
+      is_array() { printf '%s' "$1" | jq -e 'type == "array"' >/dev/null 2>&1; }
+      F="$FINDINGS";  is_array "$F" || { MALFORMED=$(printf '%s' "$MALFORMED" | jq '. + ["findings"]');          F='[]'; }
+      Q="$QUESTIONS"; is_array "$Q" || { MALFORMED=$(printf '%s' "$MALFORMED" | jq '. + ["product_questions"]'); Q='[]'; }
+      D="$DISCARDED"; is_array "$D" || { MALFORMED=$(printf '%s' "$MALFORMED" | jq '. + ["discarded"]');         D='[]'; }
+
+      jq -n --argjson findings "$F" --argjson questions "$Q" \
+            --argjson discarded "$D" --argjson malformed "$MALFORMED" '
+        # Evidence invariants, RECOUNTED in code (never trusted from the
+        # agent): a finding is unevidenced unless it cites a closed-enum
+        # expectedSource with a non-empty reference, carries the copied
+        # deterministic reproduction (successfulAttempts >= 2), names its
+        # replayable probe_ref, and has at least one opaque evidence ref.
+        def evidenced:
+          ((.expectedSource? // {}) as $s
+            | ($s.kind? // "") as $k
+            | (["charter_invariant", "acceptance_criterion", "spec", "adr",
+                "api_contract", "wcag", "story"] | index($k)) != null
+              and (($s.reference? // "") | length) > 0)
+          and (((.reproduction? // {}).successfulAttempts? // 0) >= 2)
+          and ((.probe_ref? // "") | length) > 0
+          and ((.evidence? // {}) as $e
+            | ((($e.traceRef? // "") | length) > 0)
+              or ((($e.screenshotRef? // "") | length) > 0)
+              or ((($e.consoleErrors? // []) | length) > 0)
+              or ((($e.failedRequests? // []) | length) > 0));
+
+        ($findings | map(select(evidenced | not))) as $unevidenced
+        | {
+            total_findings:         ($findings | length),
+            blocking_count:         ($findings
+              | map(select(.severity == "critical" or .severity == "high"))
+              | length),
+            unevidenced_count:      ($unevidenced | length),
+            by_severity: {
+              critical: ($findings | map(select(.severity == "critical")) | length),
+              high:     ($findings | map(select(.severity == "high"))     | length),
+              medium:   ($findings | map(select(.severity == "medium"))   | length),
+              low:      ($findings | map(select(.severity == "low"))      | length)
+            },
+            drift_detected:         (($findings | length) > 0),
+            product_question_count: ($questions | length),
+            discarded_count:        ($discarded | length),
+            # The offenders, trimmed to what a reviewer acts on first.
+            unevidenced: ($unevidenced
+              | map({id: (.id? // null), title: (.title? // null),
+                     severity: (.severity? // null)})),
+            malformed_channels:     $malformed,
+            findings:               $findings,
+            product_questions:      $questions,
+            discarded:              $discarded
+          }'

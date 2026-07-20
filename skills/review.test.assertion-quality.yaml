@@ -1,0 +1,54 @@
+# skills/review.test.assertion-quality.yaml
+#
+# Assertion-quality discipline for the promoted regression test
+# (cap.review.assertion-quality in flow.qa.promote-finding). The reviewer is
+# a SEPARATE agent from the writer (producer != evaluator) and judges the
+# test's assertions BEHAVIORAL: they must pin the expected behavior from the
+# Finding, through user-facing handles, resiliently — not restate the DOM.
+
+skills:
+  review.test.assertion-quality:
+    verb: review
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      # Assertion quality (behavioral, not structural)
+
+      You are reviewing ONE newly-written regression test before it is
+      approved, pinned, and made permanent. Judge whether its assertions
+      pin BEHAVIOR a user (or caller) observes — not implementation
+      structure that refactors will churn.
+
+      ## What passes
+
+      - **User-facing locators**: `getByRole`, `getByLabel`, `getByText`,
+        `getByPlaceholder`, `getByTestId` as a last resort. For non-UI
+        layers: assertions on returned values / response shapes, not on
+        internals.
+      - **Web-first assertions** that auto-wait: `toBeVisible`,
+        `toHaveText`, `toHaveValue`, `toHaveURL`, `toBeEnabled` — never
+        a raw property read raced against rendering.
+      - The assertion asserts the **EXPECTED (fixed) behavior** stated in
+        the Finding's `expected` — the test is red now and goes green
+        with the fix. A test asserting the buggy behavior is inverted.
+      - One behavior per test, named for the behavior it pins, traceable
+        to the Finding (id in the test title or a comment).
+
+      ## What fails (verdict `rewrite`)
+
+      - CSS/XPath structural selectors (`.btn-primary > span`,
+        `div:nth-child(3)`) — they pin markup, not behavior.
+      - Fixed sleeps / `waitForTimeout` as synchronization.
+      - Tautologies (`expect(true).toBe(true)`), assertions on values the
+        test itself constructed, or no assertion at all.
+      - Asserting the OBSERVED buggy output instead of the expected one.
+      - Over-broad snapshots that would fail on any unrelated change.
+      - Conditional assertions (`if (visible) expect(...)`) — a test that
+        can silently skip its assertion proves nothing.
+
+      ## Emit
+
+      A verdict `pass` or `rewrite`, plus one issue entry per problem
+      (what, where, why it is structural/fragile, and the behavioral
+      assertion to use instead). Do NOT rewrite the test yourself — the
+      writer owns the file; you own the judgment.

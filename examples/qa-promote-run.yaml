@@ -1,0 +1,110 @@
+# examples/qa-promote-run.yaml
+#
+# Gateway config that DRIVES cognitive/flow.qa.promote-finding live — the
+# M2 TDD promotion loop that turns ONE flow.qa.explore Finding into a
+# permanent regression test + fix. What you need to run it:
+#
+#   1. auto_drive ON — the triage/writer/reviewer/fixer leaves are delegate
+#      agents. The tool-surface split is where the loop's correctness
+#      lives: the gateway-wide `auto_drive_tools` is read reach over the
+#      whole target repo (for triage root-causing), while the WRITE-side
+#      states declare their OWN `tools:` (which REPLACES the global set) —
+#      the test writer gets `file:<repo_root>/tests` ONLY and the fixer
+#      gets `file:<repo_root>/src` ONLY, so the fixer PHYSICALLY cannot
+#      edit the approved test (prevention), backed by the git-hash pin
+#      re-check (detection, tamper = hard stop);
+#   2. a model binding (gateway.models_yaml) — writer/fixer leaves ride the
+#      default affinity; the assertion-quality reviewer pins `review`;
+#   3. a durable store (sqlite) — the flow has TWO human gates (approval +
+#      escalation), so runs park and must survive process restarts;
+#   4. the cognitive-architectures repo (the flow + its caps/scripts/skills,
+#      loaded namespace-prefixed `cognitive/*`);
+#   5. the TARGET repo as the writable repo: `$.run.repo_root` resolves
+#      here. It must be a git work tree (the pin uses `git hash-object`),
+#      have @playwright/test installed (red proof + green/flake replays run
+#      `npx --no-install playwright test`; the honest floor reports
+#      not_evaluated, never a fake verdict, when it is missing), and keep a
+#      PATH-SEPARABLE layout — sources under src/, tests under tests/
+#      (charter.src_glob / charter.test_glob) — or the run fails fast with
+#      TEST_PATHS_NOT_SEPARABLE by design;
+#   6. NO browser pool lease: unlike flow.qa.explore, this flow never
+#      drives an interactive browser — the replays launch playwright's own
+#      browsers from the repo. The `browser` pool below is OPTIONAL and
+#      only so the same config can also drive cognitive/flow.qa.explore
+#      (M1) for the discovery half of the program.
+#
+# Validate:
+#   praxec check --config examples/qa-promote-run.yaml
+#
+# Drive (headless up to the human gates; approve via the HITL surface):
+#   set -a; . ~/.config/praxec/providers.env; set +a
+#   praxec orchestrate --config examples/qa-promote-run.yaml \
+#     --definition cognitive/flow.qa.promote-finding \
+#     --input '{"finding": {"id": "F-001", "title": "…", "severity": "high",
+#               "observed": "…", "expected": "…",
+#               "expectedSource": {"kind": "spec", "reference": "docs/spec.md#checkout"},
+#               "reproduction": {"attempts": 5, "successfulAttempts": 5, "deterministic": true},
+#               "probe_ref": ".praxec/qa-artifacts/probe-F-001.spec.ts",
+#               "evidence": {"traceRef": "…"}},
+#               "charter": {"src_glob": "src/**", "test_glob": "tests/**",
+#                           "budgets": {"max_e2e_specs": 10}}}'
+
+version: "1.0.0"
+
+gateway:
+  principal: { subject: operator, roles: [human] }
+  # Affinity/tier -> provider:model chains for the auto-driven agent leaves.
+  models_yaml: /home/mc/.config/praxec/models.yaml
+
+praxec:
+  # Free lexical discovery — no embedding endpoint spend for a QA run.
+  embeddings:
+    enabled: false
+  # The repo the run operates ON: the app under promotion. $.run.repo_root
+  # resolves here — the regression test lands under <root>/tests/, the fix
+  # under <root>/src/, and every deterministic gate (red proof, pin,
+  # immutability, green/flake replays) runs from this root. Adjust to your
+  # app; it must be a git work tree with @playwright/test installed.
+  _writableRepos:
+    - root: "."
+      push: false
+  agents:
+    auto_drive: true
+    # Default leaf affinity; the assertion-quality reviewer's state pins
+    # `review` (senior judgment tier, producer != evaluator).
+    auto_drive_affinity: reasoning
+    # Writer/fixer sessions read the Finding, locate root cause, and edit.
+    auto_drive_max_seconds: 900
+    # Gateway-wide DEFAULT toolset: file reach over the target repo (what
+    # the triage leaf uses to locate the root cause). The write-side states
+    # (test writer -> tests/ only, fixer -> src/ only, reviewer -> tests/
+    # read) declare their OWN `tools:`, which REPLACES this set per leaf —
+    # the scoping that makes test immutability structural.
+    auto_drive_tools:
+      - "file:{{ $.run.repo_root }}"
+
+audit:
+  sink: stderr
+
+store:
+  kind: sqlite
+  path: /home/mc/.local/share/praxec/qa-promote-run.db
+
+# OPTIONAL `browser` exclusive pool — NOT used by flow.qa.promote-finding
+# (no state leases it; playwright replays launch their own browsers). Kept
+# so this one config can also drive cognitive/flow.qa.explore (M1) for the
+# discovery half of the program. Shape from examples/praxec-browser.yaml.
+connections:
+  browser_chrome_1:
+    kind: mcp
+    command: npx
+    args: ["chrome-devtools-mcp@latest", "--isolated"]
+    exclusive: true
+    pool: browser
+    startupTimeoutMs: 120000
+    idleTimeoutMs: 180000
+
+# The cognitive-architectures resource repo: the flow + its caps, scripts,
+# and skills (loaded namespace-prefixed `cognitive/*`).
+repos:
+  - path: ..
