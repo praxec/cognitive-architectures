@@ -1,0 +1,89 @@
+# capabilities/cap.implement.regression-test.yaml
+#
+# TEST WRITER of the TDD promotion loop (flow.qa.promote-finding): write ONE
+# failing regression test at the chosen layer, derived from the Finding.
+# Cognitive cap (verb `implement`, V6: noop + actor: agent).
+#
+# WRITE-SCOPE (the load-bearing property): the writing state declares
+# `tools: ["file:{{ $.run.repo_root }}/tests"]` — per-state `tools:` REPLACES
+# the gateway-wide auto-drive set, and the filesystem-aware guard roots this
+# agent at tests/ (symlinks included). It PHYSICALLY CANNOT touch src/. The
+# complementary fixer (cap.implement.fix-under-scope) is rooted at src/ and
+# cannot touch tests/ — that pairing, not any prompt text, is what enforces
+# test immutability's prevention half.
+#
+# BLACK-BOX BY CONSTRUCTION: scoped to tests/, this agent cannot read src/
+# or the discovery probe under .praxec/qa-artifacts/. The test is written
+# from the Finding's CONTRACT — observed, expected, expectedSource, the
+# probe's recorded steps/url — which is exactly the discipline we want: the
+# regression test pins expected BEHAVIOR, not the current implementation.
+#
+# The claimed test_path is schema-anchored to tests/ (pattern) AND re-checked
+# in code by every downstream script (red-proof, pin, immutability) — a path
+# outside tests/ has no legal way through the loop.
+
+workflows:
+  cap.implement.regression-test:
+    verb: implement
+    lifecycle: experimental
+    description: >
+      Write ONE failing regression test at the chosen layer under the repo's
+      tests/ tree, derived from the Finding's contract (expected behavior,
+      recorded steps), asserting the EXPECTED behavior so the test is red
+      against the current defect and goes green with the fix.
+    snippet:
+      inputs:
+        # The Finding being promoted (observed/expected/steps/probe_ref).
+        finding:       { type: object, required: true }
+        # The promotion charter (test_glob conventions, naming).
+        charter:       { type: object, required: true }
+        # The machine-checked layer + its justification.
+        layer:         { type: string, required: true }
+        justification: { type: string, default: "" }
+        # Reviewer issues from a prior rewrite round ([] on the first pass).
+        review_issues: { type: array,  default: [] }
+      outputs:
+        test_path:  { type: string }
+        test_title: { type: string }
+    skills: [implement.tdd.discipline, review.test.assertion-quality]
+    initialState: writing
+    states:
+      writing:
+        goal: >
+          Write EXACTLY ONE regression test that pins this Finding. Read
+          $.context — the Finding ($.context.finding), the charter
+          ($.context.charter), the chosen layer ($.context.layer with
+          $.context.justification), and any reviewer issues from a prior
+          round ($.context.review_issues — when non-empty, FIX every issue
+          in your rewrite). Derive the test from the Finding's contract:
+          navigate/arrange per the recorded steps and url, then assert the
+          EXPECTED behavior ($.context.finding.expected) with behavioral,
+          user-facing assertions (getByRole/getByLabel + web-first
+          assertions; never CSS selectors, never sleeps) — the test must
+          FAIL against the current defective code and pass once the defect
+          is fixed. Do NOT assert the observed buggy output. Write the file
+          under `tests/` at a path fitting the layer (e.g.
+          `tests/e2e/<finding-id>.spec.ts`, `tests/component/...`), titled
+          so it traces to the Finding id. Your file tools are rooted at
+          tests/ — you cannot and must not touch anything else. Submit
+          `test_path` (the repo-root-relative path you actually wrote,
+          starting with `tests/`) and `test_title`.
+        # tests/ WRITE ONLY — the structural half of test immutability.
+        tools: ["file:{{ $.run.repo_root }}/tests"]
+        transitions:
+          submit_test:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [test_path]
+              properties:
+                # Anchored to tests/ — a src-side or escaping path is not a
+                # representable deliverable (and downstream scripts re-check).
+                test_path:  { type: string, pattern: "^tests/", minLength: 7 }
+                test_title: { type: string, default: "" }
+            executor: { kind: noop }
+            output:
+              test_path:  "$.arguments.test_path"
+              test_title: "$.arguments.test_title"
+      done: { terminal: true }

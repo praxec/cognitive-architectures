@@ -1,0 +1,40 @@
+{
+  "_comment": "Example config for the cognitive/flow.audit.completeness workflow. Copy, rename, and customize per target repo, then pass its path as the workflow's required `config_path` input. Generic exclusions ship in the discovery script defaults and are UNIONED with `exclude_globs` below. Full schema: see the `inputs` block in orchestrators/flow.audit.completeness.yaml.",
+  "langs": ["cs", "ts"],
+  "exclude_globs": [
+    "**/generated/**",
+    "**/*.generated.*",
+    "**/Models/Generated/**",
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/*.stories.tsx",
+    "**/storybook-static/**",
+    "docs/**"
+  ],
+  "priority_modules": [
+    "src/core",
+    "src/services"
+  ],
+  "sample_percent": 20,
+  "seed_salt": "completeness-audit-v1",
+  "max_per_detector": 4000,
+  "ts_project": ".",
+  "ts_src": "src",
+  "jscpd_targets": ["src"],
+  "jscpd_min_tokens": 100,
+  "tool_pins": { "knip": "6.27.0", "jscpd": "5.0.12", "madge": "8.0.0" },
+  "npx_timeout_sec": 900,
+  "dynamic_patterns": [
+    "DI container registrations, incl. assembly scanning (impl classes referenced only at registration, never by name)",
+    "Framework-routed handlers: controllers, message/event/pubsub handlers, callbacks (on*/handler/callback naming)",
+    "Reflection / string-key resolution (e.g. lazy-loaded modules referenced by a string key, not an import)",
+    "Generated abstract base classes with concrete subclasses (corroborate against any existing implementation guard test; do not contradict a known baseline)"
+  ],
+  "application_context": {
+    "application_type": "web_app | api | cli | library | service | monorepo",
+    "framework": "<name and version, e.g. .NET 9 + React 18/Vite>",
+    "build_system": "<e.g. vite, dotnet, cargo>",
+    "is_monorepo": false,
+    "entry_points": ["src/main.ts"]
+  }
+}

@@ -1,0 +1,139 @@
+# examples/qa-explore-run.yaml
+#
+# Gateway config that DRIVES cognitive/flow.qa.explore live — the agentic
+# E2E browser-testing discovery loop. The concrete answer to "what do I
+# need to run this?":
+#
+#   1. a `browser` EXCLUSIVE POOL (connection shape from
+#      examples/praxec-browser.yaml): each member is one browser server
+#      process; the flow's `exclusive_pools: [browser]` leases ONE member
+#      at the run boundary, bound run-ambient to $.run.leased.browser, so
+#      every browser cap in the run reaches the SAME server process;
+#   2. auto_drive ON — the browser caps are delegate agents. This is where
+#      the tool-surface split becomes real: the gateway-wide
+#      `auto_drive_tools` is only `file:` over the target repo, and the
+#      browser-touching states declare their OWN `tools:` (which REPLACES
+#      the global set) naming the lease token — so the surveyor/prober hold
+#      the leased browser, the charter/finding agents physically cannot
+#      browse, and nobody holds a hardcoded browser connection (V31);
+#   3. a model binding (gateway.models_yaml) — the survey leaf rides the
+#      default affinity; cap.diagnose.browser-probe and cap.diagnose.finding
+#      both pin `review` (probing is the loop's hardest reasoning step:
+#      interactive exploration AND correct Playwright authoring in one turn,
+#      and on a commodity chain it burns the full budget with no result);
+#   4. a durable store (sqlite) so the run survives process restarts;
+#   5. the cognitive-architectures repo (flow.qa.explore + its caps,
+#      the verify.browser.repro-rate + audit.findings.aggregate scripts,
+#      and the plan.test.charter + diagnose.browser.finding skills);
+#   6. the TARGET repo as the writable repo: probes are written under
+#      `<repo_root>/.praxec/qa-artifacts/` (A4 FOLLOW-UP: moves to
+#      $.run.artifacts_dir when that scope lands) and the reproduction
+#      gate runs `playwright test` FROM the repo root — so the app repo
+#      must have @playwright/test installed (the gate's honest floor
+#      reports not_evaluated, never a fake pass, when it is missing).
+#
+# Validate:
+#   praxec check --config examples/qa-explore-run.yaml
+#
+# Drive (headless, to the evidence_clean + fully_evaluated outcomes):
+#   set -a; . ~/.config/praxec/providers.env; set +a
+#   praxec orchestrate --config examples/qa-explore-run.yaml \
+#     --definition cognitive/flow.qa.explore \
+#     --input '{"mission":"explore the checkout flow for defects","app_url":"http://localhost:3000","attempts":5}'
+#
+# ---------------------------------------------------------------------------
+# APPS BEHIND A LOGIN WALL
+# ---------------------------------------------------------------------------
+# The browser agents cannot log in — typing credentials is a side-effecting
+# form submission, and they hold no credentials. Log in ONCE by hand and save
+# the session, from the app repo root:
+#
+#   npx playwright open --save-storage=.praxec/qa-auth.json http://localhost:3000
+#   # log in in the window that opens, then close it
+#
+# Then pass the PATH (never a credential) as `storage_state`:
+#
+#   --input '{"mission":"...","app_url":"http://localhost:3000",
+#             "storage_state":".praxec/qa-auth.json"}'
+#
+# and give the browser pool members the same file so the leased session
+# starts authenticated — for @playwright/mcp append:
+#   "--storage-state", "<abs path>/.praxec/qa-auth.json"
+#
+# Setting storage_state also turns on three fail-loud checks: the survey
+# aborts the run if it still lands on a login page, and both the emit-time
+# probe check and the replay gate REFUSE a probe that omits
+# `test.use({ storageState })` — because such a probe replays signed out and
+# returns a completely ordinary-looking "did not reproduce".
+#
+# Sessions expire. If `fully_evaluated` is unmet and the report's
+# `not_evaluated` entries mention storage state, re-save the file.
+# Keep `.praxec/qa-auth.json` out of git — it holds live session cookies.
+
+version: "1.0.0"
+
+gateway:
+  principal: { subject: operator, roles: [human] }
+  # Affinity/tier -> provider:model chains for the auto-driven agent leaves.
+  models_yaml: /home/mc/.config/praxec/models.yaml
+
+praxec:
+  # Free lexical discovery — no embedding endpoint spend for a QA run.
+  embeddings:
+    enabled: false
+  # The repo the run operates ON: the app under test. $.run.repo_root
+  # resolves here — probe specs land under <root>/.praxec/qa-artifacts/
+  # and the replay gate runs playwright from this root. Adjust to your app.
+  _writableRepos:
+    - root: "."
+      push: false
+  agents:
+    auto_drive: true
+    # Default leaf affinity; cap.diagnose.finding's state overrides to
+    # `review` (senior adjudication tier).
+    auto_drive_affinity: reasoning
+    # Browser sessions are long (navigate + snapshot + probe authoring).
+    auto_drive_max_seconds: 900
+    # Gateway-wide DEFAULT toolset: file tools over the target repo only.
+    # Deliberately NO browser here — browser reach exists solely on the
+    # states that declare `tools: ["{{ $.run.leased.browser }}"]`, so the
+    # lease is the ONLY door to the browser (per-state `tools:` REPLACES
+    # this set; V31 rejects any hardcoded exclusive connection name).
+    auto_drive_tools:
+      - "file:{{ $.run.repo_root }}"
+
+audit:
+  sink: stderr
+
+store:
+  kind: sqlite
+  path: /home/mc/.local/share/praxec/qa-explore-run.db
+
+# The `browser` exclusive pool — connection shape from
+# examples/praxec-browser.yaml. Each member is ONE browser server process
+# (`exclusive: true` + `pool: browser`); two members = two concurrent runs.
+# Swap in @playwright/mcp members (connections/browser-playwright.yaml) or
+# split-host --browser-url args (connections/browser-chrome-devtools.yaml)
+# without touching any flow YAML — topology lives here, not in the flows.
+connections:
+  browser_chrome_1:
+    kind: mcp
+    command: npx
+    args: ["chrome-devtools-mcp@latest", "--isolated"]
+    exclusive: true
+    pool: browser
+    startupTimeoutMs: 120000
+    idleTimeoutMs: 180000
+  browser_chrome_2:
+    kind: mcp
+    command: npx
+    args: ["chrome-devtools-mcp@latest", "--isolated"]
+    exclusive: true
+    pool: browser
+    startupTimeoutMs: 120000
+    idleTimeoutMs: 180000
+
+# The cognitive-architectures resource repo: flow.qa.explore + its caps,
+# scripts, and skills (loaded namespace-prefixed `cognitive/*`).
+repos:
+  - path: ..

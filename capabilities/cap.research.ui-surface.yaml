@@ -1,0 +1,163 @@
+# capabilities/cap.research.ui-surface.yaml
+#
+# Survey step of the E2E discovery loop (flow.qa.explore): charter → a
+# structured SURFACE MAP of the app under test. Cognitive cap (verb
+# `research`, V6: noop + actor: agent) — a DELEGATE agent WITH browser
+# tools, NOT a single `kind: mcp` call: surveying is a multi-step
+# navigate/snapshot/enumerate session, and the browser is reached ONLY via
+# the run-scoped lease (`exclusive_pools: [browser]` +
+# `tools: ["{{ $.run.leased.browser }}"]`, V31). The lease is run-ambient:
+# when flow.qa.explore spawns this cap, it inherits the flow's leased
+# member — declaring the pool here also lets the cap lease standalone.
+# Survey only: this cap OBSERVES structure; it authors no probes and files
+# no findings (those are the probe/finding caps' jobs).
+#
+# AUTHENTICATION: this cap is instructed to observe only — it must not submit
+# forms with side effects, and a login form IS a side-effecting form. On an app
+# behind auth that left every real surface `skipped: authentication required`
+# and the whole family unusable. The fix is NOT to let the surveyor log in
+# (typing credentials into a page is exactly the side effect the constraint
+# exists to prevent, and it would put secrets in an agent's context). The fix
+# is `storage_state`: the OPERATOR logs in once out-of-band and saves a
+# Playwright storage-state JSON; the browser session starts already
+# authenticated and the surveyor still never touches a credential.
+#
+#   npx playwright open --save-storage=.praxec/qa-auth.json http://localhost:3000
+#   # log in by hand in the window that opens, then close it
+#
+# The path is a FILESYSTEM PATH, never a credential — do not put a password,
+# token, or cookie value in this or any YAML. Secrets stay in the environment
+# and in the storage-state file the operator produced.
+
+workflows:
+  cap.research.ui-surface:
+    verb: research
+    lifecycle: experimental
+    description: >
+      Survey the app under test with the run's leased browser and emit a
+      bounded surface map — pages, routes, and interactive elements within
+      the charter's scope — the navigation map the probing step targets.
+    exclusive_pools: [browser]
+    snippet:
+      inputs:
+        # The bounded charter (cap.plan.test-charter output) — scope + budget.
+        charter: { type: object, required: true }
+        # The app under test; surveying starts (and stays) at this origin.
+        app_url: { type: string, required: true }
+        # Repo-root-relative path to a Playwright storage-state JSON the
+        # OPERATOR saved from a hand-driven login. "" = the app declares no
+        # auth. Never a credential — a path to a file (see header).
+        storage_state: { type: string, default: "" }
+      outputs:
+        surface_map: { type: object }
+        # Closed enum the surveyor MUST declare, so "the app is behind a
+        # login wall" is a detectable state rather than an empty map.
+        auth_state:  { type: string }
+    initialState: surveying
+    states:
+      surveying:
+        goal: >
+          Survey the app's UI surface using the leased browser. Read
+          $.context — the charter ($.context.charter: honor in_scope,
+          out_of_scope, and budget.max_pages) and the app origin
+          ($.context.app_url). Navigate from the origin, take snapshots,
+          and enumerate what EXISTS: pages/routes visited, key interactive
+          elements per page (forms, buttons, links), and navigation edges
+          between them. Stay inside in_scope, never enter out_of_scope
+          surfaces, and stop at budget.max_pages. Observe only — do not
+          submit forms with side effects, author tests, or judge behavior.
+
+          AUTHENTICATION — read $.context.storage_state FIRST. It is a path
+          to an operator-saved Playwright storage-state file, or "" when the
+          app declares no auth. You CANNOT log in and you MUST NOT try:
+          typing credentials is a side-effecting form submission, and you
+          hold no credentials. When storage_state is non-empty the operator
+          has already wired that file into the browser connection
+          (`--storage-state <path>`), so your session should open ALREADY
+          authenticated.
+
+          Before mapping anything, navigate to the origin and determine
+          which of three states you are in, then set `auth_state`:
+            - `not_required` — storage_state is "" and the origin serves
+              real application content.
+            - `authenticated` — you can reach application content past the
+              entry point (storage_state was non-empty and it worked).
+            - `unauthenticated` — the origin redirects to, or renders, a
+              login / sign-in / SSO page and you cannot reach application
+              content.
+          If you are `unauthenticated`, STOP. Do not map the login page as
+          though it were the app's surface, and do not emit a page list of
+          real surfaces marked "skipped — authentication required". Emit
+          `auth_state: "unauthenticated"`, `pages: []`, and put the login
+          URL in `skipped` with the reason. An unauthenticated survey is a
+          run that COULD NOT EVALUATE the app; the flow aborts on it loudly
+          rather than reporting an empty, falsely-clean result.
+
+          Emit ONE `surface_map` object: { origin, auth_state, pages: [ {
+          url, title, elements: [ { kind, label, selector } ], notes } ],
+          edges: [ { from, to, via } ], skipped: [ { url, reason } ] }.
+          Submit `surface_map` and `auth_state` (identical to
+          `surface_map.auth_state`).
+        tools: ["{{ $.run.leased.browser }}"]
+        transitions:
+          submit_surface:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [surface_map, auth_state]
+              properties:
+                # Closed enum, REQUIRED in both places: there is no legal way
+                # to submit a surface map that stays silent about whether the
+                # session ever got past a login wall.
+                auth_state:
+                  type: string
+                  enum: [not_required, authenticated, unauthenticated]
+                surface_map:
+                  type: object
+                  required: [origin, auth_state, pages]
+                  properties:
+                    origin: { type: string }
+                    auth_state:
+                      type: string
+                      enum: [not_required, authenticated, unauthenticated]
+                    pages:
+                      type: array
+                      items:
+                        type: object
+                        required: [url]
+                        properties:
+                          url:   { type: string }
+                          title: { type: string }
+                          elements:
+                            type: array
+                            items:
+                              type: object
+                              required: [kind]
+                              properties:
+                                kind:     { type: string }
+                                label:    { type: string }
+                                selector: { type: string }
+                          notes: { type: string }
+                    edges:
+                      type: array
+                      items:
+                        type: object
+                        required: [from, to]
+                        properties:
+                          from: { type: string }
+                          to:   { type: string }
+                          via:  { type: string }
+                    skipped:
+                      type: array
+                      items:
+                        type: object
+                        required: [url, reason]
+                        properties:
+                          url:    { type: string }
+                          reason: { type: string }
+            executor: { kind: noop }
+            output:
+              surface_map: "$.arguments.surface_map"
+              auth_state:  "$.arguments.auth_state"
+      done: { terminal: true }

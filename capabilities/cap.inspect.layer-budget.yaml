@@ -1,0 +1,52 @@
+# capabilities/cap.inspect.layer-budget.yaml
+#
+# DETERMINISTIC check of the layer-selection promotion rule
+# (flow.qa.promote-finding). Verb `inspect` (V6: kind script) wrapping
+# inspect.test.layer-budget: the triage agent CLAIMED a layer; this cap
+# machine-checks the pairing — closed-ladder membership, the e2e
+# non-empty-justification requirement, and the charter's e2e spec-count
+# budget (existing specs counted on disk, budget from
+# charter.budgets.max_e2e_specs, fail-closed when undeclared). The agent's
+# claim never advances on its own say-so.
+
+workflows:
+  cap.inspect.layer-budget:
+    verb: inspect
+    lifecycle: experimental
+    description: >
+      Machine-check a chosen test layer against the promotion rule: ladder
+      membership, mandatory critical-journey justification for e2e, and the
+      charter's e2e spec-count budget (counted on disk, fail-closed when the
+      charter declares no budget).
+    snippet:
+      inputs:
+        # The layer the triage step (or the human disambiguator) chose.
+        layer:         { type: string, required: true }
+        # Its justification (must be non-empty for e2e).
+        justification: { type: string, default: "" }
+        # The promotion charter (budgets.max_e2e_specs).
+        charter:       { type: object, required: true }
+      outputs:
+        ok:     { type: boolean }
+        reason: { type: string }
+    initialState: checking
+    states:
+      checking:
+        goal: Machine-check the layer/justification/budget pairing.
+        transitions:
+          check:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.test.layer-budget
+              args:
+                - "$.workflow.input.layer"
+                - "$.workflow.input.justification"
+                - "$.workflow.input.charter"
+                # e2e specs are counted on disk under the run-ambient root.
+                - "$.run.repo_root"
+            output:
+              ok:     "$.output.json.ok"
+              reason: "$.output.json.reason"
+      done: { terminal: true }

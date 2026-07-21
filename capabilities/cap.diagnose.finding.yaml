@@ -1,0 +1,150 @@
+# capabilities/cap.diagnose.finding.yaml
+#
+# THE Finding-emitting cap of the E2E discovery loop (flow.qa.explore).
+# Cognitive cap (verb `diagnose`, V6: noop + actor: agent), SENIOR tier
+# (`affinity: review` — adjudication, producer != evaluator), guided by the
+# `diagnose.browser.finding` skill. The schema makes bad findings
+# UNREPRESENTABLE (the engine validates inputSchema and rejects violations):
+#   - `expectedSource` REQUIRED, closed-enum kind + reference — "a defect
+#     but I can't cite what correct behavior is" has NO legal Finding shape;
+#     it MUST go to the separate `product_questions` channel.
+#   - `reproduction.successfulAttempts` has schema `minimum: 2` AND the
+#     goal instructs it be COPIED verbatim from the deterministic gate's
+#     output — an invented or sub-threshold rate cannot be submitted.
+#   - `evidence` is `additionalProperties: false` with only opaque refs
+#     (traceRef / screenshotRef / consoleErrors / failedRequests) — no
+#     filesystem `path` field exists (the browser may be on another host).
+# Dual channels: `findings` (evidenced, promotable) + `product_questions`
+# (expected behavior unknown — advisory, never a defect). The third array
+# (`discarded`) never reaches this cap: the gate already dropped it.
+
+workflows:
+  cap.diagnose.finding:
+    verb: diagnose
+    lifecycle: experimental
+    description: >
+      Adjudicate deterministically-reproduced browser observations into
+      typed Findings (mandatory closed-enum expectedSource, verbatim-copied
+      reproduction numbers with schema-floor successfulAttempts >= 2,
+      transport-only evidence refs) and route observations with no citable
+      expected behavior to the separate product_questions channel.
+    snippet:
+      inputs:
+        # The charter — its invariants are the primary expectedSource pool.
+        charter:    { type: object, required: true }
+        # Gate output: observations that reproduced, each carrying the
+        # code-computed `reproduction` object to copy verbatim.
+        reproduced: { type: array,  required: true }
+        # Transport-only evidence entries keyed by observation_id.
+        evidence:   { type: array,  required: true }
+      outputs:
+        findings:          { type: array }
+        product_questions: { type: array }
+    skills: [diagnose.browser.finding]
+    initialState: adjudicating
+    states:
+      adjudicating:
+        # SENIOR reviewer tier: adjudication is judgment, not production.
+        affinity: review
+        goal: >
+          Adjudicate each reproduced observation into exactly one channel.
+          Read $.context — the charter ($.context.charter), the reproduced
+          observations ($.context.reproduced — each carries a
+          `reproduction` object computed by the deterministic replay gate),
+          and the collected evidence ($.context.evidence, keyed by
+          observation_id). For EACH reproduced observation: if you can CITE
+          the expected behavior it violates — a charter invariant (use its
+          source), or a spec/ADR/API-contract/WCAG/story reference you can
+          confirm with your file tools — emit a Finding: { id, title,
+          severity (critical|high|medium|low), observed, expected,
+          expectedSource: { kind, reference }, reproduction: COPIED
+          VERBATIM from the observation (never invented, never rounded),
+          probe_ref: copied from the observation, evidence: the opaque refs
+          from the matching evidence entry }. If NO citable expected
+          behavior exists, the observation is a product question — emit
+          { question, context, surface, probe_ref } in `product_questions`
+          instead. Every reproduced observation lands in exactly one of the
+          two channels; inventing a reference to force a Finding is the one
+          forbidden move.
+
+          The charter's `unverified_premises` are NOT invariants and are NOT
+          a citable source. They are operator assumptions whose subject
+          could not be confirmed to exist. An observation that amounts to
+          "the thing the operator described is not there" is not a defect —
+          route it to `product_questions` if it is worth asking about, and
+          never cite a premise as `charter_invariant`.
+
+          Submit `findings` and `product_questions`.
+        # File READ over the target repo: confirm doc references exist
+        # before citing them. No browser — adjudication does not explore.
+        tools: ["file:{{ $.run.repo_root }}"]
+        transitions:
+          submit_findings:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [findings, product_questions]
+              properties:
+                findings:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    required: [id, title, severity, observed, expected, expectedSource, reproduction, probe_ref, evidence]
+                    properties:
+                      id:       { type: string }
+                      title:    { type: string }
+                      severity: { type: string, enum: [critical, high, medium, low] }
+                      observed: { type: string }
+                      expected: { type: string }
+                      # The poka-yoke: a Finding without a citable source of
+                      # expected behavior is not representable.
+                      expectedSource:
+                        type: object
+                        required: [kind, reference]
+                        additionalProperties: false
+                        properties:
+                          kind:
+                            type: string
+                            enum: [charter_invariant, acceptance_criterion, spec, adr, api_contract, wcag, story]
+                          reference: { type: string, minLength: 1 }
+                      # Copied verbatim from the deterministic gate; the
+                      # minimum: 2 floor makes sub-threshold rates illegal.
+                      reproduction:
+                        type: object
+                        required: [attempts, successfulAttempts, deterministic]
+                        properties:
+                          attempts:           { type: integer, minimum: 2 }
+                          successfulAttempts: { type: integer, minimum: 2 }
+                          deterministic:      { type: boolean }
+                      probe_ref: { type: string, minLength: 1 }
+                      # Opaque transport refs ONLY — no filesystem path field.
+                      evidence:
+                        type: object
+                        additionalProperties: false
+                        properties:
+                          traceRef:      { type: string }
+                          screenshotRef: { type: string }
+                          consoleErrors:
+                            type: array
+                            items: { type: string }
+                          failedRequests:
+                            type: array
+                            items: { type: string }
+                product_questions:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    required: [question]
+                    properties:
+                      question:  { type: string }
+                      context:   { type: string }
+                      surface:   { type: string }
+                      probe_ref: { type: string }
+            executor: { kind: noop }
+            output:
+              findings:          "$.arguments.findings"
+              product_questions: "$.arguments.product_questions"
+      done: { terminal: true }

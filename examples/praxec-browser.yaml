@@ -1,0 +1,73 @@
+# examples/praxec-browser.yaml
+#
+# Minimal runnable config that exercises the browser-pool substrate, so
+# `scripts/validate.sh` (which runs `praxec check` over examples/*.yaml) COVERS
+# the browser connections — the connections/ directory itself is validated by
+# nothing, and this is the config's highest-consequence surface.
+#
+# It declares a 2-member `browser` pool and a minimal flow that leases it the
+# sanctioned way (`exclusive_pools: [browser]` + `tools: ["{{ $.run.leased.browser }}"]`),
+# proving: pool derivation from `exclusive: true` connections, V31 acceptance of
+# the leased shape, and a clean load. The real discovery/promotion flows
+# (flow.qa.*) compose on top of exactly this.
+
+version: "1.0.0"
+
+gateway:
+  principal: { subject: operator, roles: [human] }
+
+audit:
+  sink: stderr
+
+# Exclusive + pooled: two Chrome DevTools server processes form the `browser`
+# pool. Many runs distribute across them; each run leases one for its lifetime.
+connections:
+  browser_chrome_1:
+    kind: mcp
+    command: npx
+    args: ["chrome-devtools-mcp@latest", "--isolated"]
+    exclusive: true
+    pool: browser
+    startupTimeoutMs: 120000
+    idleTimeoutMs: 180000
+  browser_chrome_2:
+    kind: mcp
+    command: npx
+    args: ["chrome-devtools-mcp@latest", "--isolated"]
+    exclusive: true
+    pool: browser
+    startupTimeoutMs: 120000
+    idleTimeoutMs: 180000
+
+workflows:
+  flow.qa.browser-smoke:
+    lifecycle: experimental
+    description: >
+      Substrate smoke flow — leases a browser pool member and reaches a probe
+      state whose agent tool is the leased connection. Proves the lease path
+      loads and passes V31; not a real check (the flow.qa.* family is that).
+    # Declares the run needs one `browser` pool member — leased at the run
+    # boundary, bound to $.run.leased.browser for the lifetime of the run.
+    exclusive_pools: [browser]
+    initialState: probing
+    states:
+      probing:
+        goal: Probe the app surface using the run's leased browser.
+        # Sanctioned shape: the leased connection via the run-ambient lease, NOT
+        # a hardcoded connection name (which V31 would reject as unleased).
+        tools: ["{{ $.run.leased.browser }}"]
+        transitions:
+          probe:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [surface_ok]
+              properties:
+                surface_ok: { type: boolean }
+            executor: { kind: noop }
+            output:
+              surface_ok: "$.arguments.surface_ok"
+      done:
+        terminal: true
+        outcome: success

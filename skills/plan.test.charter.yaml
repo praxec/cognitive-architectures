@@ -1,0 +1,88 @@
+# skills/plan.test.charter.yaml
+#
+# Bounded coverage-mission discipline for agentic E2E browser testing. The
+# charter is the CONTRACT the whole discovery loop (flow.qa.explore) runs
+# under: it converts an open-ended mission ("test the checkout") into a
+# bounded, budgeted, citable plan — in-scope surfaces, out-of-scope
+# exclusions, and the INVARIANTS (each with a citable source) that later
+# become the only legal `expectedSource` values a Finding may claim.
+# A defect that cannot cite an invariant/spec/criterion from this charter
+# is not a defect — it is a product question. That poka-yoke starts here.
+
+skills:
+  plan.test.charter:
+    verb: plan
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      # Test-charter discipline (bounded coverage mission)
+
+      You are chartering an exploratory E2E browser-testing session. The
+      charter you produce is a CONTRACT: every downstream step — surface
+      survey, probing, evidence, finding adjudication — is scoped and judged
+      against it. An unbounded charter produces an unbounded, unfinishable
+      session; an uncited charter produces findings nobody can defend.
+
+      ## Bound the mission
+      - Restate the mission as ONE sentence naming the user goal under test
+        (e.g. "a signed-in shopper can complete checkout with a saved card").
+      - Enumerate `in_scope` surfaces EXPLICITLY: routes, pages, flows,
+        components. If you cannot name it, it is not in scope.
+      - Enumerate `out_of_scope` EXPLICITLY — adjacent surfaces a curious
+        explorer would wander into (admin panels, third-party iframes,
+        destructive account operations, real payments/emails). Silence is
+        not exclusion; name them.
+      - Set a `budget`: max pages to visit and max probes to author. Small
+        beats sprawling — a charter that cannot be executed inside its
+        budget is a planning failure, not an execution failure.
+
+      ## Ground the invariants (the expectedSource discipline)
+      - Every invariant is a statement of EXPECTED behavior with a SOURCE a
+        reviewer can open: a spec section, an ADR, an acceptance criterion,
+        an API contract, a WCAG criterion, a user story — or, when the
+        repo's docs are thin, a charter invariant you state here (kind
+        `charter_invariant`), which makes THIS charter the citable source.
+      - Use your file tools to READ the target repo's docs/specs before
+        inventing invariants: cite real files (`docs/spec.md#checkout`,
+        `README.md > Payments`) whenever they exist. A reference must be
+        locatable — a file path, heading path, ticket id, or WCAG number,
+        never "common sense".
+      - Do NOT smuggle preferences in as invariants. "The button should be
+        blue" without a source is an opinion; leave it out. Downstream, an
+        observation with no citable expected behavior becomes a
+        product_question, not a Finding — that is by design, not a gap.
+      - The MISSION IS NOT EVIDENCE. It is what the operator believes about
+        the app, and operators are sometimes wrong about their own product.
+        When the mission names a specific surface or control ("the tag
+        filter", "the export button"), confirm it exists in the repo before
+        writing any invariant about it. If you cannot, it goes in
+        `unverified_premises` — never in `invariants`. An operator's
+        mistaken assumption must not become a reported defect, and a probe
+        aimed at a surface that never existed will "find" its absence every
+        time. Note the distinction: this is about EXISTENCE, not
+        documentation. A surface you can see in the code but that no spec
+        describes is still a legitimate `charter_invariant`.
+
+      ## Shape
+      Emit a single `charter` object:
+      - `mission` — the one-sentence bounded mission.
+      - `in_scope` — array of named surfaces.
+      - `out_of_scope` — array of named exclusions.
+      - `invariants` — array of `{ id, statement, source: { kind, reference } }`
+        where `kind` is one of: charter_invariant | acceptance_criterion |
+        spec | adr | api_contract | wcag | story.
+      - `unverified_premises` — array of `{ premise, why_unverified }` for
+        mission claims whose subject you could not confirm exists. Required;
+        an empty array is a claim that you checked.
+      - `budget` — `{ max_pages, max_probes }`, both integers.
+
+      ## Self-check
+      - Every invariant has a `source.reference` a reviewer could open or
+        look up. No invariant says "obviously" or "should just work".
+      - `out_of_scope` names at least the destructive and third-party
+        surfaces adjacent to the mission.
+      - The budget is executable in one session (single-digit probes for a
+        first pass).
+      - Every surface named in an invariant was actually found in the repo.
+        Anything the mission asserted but you could not locate is in
+        `unverified_premises`, not in `invariants`.

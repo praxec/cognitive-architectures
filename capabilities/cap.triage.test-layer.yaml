@@ -1,0 +1,87 @@
+# capabilities/cap.triage.test-layer.yaml
+#
+# LAYER SELECTION of the TDD promotion loop (flow.qa.promote-finding):
+# Finding -> the SMALLEST test layer that pins its root cause. Cognitive cap
+# (verb `triage`, V6: noop + actor: agent) guided by the
+# `triage.test.layer-selection` skill. The choice is NOT honor-system:
+#   - the closed ladder is a schema enum (no invented layers);
+#   - `is_ambiguous` is a REQUIRED boolean — the honest "two layers are
+#     defensible" signal routes to cap.gate.human-disambiguate downstream
+#     (candidates carried in `candidates`), never a silent guess;
+#   - the e2e pairing (non-empty critical-journey justification + spec-count
+#     budget) is machine-checked AFTER this cap by cap.inspect.layer-budget
+#     (deterministic), so an unjustified or over-budget e2e claim cannot
+#     advance regardless of what this agent asserts.
+
+workflows:
+  cap.triage.test-layer:
+    verb: triage
+    lifecycle: experimental
+    description: >
+      Choose the smallest test layer (unit < component < integration <
+      contract < e2e) that pins a Finding's root cause, with a justification
+      (mandatory narrative for e2e), an honest is_ambiguous flag, and the
+      candidate set for human disambiguation when ambiguous.
+    snippet:
+      inputs:
+        # The single Finding being promoted (cap.diagnose.finding shape).
+        finding: { type: object, required: true }
+        # The promotion charter (src/test globs, budgets) for context.
+        charter: { type: object, required: true }
+      outputs:
+        layer:         { type: string }
+        justification: { type: string }
+        is_ambiguous:  { type: boolean }
+        candidates:    { type: array }
+    skills: [triage.test.layer-selection]
+    initialState: triaging
+    states:
+      triaging:
+        goal: >
+          Pick the SMALLEST test layer that pins this Finding's root cause.
+          Read $.context — the Finding ($.context.finding: observed,
+          expected, expectedSource, reproduction, probe_ref) and the charter
+          ($.context.charter). Use your file tools to read the relevant
+          source until you can NAME the root cause, then walk the ladder
+          unit < component < integration < contract < e2e bottom-up and stop
+          at the first layer that can express the defect (per the skill).
+          Submit `layer`, `justification` (for e2e it MUST name the critical
+          user journey being protected — a deterministic budget check
+          rejects an empty one), `is_ambiguous` (true when two layers are
+          genuinely defensible — never guess), and `candidates` (when
+          ambiguous: one { layer, justification } per defensible choice;
+          otherwise []).
+        # File READ over the target repo: root-cause location drives the
+        # layer. No browser, no writes belong in this step.
+        tools: ["file:{{ $.run.repo_root }}"]
+        transitions:
+          submit_layer:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [layer, is_ambiguous]
+              properties:
+                layer:
+                  type: string
+                  enum: [unit, component, integration, contract, e2e]
+                justification: { type: string, default: "" }
+                is_ambiguous:  { type: boolean }
+                candidates:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    required: [layer]
+                    properties:
+                      layer:
+                        type: string
+                        enum: [unit, component, integration, contract, e2e]
+                      justification: { type: string, default: "" }
+            executor: { kind: noop }
+            output:
+              layer:         "$.arguments.layer"
+              justification: "$.arguments.justification"
+              is_ambiguous:  "$.arguments.is_ambiguous"
+              candidates:    "$.arguments.candidates"
+      done: { terminal: true }
