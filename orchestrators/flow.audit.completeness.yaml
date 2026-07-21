@@ -1,0 +1,173 @@
+# orchestrators/flow.audit.completeness.yaml
+#
+# Code-completeness audit: deterministic high-recall DISCOVERY feeds an
+# evidence-gated LLM VALIDATION gate, closed by a deterministic evidence
+# RECOUNT + report emit. The design boundary (locked): detectors over-surface
+# (recall; scripts wrapping off-the-shelf analyzers — ripgrep, knip, madge,
+# jscpd — pinned + reproducible); generative judgment is reserved for the
+# validation stage (skill review.completeness.audit-contract, the embedded owner
+# contract); and NOTHING the LLM asserts reaches the report unverified — the
+# report script re-greps every evidence quote verbatim against the file on
+# disk and REJECTS what does not match (verification EARNED, never asserted;
+# the `evidence_clean` outcome gates on the code-side recount).
+#
+#   discovering → audit.completeness.discover: pinned analyzers over the repo,
+#                 per-category/per-language detector registry (extensible via
+#                 config extra_rg_detectors WITHOUT touching the LLM contract),
+#                 hash-seeded priority+20% sampling manifest, VERBATIM quote
+#                 per candidate → <out_dir>/candidates.json + summary.
+#   validating  → agent gate (skill review.completeness.audit-contract): validate
+#                 candidates against evidence, orphan-verification checklist,
+#                 confidence + decay, severity, WSJF-style priority, output
+#                 limits; submit typed findings + executive_summary +
+#                 action_plan + sampling_manifest.
+#   reporting   → audit.completeness.report: re-verify every finding's
+#                 evidence verbatim on disk, enforce output limits IN CODE,
+#                 recount all scalars (LLM math is never trusted), emit the
+#                 final YAML report artifact at report_path.
+#
+# Unlike flow.audit-codebase (advisory single-shot critic), this flow is the
+# industrial pass: multi-tool deterministic discovery + evidence recount.
+# Related: cap.verify.stub-scan (rust stub grep), cap.review.completeness
+# (the tool-less critic gate this flow's validation stage industrializes).
+
+workflows:
+  flow.audit.completeness:
+    lifecycle: experimental
+    description: >
+      Code-completeness audit over a repo: deterministic multi-analyzer
+      discovery (stubs, orphans, dead code, duplication, split impls,
+      interface gaps; pinned ripgrep/knip/madge/jscpd) produces verbatim-quoted
+      candidates with a hash-seeded sampling manifest; an evidence-gated agent
+      validation stage (embedded audit contract) filters for precision; a
+      deterministic recount re-verifies every evidence quote on disk, enforces
+      output limits in code, and emits the final YAML report artifact.
+    skills: [review.completeness.audit-contract]
+    inputs:
+      # The tree under audit (absolute path; typically a clean worktree of the
+      # branch under audit, NOT a dirty checkout).
+      repo_path:   { type: string, required: true }
+      # Audit config JSON: repo-specific exclusions, priority modules, sample
+      # percent, ts_project, jscpd targets, tool pins, extra detectors.
+      config_path: { type: string, required: true }
+      # Where discovery writes candidates.json + analyzer raw output.
+      out_dir:     { type: string, required: true }
+      # Where the final YAML report artifact is written.
+      report_path: { type: string, required: true }
+    outcomes:
+      - id: report_emitted
+        statement: >
+          The final YAML report artifact was written to report_path by the
+          deterministic report script (report_emitted == true).
+        check: "$.context.report_emitted == true"
+      - id: evidence_clean
+        statement: >
+          Every submitted finding survived the code-side verbatim evidence
+          recount against the file on disk — zero rejected findings
+          (unverified_count == 0, computed by audit.completeness.report,
+          never by the LLM).
+        check: "$.context.unverified_count == 0"
+    blackboard:
+      discovery:         { type: object }
+      candidates_total:  { type: integer }
+      findings:          { type: array }
+      executive_summary: { type: object }
+      action_plan:       { type: array }
+      sampling_manifest: { type: object }
+      report:            { type: object }
+      report_emitted:    { type: boolean }
+      unverified_count:  { type: integer }
+    initialState: discovering
+    states:
+
+      # ── DETERMINISTIC discovery: pinned analyzers, sorted output, seeded
+      #    sampling; every analyzer failure is data (skipped[]), not an abort.
+      discovering:
+        goal: >
+          Run the deterministic completeness detectors over repo_path per the
+          audit config; write candidates.json (verbatim quote per candidate)
+          and the sampling manifest to out_dir.
+        transitions:
+          discover:
+            target: validating
+            actor: deterministic
+            executor:
+              kind: script
+              subject: audit.completeness.discover
+              args:
+                - "$.workflow.input.repo_path"
+                - "$.workflow.input.config_path"
+                - "$.workflow.input.out_dir"
+            # Plain script-executor output: BARE slot keys (a `$.context.*`
+            # prefix here would write a mis-named field — see flow.audit-docs).
+            output:
+              discovery:        "$.output.json"
+              candidates_total: "$.output.json.counts.total"
+
+      # ── AGENT validation gate: the precision filter. Apply the skill
+      #    audit.completeness.contract (the embedded owner contract) to the
+      #    candidates at $.context.discovery.candidates_path.
+      validating:
+        goal: >
+          Apply skill review.completeness.audit-contract: read the candidate list at
+          $.context.discovery.candidates_path (validate in_scope candidates —
+          priority modules fully, sampled buckets per the manifest), run the
+          orphan-verification checklist against the repo's dynamic patterns
+          (see the config's dynamic_patterns), quote evidence VERBATIM from
+          the files, assign type/severity/confidence (with decay) and
+          priority_score = (Impact+Urgency+Risk)/Effort, respect output
+          limits (CRITICAL unlimited, HIGH 20, MEDIUM 15, LOW 10 — summarize
+          overflow), then submit findings + executive_summary + action_plan +
+          sampling_manifest. Every evidence quote will be re-verified verbatim
+          on disk by the report step; anything that does not match is
+          rejected and counts against the evidence_clean outcome.
+        transitions:
+          submit_findings:
+            target: reporting
+            actor: agent
+            inputSchema:
+              type: object
+              required: [findings, executive_summary]
+              properties:
+                findings:          { type: array }
+                executive_summary: { type: object }
+                action_plan:       { type: array, default: [] }
+                sampling_manifest: { type: object, default: {} }
+            executor: { kind: noop }
+            output:
+              findings:          "$.arguments.findings"
+              executive_summary: "$.arguments.executive_summary"
+              action_plan:       "$.arguments.action_plan"
+              sampling_manifest: "$.arguments.sampling_manifest"
+
+      # ── DETERMINISTIC recount + report emit: the anti-fake-success gate.
+      reporting:
+        goal: >
+          Re-verify every finding's evidence verbatim against repo_path,
+          enforce output limits in code, recount all scalars, and write the
+          final YAML report artifact to report_path.
+        transitions:
+          report:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: audit.completeness.report
+              args:
+                - "$.context.findings"
+                - "$.context.executive_summary"
+                - "$.context.action_plan"
+                - "$.context.sampling_manifest"
+                - "$.workflow.input.repo_path"
+                - "$.workflow.input.report_path"
+                - "$.context.discovery"
+            output:
+              report:           "$.output.json"
+              report_emitted:   "$.output.json.report_emitted"
+              unverified_count: "$.output.json.unverified_count"
+
+      # Terminal: $.context.report holds the recounted summary; the artifact
+      # lives at report_path. evidence_clean is the definition of done.
+      done:
+        terminal: true
+        outcome: success

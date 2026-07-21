@@ -1,0 +1,222 @@
+# scripts-library/audit.completeness.report.yaml
+#
+# DETERMINISTIC recount + report half of flow.audit.completeness: re-verify
+# every LLM-submitted finding's evidence VERBATIM against the file on disk
+# (exact → eol-normalized → whitespace-normalized; anything else is REJECTED
+# visibly, never silently dropped) — including every related_evidence entry
+# for cross-file findings (DRY/SPLIT) — enforce the contract's output limits
+# IN CODE (CRITICAL unlimited / HIGH 20 / MEDIUM 15 / LOW 10 with summarized
+# overflow), recount every scalar the outcomes gate on (LLM math is never
+# trusted), and emit the final YAML report artifact. The praxec law applied:
+# verification EARNED from evidence, never ASSERTED.
+version: "1.0.0"
+scripts:
+  audit.completeness.report:
+    verb: audit
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env python3
+      # audit.completeness.report — deterministic evidence recount + report emit.
+      # The praxec law: verification is EARNED from evidence, never ASSERTED. The
+      # LLM validation gate SUBMITS findings; this script independently re-verifies
+      # every finding's verbatim evidence against the actual file on disk, enforces
+      # the contract's output limits in CODE, recounts all scalars, and emits the
+      # final YAML report. A finding whose evidence does not appear verbatim in the
+      # cited file is REJECTED (visibly — never silently dropped), and the
+      # `evidence_clean` outcome gates on unverified_count == 0.
+      #
+      # argv: $1 findings (JSON array, or @/path/to/findings.json)
+      #       $2 executive_summary (JSON object)   $3 action_plan (JSON array)
+      #       $4 sampling_manifest (JSON object)   $5 repo_path   $6 report_path
+      #       $7 discovery_summary (JSON object; optional)
+      # stdout: JSON {report_emitted, report_path, total_submitted, verified,
+      #         unverified_count, kept, overflow, by_severity}. Exit 0 always —
+      #         verdicts are data, not exit codes.
+      import json
+      import os
+      import sys
+
+      LIMITS = {"CRITICAL": None, "HIGH": 20, "MEDIUM": 15, "LOW": 10}
+      SEV_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+
+
+      def arg(i, default):
+          v = sys.argv[i] if len(sys.argv) > i else ""
+          if not v or v == "null":
+              return default
+          if v.startswith("@"):
+              try:
+                  v = open(v[1:]).read()
+              except OSError as e:
+                  return {"_arg_error": str(e)}
+          try:
+              return json.loads(v)
+          except ValueError:
+              return {"_arg_error": "not JSON: %s" % v[:120]}
+
+
+      def fail(reason):
+          print(json.dumps({"report_emitted": False, "error": reason,
+                            "unverified_count": -1, "verified": 0, "kept": 0,
+                            "total_submitted": -1, "overflow": {}, "by_severity": {}}))
+          sys.exit(0)
+
+
+      def normalize(text):
+          return "\n".join(ln.rstrip() for ln in text.replace("\r\n", "\n").split("\n"))
+
+
+      def verify_evidence(repo, finding):
+          loc = finding.get("location") or {}
+          rel = (loc.get("file") or "").replace("\\", "/").lstrip("./")
+          evidence = finding.get("evidence") or ""
+          if not rel or not evidence:
+              return False, "missing location.file or evidence", None
+          path = os.path.join(repo, rel)
+          if not os.path.isfile(path):
+              return False, "file not found: %s" % rel, None
+          try:
+              content = open(path, "r", errors="replace").read()
+          except OSError as e:
+              return False, "unreadable: %s" % e, None
+          if evidence in content:
+              return True, None, "exact"
+          if normalize(evidence) in normalize(content):
+              return True, None, "eol-normalized"
+          ev_stripped = [ln.strip() for ln in evidence.replace("\r\n", "\n").split("\n") if ln.strip()]
+          file_stripped = [ln.strip() for ln in content.replace("\r\n", "\n").split("\n")]
+          n = len(ev_stripped)
+          if n and any(file_stripped[i:i + n] == ev_stripped
+                       for i in range(max(0, len(file_stripped) - n + 1))):
+              return True, None, "whitespace-normalized"
+          return False, "evidence not found verbatim in %s" % rel, None
+
+
+      def main():
+          findings = arg(1, [])
+          exec_summary = arg(2, {})
+          action_plan = arg(3, [])
+          sampling = arg(4, {})
+          repo = sys.argv[5] if len(sys.argv) > 5 else ""
+          report_path = sys.argv[6] if len(sys.argv) > 6 else ""
+          discovery = arg(7, {})
+
+          for name, v in (("findings", findings), ("action_plan", action_plan)):
+              if not isinstance(v, list):
+                  fail("%s arg was not a JSON array (%s)" % (name, v))
+          if not isinstance(exec_summary, dict) or "_arg_error" in exec_summary:
+              fail("executive_summary arg was not a JSON object (%s)" % exec_summary)
+          if not repo or not os.path.isdir(repo):
+              fail("repo_path missing or not a directory: %s" % repo)
+          if not report_path:
+              fail("report_path missing")
+
+          verified, rejected = [], []
+          for f in findings:
+              if not isinstance(f, dict):
+                  rejected.append({"finding": f, "reason": "not an object"})
+                  continue
+              ok, reason, mode = verify_evidence(repo, f)
+              # Cross-file findings (DRY/SPLIT/…): every related_evidence entry is
+              # ALSO verbatim-verified against ITS file — the contract requires
+              # evidence from all involved files, so a fabricated counterpart
+              # quote rejects the whole finding.
+              rel_modes = []
+              if ok:
+                  for i, rel in enumerate(f.get("related_evidence") or []):
+                      if not isinstance(rel, dict):
+                          ok, reason = False, "related_evidence[%d] not an object" % i
+                          break
+                      rok, rreason, rmode = verify_evidence(
+                          repo, {"location": {"file": rel.get("file")},
+                                 "evidence": rel.get("evidence")})
+                      if not rok:
+                          ok, reason = False, "related_evidence[%d]: %s" % (i, rreason)
+                          break
+                      rel_modes.append(rmode)
+              if ok:
+                  f["evidence_verified"] = mode
+                  if rel_modes:
+                      f["related_evidence_verified"] = rel_modes
+                  verified.append(f)
+              else:
+                  rejected.append({"id": f.get("id"), "summary": (f.get("analysis") or "")[:160],
+                                   "location": f.get("location"), "reason": reason})
+
+          # Output limits enforced in CODE (contract: CRITICAL unlimited; HIGH 20;
+          # MEDIUM 15; LOW 10; overflow summarized, never silently dropped).
+          def prio(f):
+              try:
+                  return -float(f.get("priority_score", 0))
+              except (TypeError, ValueError):
+                  return 0.0
+
+          kept, overflow = [], {}
+          for sev in SEV_ORDER:
+              group = sorted([f for f in verified if str(f.get("severity", "")).upper() == sev],
+                             key=lambda f: (prio(f), str(f.get("id"))))
+              cap = LIMITS[sev]
+              if cap is None or len(group) <= cap:
+                  kept.extend(group)
+              else:
+                  kept.extend(group[:cap])
+                  overflow[sev] = {"count": len(group) - cap,
+                                   "ids": [str(f.get("id")) for f in group[cap:]]}
+          unclassified = [f for f in verified
+                          if str(f.get("severity", "")).upper() not in SEV_ORDER]
+          for f in unclassified:
+              rejected.append({"id": f.get("id"), "location": f.get("location"),
+                               "reason": "invalid severity: %r" % f.get("severity")})
+
+          by_sev = {s: sum(1 for f in kept if str(f.get("severity", "")).upper() == s)
+                    for s in SEV_ORDER}
+          # Recounted scalars OVERRIDE whatever the LLM claimed (code computes math).
+          exec_summary = dict(exec_summary)
+          exec_summary["issue_counts"] = {
+              "critical": by_sev["CRITICAL"], "high": by_sev["HIGH"],
+              "medium": by_sev["MEDIUM"], "low": by_sev["LOW"],
+              "overflow_not_shown": sum(o["count"] for o in overflow.values()),
+              "rejected_evidence": len(rejected),
+              "source": "recounted-by-audit.completeness.report",
+          }
+
+          report = {
+              "schema": "completeness-audit/report/v1",
+              "executive_summary": exec_summary,
+              "findings": kept,
+              "overflow": overflow,
+              "rejected_findings": rejected,
+              "action_plan": action_plan,
+              "sampling_manifest": sampling,
+              "provenance": {
+                  "repo": repo,
+                  "git_sha": (discovery or {}).get("git_sha"),
+                  "tool_versions": (discovery or {}).get("tool_versions"),
+                  "config_digest": (discovery or {}).get("config_digest"),
+                  "detector_counts": ((discovery or {}).get("counts") or {}).get("by_detector"),
+                  "skipped_detectors": (discovery or {}).get("skipped"),
+                  "evidence_recount": "every kept finding re-verified verbatim on disk",
+              },
+          }
+          os.makedirs(os.path.dirname(os.path.abspath(report_path)) or ".", exist_ok=True)
+          try:
+              import yaml
+              with open(report_path, "w") as f:
+                  yaml.safe_dump(report, f, sort_keys=False, allow_unicode=True, width=110)
+          except ImportError:
+              with open(report_path, "w") as f:  # JSON is valid YAML 1.2
+                  json.dump(report, f, indent=2)
+
+          print(json.dumps({
+              "report_emitted": True, "report_path": os.path.abspath(report_path),
+              "total_submitted": len(findings), "verified": len(verified),
+              "unverified_count": len(rejected), "kept": len(kept),
+              "overflow": {k: v["count"] for k, v in overflow.items()},
+              "by_severity": by_sev,
+          }))
+
+
+      if __name__ == "__main__":
+          main()
+
