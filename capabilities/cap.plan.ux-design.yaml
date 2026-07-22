@@ -10,6 +10,8 @@
 workflows:
   cap.plan.ux-design:
     verb: plan
+    tags: [ux, jtbd, cognitive-science, hci, nielsen, design, heuristics, pressure-test]
+    aliases: [ux-design, jtbd-design, cognitive-ux-review]
     lifecycle: experimental
     description: >
       Design, evaluate, and pressure-test a human-facing experience through a
