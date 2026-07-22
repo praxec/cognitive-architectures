@@ -220,6 +220,7 @@ workflows:
       # Human signoff — direct actor:human gate (blocks the chain for a real
       # decision; the cap.gate.human-signoff wrapper does NOT block).
       awaiting_signoff:
+        goal: Sign off the greenfield MCP scaffold — approve the generated project or reject with rationale.
         transitions:
           signoff:
             target: signoff_received
