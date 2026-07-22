@@ -630,6 +630,7 @@ workflows:
 
       # Bounded → human scope review (no silent spin, no silent stop).
       needs_human:
+        goal: Review the stalled build loop's scope — approve continuation, rescope, or stop.
         transitions:
           review_scope:
             target: done
