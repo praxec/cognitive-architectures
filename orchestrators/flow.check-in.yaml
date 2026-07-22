@@ -297,6 +297,7 @@ workflows:
       # repo state preserved (in-progress merge kept for inspection). The
       # operator finishes/aborts manually, then acknowledges to close out.
       needs_human:
+        goal: Acknowledge the check-in — review the summary and clear the gate to continue.
         transitions:
           acknowledge:
             target: done

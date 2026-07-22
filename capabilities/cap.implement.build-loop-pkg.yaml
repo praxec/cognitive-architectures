@@ -283,6 +283,7 @@ workflows:
       # Bounded → surface to a human for scope review (no silent spin, no silent
       # stop). The operator decides: expand scope, accept, or abort.
       needs_human:
+        goal: Review the stalled package build loop's scope — approve continuation, rescope, or stop.
         transitions:
           review_scope:
             target: done
