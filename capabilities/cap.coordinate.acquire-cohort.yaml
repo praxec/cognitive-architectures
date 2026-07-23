@@ -30,8 +30,12 @@ workflows:
         # or blocked), so a state-machine driver can guard on it.
         exhausted:      { type: boolean }
         # The leased deliverable's build spec (rides in plan-graph metadata).
-        spec:           { type: object }
-        deliverable_id: { type: string }
+        # Both are null on exhaustion (the map comment below: "When exhausted
+        # these coalesce to null") — nullable so a fully-complete plan is a
+        # legal empty result, not a contract violation (same lesson as the
+        # sibling cap.coordinate.cpm-acquire-indexed d*_id/d*_spec outputs).
+        spec:           { type: [object, "null"] }
+        deliverable_id: { type: [string, "null"] }
     # max_count is fixed at 1 (one ready deliverable per acquire); bound by path
     # in the mcp map (which is not slot-table-checked).
     initialContext:
