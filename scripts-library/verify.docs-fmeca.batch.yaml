@@ -1,0 +1,143 @@
+version: "1.0.0"
+scripts:
+  verify.docs-fmeca.batch:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env python3
+      # Deterministic fan-in re-materializer for flow.review.docs-fmeca.
+      #
+      # The flow accumulates each item's submissions into concat string
+      # logs (sequences of JSON arrays separated by whitespace). This
+      # script parses those streams (tolerant raw_decode scan — one bad
+      # segment cannot sink the pass), then:
+      #   1. builds the ANALYZE-CLEAN failure-mode batch: only the fields
+      #      fmeca-mcp `analyze` documents (id/component/description/
+      #      cause/effect/domain/observations/mitigations) — the
+      #      role_lens / failure_class carriage fields are moved to the
+      #      lens_index (fmeca-mcp is the org's engine; we hand it its
+      #      exact contract, not our superset);
+      #   2. PARTITIONS rows whose observation ids are not in the fetched
+      #      scoring catalog into `unscored` — they would hard-fail the
+      #      whole analyze call (INVALID_OBSERVATION) mid-run otherwise.
+      #      Partitioned, not dropped: they surface in the report as
+      #      unscored rows (honest floor);
+      #   3. dedupes/uniquifies failure-mode ids (analyze joins by id);
+      #   4. re-materializes the probe list and script-organization rows.
+      #
+      # Arg $1 = fmeca_log (concat string of failure-mode arrays; spill
+      #          contract honored via arg()).
+      # Arg $2 = probe_log (concat string of probe arrays).
+      # Arg $3 = script_org_log (concat string of assessment arrays).
+      # Arg $4 = fmeca_catalog (the scoring.catalog response object).
+      # Stdout: {"fmeca_batch": [...], "lens_index": {id: {...}},
+      #          "probes": [...], "script_org": [...],
+      #          "unscored_rows": [...], "unscored_count": N}
+      import json, os, sys
+
+      ANALYZE_FIELDS = ("id", "component", "description", "cause", "effect",
+                        "domain", "scope", "severity_observations",
+                        "probability_observations", "mitigations")
+      MITIGATION_FIELDS = ("id", "kind", "description",
+                           "residual_severity_observations",
+                           "residual_probability_observations")
+
+      def arg(i, default=""):
+          v = sys.argv[i] if len(sys.argv) > i else default
+          spilled = json.loads(os.environ.get("PRAXEC_SPILLED_ARGS", "[]"))
+          if (i - 1) in spilled and isinstance(v, str) and v.startswith("@argfile:"):
+              with open(v[len("@argfile:"):]) as f:
+                  return f.read()
+          return v
+
+      def scan(raw):
+          dec = json.JSONDecoder()
+          items, i, n = [], 0, len(raw)
+          while i < n:
+              while i < n and raw[i] in " \t\r\n":
+                  i += 1
+              if i >= n:
+                  break
+              try:
+                  obj, end = dec.raw_decode(raw, i)
+                  i = end
+                  if isinstance(obj, list):
+                      items.extend(x for x in obj if isinstance(x, dict))
+                  elif isinstance(obj, dict):
+                      items.append(obj)
+              except ValueError:
+                  i += 1
+          return items
+
+      rows = scan(arg(1, ""))
+      probes = scan(arg(2, ""))
+      org_rows = scan(arg(3, ""))
+      raw_catalog = arg(4, "{}")
+      try:
+          catalog = json.loads(raw_catalog) if isinstance(raw_catalog, str) else raw_catalog
+      except ValueError:
+          catalog = {}
+
+      # Collect every legal observation id from the catalog response
+      # (shape-tolerant: any list of {id: ...} anywhere under it).
+      def collect_ids(node, out):
+          if isinstance(node, dict):
+              cid = node.get("id")
+              if isinstance(cid, str) and ("axis" in node or "level" in node
+                                           or "description" in node):
+                  out.add(cid)
+              for v in node.values():
+                  collect_ids(v, out)
+          elif isinstance(node, list):
+              for v in node:
+                  collect_ids(v, out)
+
+      legal_ids = set()
+      collect_ids(catalog, legal_ids)
+
+      batch, lens_index, unscored, seen_ids = [], {}, [], set()
+      for row in rows:
+          rid = str(row.get("id") or f"fm-{len(seen_ids) + len(unscored) + 1}")
+          base = rid
+          n = 2
+          while rid in seen_ids:
+              rid = f"{base}--{n}"
+              n += 1
+          seen_ids.add(rid)
+          row = dict(row, id=rid)
+
+          lens_index[rid] = {
+              "role_lens": row.get("role_lens", ""),
+              "failure_class": row.get("failure_class", ""),
+              "item": (row.get("component") or {}).get("id", ""),
+              "description": row.get("description", ""),
+              "cause": row.get("cause", ""),
+              "effect": row.get("effect", ""),
+              "mitigations": row.get("mitigations", []),
+          }
+
+          obs = [o for o in (row.get("severity_observations") or [])
+                 + (row.get("probability_observations") or [])
+                 if isinstance(o, str)]
+          if legal_ids and any(o not in legal_ids for o in obs):
+              unscored.append(dict(row, unscored_reason=(
+                  "observation id(s) outside the scoring catalog: "
+                  + ", ".join(sorted(o for o in obs if o not in legal_ids)))))
+              continue
+
+          clean = {k: row[k] for k in ANALYZE_FIELDS if k in row}
+          clean["mitigations"] = [
+              {k: m[k] for k in MITIGATION_FIELDS if k in m}
+              for m in (row.get("mitigations") or []) if isinstance(m, dict)
+          ]
+          batch.append(clean)
+
+      print(json.dumps({
+          "fmeca_batch": batch,
+          "lens_index": lens_index,
+          "probes": probes,
+          "script_org": org_rows,
+          "unscored_rows": unscored,
+          "unscored_count": len(unscored),
+      }))

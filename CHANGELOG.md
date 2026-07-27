@@ -28,6 +28,29 @@ The library is pre-1.0 (`0.0.x`) and not yet publicly released.
   `cap.inspect.repo-digest`, `cap.review.doc-drift`, the
   `audit.drift.aggregate` script, and the `connections/corpus.yaml` reference
   connection.
+- **`flow.review.docs-fmeca`** — docs × role-lens × FMECA review composing
+  three org MCP engines: `fmeca-mcp` (`scoring.catalog` + `analyze` — the
+  reviewers pick observation ids, the engine computes criticality/residual/
+  standing/risk_ranking), `structureos` (the scripts-organization evidence
+  scan), and `markdown-administrator` (`outline` / `read_section` structured
+  doc navigation). A deterministic inventory enumerates the docs + scripts
+  (empty inventory fails loud), a per-item loop reviews each through every
+  role lens (local-dev/new-hire, devops/deploy, on-call/SRE, security,
+  contributor by default), and a RUNNABLE-VERIFICATION gate executes the
+  safe-classified probes (behind a destructive-command denylist, timeout,
+  and path jail — destructive probes are flagged, never run; a vetoed
+  "safe" probe counts unevaluated, not passed). The rollup joins the
+  computed risk ranking with the probe exit-code evidence into a ranked
+  remediation checklist. Agent leaves bind `affinity: review` +
+  `reasoning_effort: medium`; `docs/docs-fmeca.models.yaml` ships an
+  effort-safe, commodity-led chain (every member advertises low AND
+  medium) so no fallback depth can hit REASONING_EFFORT_UNSUPPORTED (the
+  flow.qa.explore charter failure). Ships with the
+  `inspect.docs-fmeca.inventory` / `inspect.docs-fmeca.next` /
+  `verify.docs-fmeca.batch` / `run.docs-fmeca.probes` /
+  `audit.docs-fmeca.aggregate` scripts, the `review.docs-fmeca.method`
+  skill, the `connections/markdown-administrator.yaml` reference
+  connection, and `examples/docs-fmeca-run.yaml`.
 - **`cap.plan.brainstorm`** — divergent-thinking primitive that generates
   genuinely-different candidate options for any goal, each with explicit
   assumptions, tradeoffs (as an array, not a string — countable for downstream

@@ -1,0 +1,102 @@
+# examples/docs-fmeca-run.yaml
+#
+# Minimal gateway config that DRIVES cognitive/flow.review.docs-fmeca live —
+# the concrete answer to "what do I need to run the docs × role-lens × FMECA
+# review?":
+#
+#   1. a durable store (sqlite) so state persists across calls;
+#   2. a model binding whose `review` chain is EFFORT-SAFE: the flow's agent
+#      leaves declare `reasoning_effort: medium`, and the engine hard-fails
+#      any step whose selected model does not advertise the requested level
+#      (the flow.qa.explore charter failure: deepseek-v4-pro advertises only
+#      none|high). docs/docs-fmeca.models.yaml ships a chain whose EVERY
+#      member advertises low AND medium — copy it, or merge its `review`
+#      chain into your own models_yaml. models_yaml resolution: point it at
+#      that file with an ABSOLUTE path for your machine (the placeholder
+#      below assumes the default checkout location);
+#   3. the three MCP engines this flow composes (all org tools, all
+#      cargo-installable):
+#        fmeca-mcp              -> scoring.catalog + analyze (computed
+#                                  criticality — the FMECA gate)
+#        structureos            -> the scripts-organization evidence scan;
+#                                  point STRUCTUREOS_WORKSPACE_ROOT at the
+#                                  TARGET repo (the server does not inherit
+#                                  the run's repo_root)
+#        markdown-administrator -> outline / read_section (structured doc
+#                                  navigation for the doc-review leaf)
+#   4. auto_drive ON — markdown-administrator rides into the doc leaf via
+#      the flow's per-state `tools:`, the file root via auto_drive_tools;
+#   5. this repo, which supplies the flow + its scripts and skill;
+#   6. a writable repo root: the TARGET repo under review (the flow's
+#      inventory/probe scripts run from `$.run.repo_root`).
+#
+# Validate:
+#   praxec check --config examples/docs-fmeca-run.yaml
+#
+# Drive (headless, to the criticality_computed + probes_all_evaluated
+# outcomes):
+#   set -a; . ~/.config/praxec/providers.env; set +a
+#   praxec orchestrate --config examples/docs-fmeca-run.yaml \
+#     --model openrouter:anthropic/claude-sonnet-4-6 \
+#     --definition cognitive/flow.review.docs-fmeca \
+#     --input '{"max_items": 8}'
+#
+# SAFETY NOTE: the probe runner executes safe-classified probes INSIDE the
+# target repo (behind its destructive-command denylist, timeout, and path
+# jail — installs/deletes/pushes are always vetoed). Run against a
+# checkout you could afford to rebuild, not your only copy of anything.
+
+version: "1.0.0"
+
+gateway:
+  principal: { subject: operator, roles: [human] }
+  # An effort-safe chain (see docs/docs-fmeca.models.yaml). ADJUST to your
+  # checkout's absolute path, or merge that file's `review` chain into
+  # your own models_yaml.
+  models_yaml: docs/docs-fmeca.models.yaml
+
+praxec:
+  embeddings:
+    enabled: false
+  agents:
+    auto_drive: true
+    auto_drive_affinity: review
+    auto_drive_max_seconds: 900
+    auto_drive_tools:
+      - "file:{{ $.run.repo_root }}"
+  _writableRepos:
+    - root: "."          # the TARGET repo under review (adjust)
+      push: false
+
+audit:
+  sink: stderr
+
+store:
+  kind: sqlite
+  path: /home/mc/.local/share/praxec/docs-fmeca-run.db
+
+# The three org MCP engines the flow composes. All stdio binaries:
+#   cargo install --path <repo> (fmeca/crates/fmeca-mcp, structureos,
+#   markdown-administrator). References: connections/fmeca-mcp.yaml,
+#   connections/structureos.yaml, connections/markdown-administrator.yaml.
+connections:
+  fmeca-mcp:
+    kind: mcp
+    command: fmeca-mcp
+  structureos:
+    kind: mcp
+    command: structureos-mcp
+    env:
+      # The server scans THIS root — set it to the TARGET repo's absolute
+      # path (it does not inherit the run's repo_root).
+      STRUCTUREOS_WORKSPACE_ROOT: .
+  markdown-administrator:
+    kind: mcp
+    command: markdown-administrator
+
+# The cognitive-architectures resource repo: flow.review.docs-fmeca + its
+# scripts (inspect.docs-fmeca.*, verify.docs-fmeca.batch,
+# run.docs-fmeca.probes, audit.docs-fmeca.aggregate) and the
+# review.docs-fmeca.method skill.
+repos:
+  - path: ..

@@ -1,0 +1,657 @@
+# orchestrators/flow.review.docs-fmeca.yaml
+#
+# DOCS × ROLE-LENS × FMECA — review a repo's documentation AND its scripts
+# from multiple role perspectives, score every failure mode through the
+# DETERMINISTIC fmeca-mcp engine (never an LLM number), verify the
+# executable claims by ACTUALLY RUNNING the safe ones, and emit a
+# code-computed, criticality-ranked remediation report.
+#
+#   structure_scanning → structureos MCP: one deterministic structural scan
+#                        of the repo — the evidence base for the
+#                        script-organization lens (entry-point vs internal,
+#                        redundancy, dead scripts).
+#   catalog_fetching   → fmeca-mcp `scoring.catalog`: the FIXED observation
+#                        vocabulary. Agents pick observation IDS from it —
+#                        never a score (the cap.review.fmeca split).
+#   inventorying       → deterministic inventory of the docs (*.md) and
+#                        scripts under the run's repo_root — the review
+#                        queue is code-enumerated, not agent-asserted, and
+#                        an EMPTY inventory fails loudly (a docs review of
+#                        zero docs is a misconfiguration, not a clean pass).
+#   per-item loop      → advance (script pop) → item_gate → one agent leaf
+#                        per item. Docs get a deterministic
+#                        markdown-administrator `outline` first (structured
+#                        navigation, no hand-rolled markdown parsing) and a
+#                        reviewing_doc leaf with read_section + file tools;
+#                        scripts get a reviewing_script leaf with file tools
+#                        + the structureos scan text. Each leaf walks EVERY
+#                        role lens for its ONE item and submits:
+#                          - failure_modes[] in fmeca-analyze shape
+#                            (observations = catalog ids, mitigations =
+#                            the concrete doc/script fix),
+#                          - probes[] (runnable-verification proposals with
+#                            an explicit danger classification — agents
+#                            NEVER execute anything themselves),
+#                          - (scripts only) script_assessments[] for the
+#                            organization lens.
+#                        Submissions fold into concat logs; the loop
+#                        re-enters advancing (the cap.review.ux-matrix-scan
+#                        queue/pop shape — no cpm-planner needed).
+#   batching           → deterministic re-materialization of the concat
+#                        logs: analyze-clean failure-mode rows (unknown
+#                        catalog ids are PARTITIONED OUT as `unscored`,
+#                        never silently dropped or laundered into the
+#                        scored set), a lens index (id → role_lens/item),
+#                        the probe list, and the script-organization rows.
+#   analyzing          → fmeca-mcp `analyze`: criticality, residual,
+#                        standing, response_class, risk_ranking, ready —
+#                        ALL code-computed. The model cannot hallucinate a
+#                        score; it only supplied observations.
+#   probing            → THE RUNNABLE-VERIFICATION GATE (the
+#                        flow.qa.explore reproduction-gate pattern, adapted
+#                        to shell probes): a deterministic script executes
+#                        ONLY probes the agent classified `safe` AND that
+#                        pass its own destructive-command denylist (defense
+#                        in depth — the agent's classification is never
+#                        trusted alone), each under a timeout, cwd pinned
+#                        inside repo_root. Exit codes are the evidence.
+#                        Destructive probes are flagged, NEVER run; a
+#                        safe-classified probe the denylist vetoes counts
+#                        as UNEVALUATED (honest floor), not as a pass.
+#   aggregating        → code-computed rollup: findings joined to the
+#                        fmeca risk_ranking, probe evidence attached, the
+#                        remediation checklist ordered by computed
+#                        criticality, script-organization section, and the
+#                        scalars the outcomes gate on.
+#
+# MODEL + EFFORT BINDING (read before running — the flow.qa.explore
+# charter lesson): both agent leaves declare `affinity: review` +
+# `reasoning_effort: medium` (the per-state knob, praxec 0.0.27+; older
+# engines ignore the key and fall back to the gateway default `low`).
+# The engine HARD-FAILS an agent step whose selected model does not
+# advertise the requested effort level — deepseek-v4-pro, for example,
+# advertises only `none|high`, so ANY chain that can fall back to it dies
+# with REASONING_EFFORT_UNSUPPORTED at the first agent step. Bind the
+# `review` affinity to a chain whose EVERY member advertises the effort
+# you request (docs/docs-fmeca.models.yaml ships a known-good chain:
+# anthropic/claude-sonnet-4-6 → z-ai/glm-5.2 → moonshotai/kimi-k2.6, all
+# of which advertise low AND medium — safe under this flow's `medium` and
+# under the gateway default `low` alike). See examples/docs-fmeca-run.yaml.
+#
+# Requires: connections `fmeca-mcp` (scoring.catalog + analyze),
+# `structureos` (point STRUCTUREOS_WORKSPACE_ROOT at the TARGET repo), and
+# `markdown-administrator` (outline / read_section); scripts
+# inspect.docs-fmeca.inventory, inspect.docs-fmeca.next,
+# verify.docs-fmeca.batch, run.docs-fmeca.probes,
+# audit.docs-fmeca.aggregate; skill review.docs-fmeca.method; a gateway
+# with auto_drive ON and a per-member effort-safe `review` chain (above).
+#
+# MCP OUTPUT SHAPES (live-verified conventions, do not "simplify"):
+#   - fmeca-mcp returns STRUCTURED results → bind `$.output.<field>`
+#     directly (the cap.review.fmeca precedent).
+#   - structureos + markdown-administrator return plain MCP text content →
+#     `$.output` is `{"content":[{"type":"text","text":"<json>"}]}`; bind
+#     `$.output.content.0.text` and treat it as an opaque string for the
+#     agent (the frontrails T2.5 finding — `$.output.<field>` on these
+#     servers ALWAYS resolves null).
+
+workflows:
+  flow.review.docs-fmeca:
+    lifecycle: experimental
+    tags: [docs, review, fmeca, role-lens, runnable-verification, governed]
+    aliases: [docs-fmeca, docs-review-fmeca]
+    description: >
+      Docs × role-lens × FMECA review: deterministically inventory a repo's
+      documentation and scripts, review each item through every role lens
+      (local-dev/new-hire, devops/deploy, on-call/SRE, security,
+      contributor by default), score the failure modes through the
+      deterministic fmeca-mcp engine (observations in, computed
+      criticality out), execute the safe runnable probes as evidence
+      (destructive ones are flagged, never run), and aggregate a
+      code-computed, criticality-ranked remediation report.
+
+    inputs:
+      # The role perspectives every item is reviewed through. Free strings;
+      # the default five cover the doc-consumer cast.
+      role_lenses:
+        type: array
+        default: [local-dev-new-hire, devops-deploy, oncall-sre, security, contributor]
+      # Optional fnmatch globs (posix-relative) narrowing the inventory,
+      # e.g. ["Docs/handbook/**", "*.md", "scripts/**"]. Empty = the
+      # inventory script's built-in doc+script classification.
+      doc_globs:  { type: array,   default: [] }
+      # Review budget: the queue is capped here, scripts reserved ~1/3.
+      max_items:  { type: integer, default: 12 }
+      # fmeca-mcp criticality matrix selection.
+      matrix_strategy: { type: string, enum: [qualitative3x3, nasa8004_5x5], default: qualitative3x3 }
+
+    outputs:
+      docs_fmeca_report:      { type: object }
+      remediation_checklist:  { type: array }
+      items_reviewed:         { type: integer }
+      fm_total:               { type: integer }
+      probe_break_count:      { type: integer }
+      probe_unevaluated_count: { type: integer }
+      fmeca_ready:            { type: boolean }
+
+    # Seed EVERY declared output + accumulator (V24): gates can route past
+    # the writers and the halted terminal must still resolve them. The -1
+    # floors are HONEST: a run that never reached analysis/probing/rollup
+    # must not read as "0 failure modes / all probes evaluated".
+    initialContext:
+      items_reviewed: 0
+      fmeca_log: ""
+      probe_log: ""
+      script_org_log: ""
+      structure_text: ""
+      outline_text: ""
+      fm_total: -1
+      probe_break_count: -1
+      probe_unevaluated_count: -1
+      fmeca_ready: false
+      docs_fmeca_report: {}
+      remediation_checklist: []
+      # `kind: mcp` map literals bind by path (the frontrails precedent) —
+      # seed the structureos action + empty params here.
+      act_scan: "scan_repo"
+      empty_params: {}
+
+    outcomes:
+      - id: criticality_computed
+        statement: >
+          Every reviewed failure mode reached the deterministic fmeca-mcp
+          analyze gate and the rollup recomputed the totals in code —
+          fm_total is a code-side count (>= 0), not an LLM assertion. A
+          run that halted before analysis stays on the -1 floor and does
+          NOT meet this outcome.
+        check: "$.context.fm_total >= 0"
+      - id: probes_all_evaluated
+        statement: >
+          Every probe the reviewers classified safe was actually executed
+          by the deterministic probe runner (none vetoed by the denylist,
+          none skipped) — probe_unevaluated_count == 0, computed in code.
+          Paired with criticality_computed this separates "the documented
+          steps work" from "we could not try them".
+        check: "$.context.probe_unevaluated_count == 0"
+
+    initialState: seeding
+
+    states:
+
+      # Seed guard/script-read configuration into context (guards and
+      # per-item scripts need context slots, not inputs — the
+      # flow.drive-program seeding rationale).
+      seeding:
+        goal: Seed the role lenses, budget, and matrix strategy into context.
+        transitions:
+          seed:
+            target: structure_scanning
+            actor: deterministic
+            executor: { kind: noop }
+            output:
+              role_lenses:     "$.workflow.input.role_lenses"
+              doc_globs:       "$.workflow.input.doc_globs"
+              max_items:       "$.workflow.input.max_items"
+              matrix_strategy: "$.workflow.input.matrix_strategy"
+
+      # ── DETERMINISTIC EVIDENCE BASE ──────────────────────────────────────
+      # One structureos scan up front: structural facts (size outliers,
+      # complexity, layout) that ground the script-organization lens.
+      # structureos returns TEXT content — pull content.0.text (see header).
+      structure_scanning:
+        goal: Scan the repo's structure (structureos) as evidence for the organization lens.
+        transitions:
+          scan:
+            target: catalog_fetching
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: structureos
+              tool: structureos
+              map:
+                action: "$.context.act_scan"
+                params: "$.context.empty_params"
+            output:
+              structure_text: "$.output.content.0.text"
+
+      # The FIXED observation vocabulary for the selected matrix strategy.
+      # Reviewers pick ids from THIS catalog — never a score; fmeca-mcp
+      # derives every level (the cap.review.fmeca separation of concerns).
+      catalog_fetching:
+        goal: Fetch the fmeca-mcp scoring catalog (the fixed observation vocabulary).
+        transitions:
+          fetch:
+            target: inventorying
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: fmeca-mcp
+              tool: scoring.catalog
+              map:
+                matrix_strategy: "$.context.matrix_strategy"
+            output:
+              fmeca_catalog: "$.output"
+
+      # Code-enumerated review queue: docs + scripts under repo_root,
+      # classified and capped deterministically (scripts reserved ~1/3 of
+      # the budget). FAILS LOUDLY on an empty inventory — the silent
+      # false negative (an empty-but-"clean" report) is the one result
+      # this flow exists to never produce.
+      inventorying:
+        goal: Inventory the docs and scripts; build the capped review queue.
+        transitions:
+          inventory:
+            target: advancing
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.docs-fmeca.inventory
+              args:
+                - "$.context.doc_globs"
+                - "$.context.max_items"
+            output:
+              review_queue: "$.output.json.queue"
+              queue_count:  "$.output.json.queue_count"
+              item_index:   "$.output.json.index"
+              doc_count:    "$.output.json.doc_count"
+              script_count: "$.output.json.script_count"
+
+      # ── THE PER-ITEM LOOP: advance → gate → (outline?) → review → loop ──
+      advancing:
+        goal: Pop the next item off the review queue (or detect exhaustion).
+        transitions:
+          advance:
+            target: item_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.docs-fmeca.next
+              args:
+                - "$.context.review_queue"
+                - "$.context.item_index"
+            output:
+              queue_exhausted: "$.output.json.exhausted"
+              current_item:    "$.output.json.item"
+              item_index:      "$.output.json.next_index"
+
+      # BRANCH on the scalar exhaustion flag ONLY (the item-kind read lives
+      # in kind_gate, reached exclusively when an item exists — the
+      # flow.ux.optimize cell_gate/principle_gate split, which keeps a null
+      # current_item from ever feeding an object-field guard). Exhaustion
+      # is only a legitimate fan-in when at least one item was reviewed
+      # (exhausted-on-arrival = a wiring bug; the inventory already refuses
+      # an empty queue, so this arm is a belt-and-braces V23 guard). An
+      # out-of-domain flag halts loudly, never silently finishes.
+      item_gate:
+        transitions:
+          route_item:
+            target: kind_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.queue_exhausted == false" }
+          fan_in:
+            target: batching
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.queue_exhausted == true" }
+              - { kind: expr, expr: "$.context.items_reviewed >= 1" }
+          exhausted_on_arrival:
+            target: halted
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.queue_exhausted == true" }
+              - { kind: expr, expr: "$.context.items_reviewed == 0" }
+          unexpected_flag:
+            target: halted
+            actor: deterministic
+
+      # THE ITEM ROUTER — mutually exclusive over the popped item's kind
+      # (guaranteed doc|script by inspect.docs-fmeca.next's own validation —
+      # the producing gate). Default (V23): an out-of-domain kind halts
+      # loudly, never mis-routes.
+      kind_gate:
+        transitions:
+          to_doc:
+            target: outlining
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.current_item.kind == 'doc'" }
+          to_script:
+            target: reviewing_script
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.current_item.kind == 'script'" }
+          unexpected_kind:
+            target: halted
+            actor: deterministic
+
+      # Deterministic markdown navigation for the CURRENT doc: the
+      # markdown-administrator `outline` tool (headings + heading_paths) —
+      # structured parsing, not agent regex. Text content → content.0.text.
+      outlining:
+        goal: Outline the current markdown doc (markdown-administrator).
+        transitions:
+          outline:
+            target: reviewing_doc
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: markdown-administrator
+              tool: outline
+              map:
+                doc: "$.context.current_item.abs_path"
+            output:
+              outline_text: "$.output.content.0.text"
+
+      # Agent leaf 1: review ONE doc through EVERY role lens. The reviewer
+      # reads sections via markdown-administrator (read_section) and the
+      # file tools, proposes probes for every executable claim, and submits
+      # fmeca-shaped failure modes whose observations are catalog IDS. The
+      # submission folds into the concat logs; the loop re-enters advancing.
+      reviewing_doc:
+        affinity: review
+        reasoning_effort: medium
+        goal: >
+          Review ONE documentation file through EVERY role lens — nothing
+          else. Read $.context.current_item (id, path, abs_path, kind) and
+          $.context.outline_text (the computed heading outline). Read the
+          doc's actual content via your markdown-administrator tools
+          (outline / read_section with doc = the item's abs_path) and your
+          file tools; read any file the doc references to check the claim
+          against reality. For EACH role lens in $.context.role_lenses,
+          apply your loaded review.docs-fmeca.method skill: what does THIS
+          role need from THIS doc, and where does it fail them (misreads /
+          cannot-run / cannot-find / missing-step / outdated / unsafe)?
+          Submit `failure_modes` (fmeca analyze shape: component.id = the
+          item path; severity_observations + probability_observations are
+          IDS from $.context.fmeca_catalog — NEVER a score; every failure
+          mode carries at least one mitigation whose description is the
+          CONCRETE doc fix) and `probes` (one per executable claim:
+          command, cwd, danger classification, expectation — you NEVER
+          execute anything yourself; classify honestly, destructive
+          commands are flagged not run). An empty failure_modes array for
+          a genuinely clean doc is a legal, honest result — never pad.
+        skills: [review.docs-fmeca.method]
+        tools: ["markdown-administrator", "file:{{ $.run.repo_root }}"]
+        transitions:
+          submit_review:
+            target: advancing
+            actor: agent
+            inputSchema:
+              type: object
+              required: [failure_modes, probes]
+              properties:
+                failure_modes:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, component, description, cause, effect, domain, role_lens, failure_class, severity_observations, probability_observations, mitigations]
+                    properties:
+                      id:          { type: string }
+                      component:
+                        type: object
+                        required: [id]
+                        properties:
+                          id: { type: string }
+                      description: { type: string }
+                      cause:       { type: string }
+                      effect:      { type: string }
+                      domain:      { type: string, enum: [ux, runtime, architecture, delivery] }
+                      role_lens:   { type: string }
+                      failure_class: { type: string, enum: [misreads, cannot-run, cannot-find, missing-step, outdated, unsafe] }
+                      severity_observations:    { type: array, minItems: 1, items: { type: string } }
+                      probability_observations: { type: array, minItems: 1, items: { type: string } }
+                      mitigations:
+                        type: array
+                        minItems: 1
+                        items:
+                          type: object
+                          required: [id, kind, description]
+                          properties:
+                            id:          { type: string }
+                            kind:        { type: string, enum: [prevention, detection, fail_fast] }
+                            description: { type: string }
+                probes:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, item, command, danger, expectation]
+                    properties:
+                      id:          { type: string }
+                      fm_id:       { type: string }
+                      item:        { type: string }
+                      command:     { type: string }
+                      cwd:         { type: string }
+                      danger:      { type: string, enum: [safe, destructive, not_executable] }
+                      expectation: { type: string }
+            executor: { kind: noop }
+            output:
+              fmeca_log:
+                concat:
+                  - "$.context.fmeca_log"
+                  - "$.arguments.failure_modes"
+                  - "\n"
+              probe_log:
+                concat:
+                  - "$.context.probe_log"
+                  - "$.arguments.probes"
+                  - "\n"
+              items_reviewed: { add: ["$.context.items_reviewed", 1] }
+
+      # Agent leaf 2: review ONE script through every role lens PLUS the
+      # organization lens (purpose, entry-point vs internal-only,
+      # discoverability, redundancy, danger level) — grounded in the
+      # structureos scan and the script's real source. NEVER executes.
+      reviewing_script:
+        affinity: review
+        reasoning_effort: medium
+        goal: >
+          Review ONE script — nothing else, and NEVER execute it. Read
+          $.context.current_item (id, path, abs_path, kind) and the
+          script's real source via your file tools; use
+          $.context.structure_text (the structureos scan) as structural
+          evidence. Apply your loaded review.docs-fmeca.method skill: (1)
+          for EACH role lens in $.context.role_lenses, where does this
+          script fail that role (cannot-run / cannot-find / missing-step /
+          outdated / unsafe — e.g. undocumented prerequisites, hardcoded
+          paths, silent destructive operations)? Submit `failure_modes`
+          (fmeca analyze shape; observations are IDS from
+          $.context.fmeca_catalog, never scores; every failure mode
+          carries a concrete mitigation). (2) Submit `script_assessments`
+          (exactly one entry, for THIS script): purpose, entry_point
+          (operator-facing true / internal-only false), discoverability,
+          redundancy (paths it duplicates, or empty), danger_level. (3)
+          Submit `probes` for its runnable claims (a --help / syntax-check
+          / dry-run flag probe where one exists); classify danger
+          honestly — a mutating or destructive script gets a flagged
+          probe, not an executed one. Empty failure_modes is legal for a
+          genuinely clean script — never pad.
+        skills: [review.docs-fmeca.method]
+        tools: ["file:{{ $.run.repo_root }}"]
+        transitions:
+          submit_review:
+            target: advancing
+            actor: agent
+            inputSchema:
+              type: object
+              required: [failure_modes, probes, script_assessments]
+              properties:
+                failure_modes:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, component, description, cause, effect, domain, role_lens, failure_class, severity_observations, probability_observations, mitigations]
+                    properties:
+                      id:          { type: string }
+                      component:
+                        type: object
+                        required: [id]
+                        properties:
+                          id: { type: string }
+                      description: { type: string }
+                      cause:       { type: string }
+                      effect:      { type: string }
+                      domain:      { type: string, enum: [ux, runtime, architecture, delivery] }
+                      role_lens:   { type: string }
+                      failure_class: { type: string, enum: [misreads, cannot-run, cannot-find, missing-step, outdated, unsafe] }
+                      severity_observations:    { type: array, minItems: 1, items: { type: string } }
+                      probability_observations: { type: array, minItems: 1, items: { type: string } }
+                      mitigations:
+                        type: array
+                        minItems: 1
+                        items:
+                          type: object
+                          required: [id, kind, description]
+                          properties:
+                            id:          { type: string }
+                            kind:        { type: string, enum: [prevention, detection, fail_fast] }
+                            description: { type: string }
+                probes:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, item, command, danger, expectation]
+                    properties:
+                      id:          { type: string }
+                      fm_id:       { type: string }
+                      item:        { type: string }
+                      command:     { type: string }
+                      cwd:         { type: string }
+                      danger:      { type: string, enum: [safe, destructive, not_executable] }
+                      expectation: { type: string }
+                script_assessments:
+                  type: array
+                  minItems: 1
+                  maxItems: 1
+                  items:
+                    type: object
+                    required: [path, purpose, entry_point, discoverability, redundancy, danger_level]
+                    properties:
+                      path:            { type: string }
+                      purpose:         { type: string }
+                      entry_point:     { type: boolean }
+                      discoverability: { type: string, enum: [discoverable, buried, undocumented] }
+                      redundancy:      { type: array, items: { type: string } }
+                      danger_level:    { type: string, enum: [safe, mutating, destructive] }
+            executor: { kind: noop }
+            output:
+              fmeca_log:
+                concat:
+                  - "$.context.fmeca_log"
+                  - "$.arguments.failure_modes"
+                  - "\n"
+              probe_log:
+                concat:
+                  - "$.context.probe_log"
+                  - "$.arguments.probes"
+                  - "\n"
+              script_org_log:
+                concat:
+                  - "$.context.script_org_log"
+                  - "$.arguments.script_assessments"
+                  - "\n"
+              items_reviewed: { add: ["$.context.items_reviewed", 1] }
+
+      # ── FAN-IN: deterministic re-materialization of the concat logs ─────
+      # Rows with observation ids OUTSIDE the catalog are partitioned into
+      # `unscored` (they'd hard-fail fmeca-mcp `analyze` mid-run otherwise)
+      # and surface in the report as unscored — never silently dropped and
+      # never laundered into the computed ranking.
+      batching:
+        goal: Re-materialize the concat logs into the analyze batch, lens index, probes, and org rows.
+        transitions:
+          batch:
+            target: analyzing
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.docs-fmeca.batch
+              args:
+                - "$.context.fmeca_log"
+                - "$.context.probe_log"
+                - "$.context.script_org_log"
+                - "$.context.fmeca_catalog"
+            output:
+              fmeca_batch:    "$.output.json.fmeca_batch"
+              lens_index:     "$.output.json.lens_index"
+              probes:         "$.output.json.probes"
+              script_org:     "$.output.json.script_org"
+              unscored_rows:  "$.output.json.unscored_rows"
+              unscored_count: "$.output.json.unscored_count"
+
+      # THE FMECA GATE — fmeca-mcp computes criticality/residual/standing/
+      # response_class/risk_ranking/ready from the enumerated observations.
+      # fmeca-mcp returns structured content → bind $.output directly.
+      analyzing:
+        goal: Compute the FMECA verdict (fmeca-mcp analyze) over the whole batch.
+        transitions:
+          analyze:
+            target: probing
+            actor: deterministic
+            executor:
+              kind: mcp
+              connection: fmeca-mcp
+              tool: analyze
+              map:
+                matrix_strategy: "$.context.matrix_strategy"
+                failure_modes:   "$.context.fmeca_batch"
+            output:
+              fmeca_report: "$.output"
+
+      # THE RUNNABLE-VERIFICATION GATE — code executes the safe probes and
+      # records exit codes as evidence (see header). Never a destructive
+      # command; never trusts the agent's `safe` label without the
+      # denylist; every non-executed safe probe counts as unevaluated.
+      probing:
+        goal: Execute the safe probes deterministically; record breaks as evidence.
+        transitions:
+          probe:
+            target: aggregating
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.docs-fmeca.probes
+              args:
+                - "$.context.probes"
+            output:
+              probe_results: "$.output.json.results"
+
+      # Code-computed rollup → the ranked report + the outcome scalars.
+      # Plain script-executor `output:` — LEFT-hand keys are BARE slot
+      # names (the flow.audit-docs GUARD_UNSET_SLOT trap).
+      aggregating:
+        goal: Aggregate the FMECA verdict, probe evidence, and org rows into the ranked report.
+        transitions:
+          aggregate:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: audit.docs-fmeca.aggregate
+              args:
+                - "$.context.fmeca_report"
+                - "$.context.lens_index"
+                - "$.context.probe_results"
+                - "$.context.script_org"
+                - "$.context.unscored_rows"
+            output:
+              docs_fmeca_report:       "$.output.json.report"
+              remediation_checklist:   "$.output.json.remediation_checklist"
+              fm_total:                "$.output.json.fm_total"
+              probe_break_count:       "$.output.json.probe_break_count"
+              probe_unevaluated_count: "$.output.json.probe_unevaluated_count"
+              fmeca_ready:             "$.output.json.fmeca_ready"
+
+      # Terminal: $.context.docs_fmeca_report is the full ranked report;
+      # fm_total / probe_unevaluated_count are the code-computed outcome
+      # scalars.
+      done:
+        terminal: true
+        outcome: success
+
+      # Loud stop for a broken wire shape (out-of-domain exhaustion flag /
+      # item kind, or an exhausted-on-arrival queue). Never a silent finish
+      # rendering as a clean report (V23).
+      halted:
+        terminal: true
+        outcome: failure
