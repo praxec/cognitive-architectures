@@ -1,0 +1,141 @@
+version: "1.0.0"
+scripts:
+  run.docs-fmeca.probes:
+    verb: run
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env python3
+      # THE RUNNABLE-VERIFICATION GATE for flow.review.docs-fmeca — the
+      # flow.qa.explore reproduction-gate pattern adapted to shell probes:
+      # a MACHINE runs the documented step and an exit code becomes the
+      # evidence, never an agent's opinion of what would happen.
+      #
+      # Safety model (defense in depth — the agent's `danger` label is a
+      # necessary but never sufficient condition to execute):
+      #   1. only probes classified `safe` are candidates;
+      #   2. every candidate must ALSO pass the destructive-command
+      #      denylist below (rm/dd/sudo/git push/installs/deploys/pipe-to-
+      #      shell/redirections/...) — a safe-labeled probe the denylist
+      #      vetoes is recorded `vetoed_denylist` and counts UNEVALUATED
+      #      (and is itself a signal: the reviewer misclassified);
+      #   3. cwd is resolved and MUST stay inside the repo root
+      #      (`vetoed_path_escape` otherwise);
+      #   4. each execution is bounded by a 90s timeout, and the total
+      #      batch is capped at 40 executions (the rest: `skipped_budget`).
+      # `destructive` / `not_executable` probes are echoed with their
+      # classification — flagged, NEVER run, and NOT counted unevaluated
+      # (not running them is the correct behavior, not a gap).
+      #
+      # Arg $1 = probes (JSON array of {id, fm_id?, item, command, cwd?,
+      #          danger, expectation}; spill contract honored via arg()).
+      # Stdout: {"results": [{...probe, status, exit_code, stdout_tail,
+      #           stderr_tail, duration_ms}...]}
+      #   status ∈ executed_pass | executed_fail | vetoed_denylist |
+      #            vetoed_path_escape | skipped_budget |
+      #            flagged_destructive | not_executable
+      import json, os, re, subprocess, sys, time
+
+      TIMEOUT_S = 90
+      MAX_EXECUTIONS = 40
+      TAIL = 800
+
+      DENY = [
+          r"\brm\b", r"\bmv\b", r"\bdd\b", r"\bmkfs\w*\b", r"\bsudo\b",
+          r"\bchown\b", r"\bchmod\b", r"\bkill\b", r"\bpkill\b",
+          r"\bshutdown\b", r"\breboot\b", r"\bsystemctl\b",
+          r"\bgit\s+(push|reset|clean|checkout|rebase|stash)\b",
+          r"\bnpm\s+(install|i|ci|publish|uninstall)\b",
+          r"\byarn\b", r"\bpnpm\s+(install|i|add)\b",
+          r"\bpip3?\s+install\b", r"\bcargo\s+(install|publish)\b",
+          r"\bdotnet\s+(tool|nuget)\b",
+          r"\bdocker\b", r"\bkubectl\b", r"\bhelm\b", r"\bterraform\b",
+          r"\bgh\s+(pr|release|repo)\b",
+          r"\bdrop\s+table\b", r"\btruncate\b", r"\bdelete\s+from\b",
+          r"curl[^|]*\|", r"wget[^|]*\|", r"\|\s*(ba|z|da)?sh\b",
+          r"\bcrontab\b", r"\bssh\b", r"\bscp\b", r"\brsync\b",
+      ]
+
+      def arg(i, default=""):
+          v = sys.argv[i] if len(sys.argv) > i else default
+          spilled = json.loads(os.environ.get("PRAXEC_SPILLED_ARGS", "[]"))
+          if (i - 1) in spilled and isinstance(v, str) and v.startswith("@argfile:"):
+              with open(v[len("@argfile:"):]) as f:
+                  return f.read()
+          return v
+
+      raw = arg(1, "[]")
+      try:
+          probes = json.loads(raw) if isinstance(raw, str) else raw
+      except ValueError as e:
+          print(json.dumps({"error": f"probes is not valid JSON: {e}"}),
+                file=sys.stderr)
+          sys.exit(1)
+      if not isinstance(probes, list):
+          probes = []
+
+      def vetoed(cmd):
+          # `2>&1` is legitimate plumbing; any OTHER redirection writes.
+          stripped = cmd.replace("2>&1", "")
+          if ">" in stripped:
+              return "output redirection"
+          low = " " + stripped.lower() + " "
+          for pat in DENY:
+              if re.search(pat, low):
+                  return pat
+          return None
+
+      root = os.path.realpath(os.getcwd())
+      results, executed = [], 0
+      for p in probes:
+          if not isinstance(p, dict):
+              continue
+          rec = dict(p)
+          danger = p.get("danger", "")
+          cmd = str(p.get("command", "")).strip()
+          if danger == "destructive":
+              rec["status"] = "flagged_destructive"
+              results.append(rec)
+              continue
+          if danger == "not_executable" or not cmd:
+              rec["status"] = "not_executable"
+              results.append(rec)
+              continue
+          reason = vetoed(cmd)
+          if reason:
+              rec["status"] = "vetoed_denylist"
+              rec["veto_reason"] = reason
+              results.append(rec)
+              continue
+          cwd = os.path.realpath(os.path.join(root, str(p.get("cwd") or "")))
+          if cwd != root and not cwd.startswith(root + os.sep):
+              rec["status"] = "vetoed_path_escape"
+              results.append(rec)
+              continue
+          if executed >= MAX_EXECUTIONS:
+              rec["status"] = "skipped_budget"
+              results.append(rec)
+              continue
+          executed += 1
+          t0 = time.time()
+          try:
+              proc = subprocess.run(
+                  ["bash", "-c", cmd], cwd=cwd, capture_output=True,
+                  text=True, timeout=TIMEOUT_S)
+              rec["exit_code"] = proc.returncode
+              rec["stdout_tail"] = proc.stdout[-TAIL:]
+              rec["stderr_tail"] = proc.stderr[-TAIL:]
+              rec["status"] = ("executed_pass" if proc.returncode == 0
+                               else "executed_fail")
+          except subprocess.TimeoutExpired:
+              rec["exit_code"] = -1
+              rec["status"] = "executed_fail"
+              rec["stderr_tail"] = f"timeout after {TIMEOUT_S}s"
+          except OSError as e:
+              rec["exit_code"] = -1
+              rec["status"] = "executed_fail"
+              rec["stderr_tail"] = f"spawn error: {e}"
+          rec["duration_ms"] = int((time.time() - t0) * 1000)
+          results.append(rec)
+
+      print(json.dumps({"results": results}))
