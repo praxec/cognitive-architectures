@@ -1,0 +1,64 @@
+# docs/docs-fmeca.models.yaml — a REFERENCE models chain for
+# cognitive/flow.review.docs-fmeca (copy into your gateway's models_yaml,
+# or point gateway.models_yaml at this file).
+#
+# WHY THIS CHAIN EXISTS (the flow.qa.explore charter lesson): the engine
+# hard-fails an agent step whose SELECTED model does not advertise the
+# requested reasoning-effort level — and selection walks the whole
+# fallback chain, so ONE member that lacks the level is a landmine
+# (deepseek-v4-pro advertises only `none|high`; a chain leading elsewhere
+# still dies with REASONING_EFFORT_UNSUPPORTED the moment fallback
+# reaches it while the step asks for `low` or `medium`).
+#
+# flow.review.docs-fmeca's agent leaves declare `reasoning_effort: medium`
+# (and the gateway ships a default of `low` for engines that predate the
+# per-state knob). EVERY member below advertises BOTH `low` and `medium`
+# in the model catalog, so no fallback depth can hit the unsupported-
+# effort failure:
+#   z-ai/glm-5.2                 -> none|low|medium|high (commodity lead)
+#   moonshotai/kimi-k2.6         -> none|low|medium|high
+#   anthropic/claude-sonnet-4-6  -> none|low|medium|high (frontier rung)
+# Do NOT add deepseek/deepseek-v4-pro (or any none|high-only model) to
+# the `review` chain while running this flow.
+#
+# COST GOVERNANCE (live-verified): auto-drive refuses to SPEND on a
+# frontier-priced model without human approval — claude-sonnet-4-6
+# ($15/M output, over the $5 cap) fails AGENT_INVALID_MODEL_BINDING:
+# FRONTIER_NOT_APPROVED unless your gateway lists it under
+# `gateway.cost.approve_frontier`. The chain therefore LEADS with the
+# commodity reasoning model; the sonnet rung only engages if you approve
+# it (or is skipped by fallback if you don't).
+
+version: 1
+default:
+- provider:
+    name: openrouter
+  model: z-ai/glm-5.2
+- provider:
+    name: openrouter
+  model: moonshotai/kimi-k2.6
+- provider:
+    name: openrouter
+  model: anthropic/claude-sonnet-4-6
+activity:
+  review:
+  - provider:
+      name: openrouter
+    model: z-ai/glm-5.2
+  - provider:
+      name: openrouter
+    model: moonshotai/kimi-k2.6
+  - provider:
+      name: openrouter
+    model: anthropic/claude-sonnet-4-6
+overrides:
+  reasoning:
+  - provider:
+      name: openrouter
+    model: z-ai/glm-5.2
+  - provider:
+      name: openrouter
+    model: moonshotai/kimi-k2.6
+  - provider:
+      name: openrouter
+    model: anthropic/claude-sonnet-4-6

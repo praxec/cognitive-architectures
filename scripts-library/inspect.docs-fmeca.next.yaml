@@ -1,0 +1,49 @@
+version: "1.0.0"
+scripts:
+  inspect.docs-fmeca.next:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env python3
+      # Deterministic queue-pop for flow.review.docs-fmeca's per-item loop —
+      # the connection-free acquire step (the cap.review.ux-matrix-scan
+      # shape): pop ONE ready item, or report exhaustion as a scalar flag
+      # the item_gate branches on.
+      #
+      # Arg $1 = queue (JSON array of {id, path, abs_path, kind, bytes}).
+      # Arg $2 = index (integer cursor, 0-based).
+      # Stdout: {"exhausted": true,  "item": null,     "next_index": i} or
+      #         {"exhausted": false, "item": queue[i], "next_index": i+1}
+      # Fail-closed: malformed input exits non-zero with a reason.
+      import json, sys
+
+      def die(msg):
+          print(json.dumps({"error": msg}), file=sys.stderr)
+          sys.exit(1)
+
+      raw_queue = sys.argv[1] if len(sys.argv) > 1 else ""
+      raw_index = sys.argv[2] if len(sys.argv) > 2 else ""
+      try:
+          queue = json.loads(raw_queue)
+      except ValueError as e:
+          die(f"queue is not valid JSON: {e}")
+      if not isinstance(queue, list) or not queue:
+          die("queue must be a non-empty JSON array")
+      try:
+          index = int(json.loads(raw_index))
+      except (ValueError, TypeError) as e:
+          die(f"index is not an integer: {e}")
+      if index < 0:
+          die("index must be >= 0")
+
+      if index >= len(queue):
+          print(json.dumps({"exhausted": True, "item": None,
+                            "next_index": index}))
+      else:
+          item = queue[index]
+          if not isinstance(item, dict) or item.get("kind") not in ("doc", "script"):
+              die(f"queue[{index}] is not a doc/script item: "
+                  f"{json.dumps(item)[:120]}")
+          print(json.dumps({"exhausted": False, "item": item,
+                            "next_index": index + 1}))

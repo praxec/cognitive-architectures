@@ -145,6 +145,7 @@ the two-tier model exists to enable.
 | `flow.triage-issue` | Intake | New issue / ticket |
 | `flow.audit-codebase` | Quality-gate audit | Repo path + audit focus |
 | `flow.audit-docs` | Doc-vs-code drift audit (over `corpus`) | Repo + doc topic |
+| `flow.review.docs-fmeca` | Docs × role-lens × FMECA review (over `fmeca-mcp` + `structureos` + `markdown-administrator`) with a runnable-verification probe gate | Repo (+ optional doc globs / role lenses) |
 | `flow.greenfield-mcp` | Greenfield build with staged risk gates | New-project brief |
 | `flow.pressure-test.use-cases` | Decision-gating via falsification | Design + use cases to falsify |
 | `flow.loom` | Full elicit → design → plan → execute program | Intent brief |

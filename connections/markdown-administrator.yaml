@@ -1,0 +1,32 @@
+# connections/markdown-administrator.yaml
+#
+# REFERENCE connection (operators copy into their gateway config; the
+# manifest deliberately leaves connections/ out of its load layout).
+#
+# MCP connection to `markdown-administrator` — structured Markdown
+# navigation. Tools (read-only today; write ops are an upstream build
+# candidate):
+#   outline      { doc }               -> [{ level, text, heading_path }]
+#   read_section { doc, heading_path } -> the section's content
+# `doc` is a FILESYSTEM PATH resolved by the server process (whose cwd is
+# the gateway's, NOT a run's repo_root) — hand it absolute paths, as
+# flow.review.docs-fmeca's inventory does via each item's `abs_path`.
+#
+# NOTE: the server returns plain MCP text content (no outputSchema), so a
+# `kind: mcp` executor binds `$.output.content.0.text` — a `$.output.<field>`
+# path always resolves null (the frontrails T2.5 finding).
+#
+# Install: `cargo install --path /path/to/markdown-administrator`
+# (binary `markdown-administrator`, MCP/stdio).
+#
+# Backs `cognitive/flow.review.docs-fmeca`: the per-doc outline step, and
+# the doc-review agent leaf's section reads.
+
+connections:
+  markdown-administrator:
+    kind: mcp
+    command: markdown-administrator
+    description: >
+      Structured Markdown navigation: outline (headings with paths) and
+      read_section (content by heading path). Backs flow.review.docs-fmeca's
+      doc outline step and doc-review agent tools.

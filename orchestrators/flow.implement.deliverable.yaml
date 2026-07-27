@@ -139,6 +139,15 @@ workflows:
             executor:
               kind: workflow
               definitionId: cognitive/cap.implement.build-loop
+              # v0.0.32 (#69) — re-root the child build-loop to THIS deliverable's
+              # repo. Without it the child inherits the parent run's
+              # $.run.repo_root and writes/commits into the WRONG repo in a
+              # multi-repo program (wrong-repo corruption). backstop_cwd is the
+              # deliverable's declared repo root (a required input, and already
+              # the cwd for the verify_rust/verify_dotnet gates below). The engine
+              # bounds it to a declared writable root and rebuilds the child's
+              # run-ambient env (workflow executor per-spawn repoRoot override).
+              repoRoot: "$.workflow.input.backstop_cwd"
               use:
                 inputs:
                   plan:      "$.workflow.input.deliverable"
