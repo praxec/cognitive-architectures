@@ -10,6 +10,45 @@ The library is pre-1.0 (`0.0.x`) and not yet publicly released.
 
 ### Added
 
+- **`flow.review.docs-fmeca` — cognitive-science pass + human-gated fixer.**
+  Two additions to the docs × role-lens × FMECA review:
+  1. A SECOND FMECA pass per doc (`reviewing_doc_cogsci`) evaluating
+     structure/content against the information-processing evidence base —
+     Sweller's Cognitive Load Theory (intrinsic/extraneous/germane,
+     split-attention, redundancy, worked examples), Mayer's signaling/
+     coherence/contiguity, Morville–Rosenfeld findability, Procida's
+     Diátaxis type purity, Carroll's minimalism (action-first,
+     error-recovery), Horn/Miller chunking, progressive disclosure, and
+     Redish plain language. A deterministic per-doc metrics step
+     (`inspect.docs-fmeca.cogsci-metrics`: Flesch–Kincaid grade, sentence
+     stats, section/chunk sizes, heading-hierarchy violations, list runs,
+     link density, worked-example presence) feeds the leaf as citable
+     evidence; findings are tagged `evidence_basis: deterministic`
+     (metric breach cited) vs `advisory` (LLM judgment). Both passes feed
+     the SAME fmeca-mcp engine (LLM picks observation ids, code computes
+     every criticality) and merge into one ranked checklist. A per-doc
+     `principle_assessments` ledger makes silence visible: the aggregate
+     enumerates every unassessed (doc, principle) pair as a blind spot
+     (`cogsci_blindspot_count`, outcome-gated) plus the fixed
+     `principles_out_of_scope` list, so a clean run can never masquerade
+     as full-spectrum coverage.
+  2. A human-gated fixer leg: the flow PARKS at `fix_approval_gating`
+     (`actor: human` — the engine refuses non-human submitters with
+     ACTOR_MISMATCH, live-verified) where a person approves WHICH
+     checklist fix_ids apply ("fix-001,fix-004" / "all" / skip);
+     `inspect.docs-fmeca.fix-scope` joins the approval deterministically
+     (unknown id fails loud); the `fixing` leaf applies ONLY the approved
+     edits on a `run.git.branch-ensure`d fix branch;
+     `verify.docs-fmeca.fixes` verifies every claim against `git status`
+     (a claimed-but-unchanged file halts the run) and builds a
+     traceability PR body (fix → finding → lens/principle → computed
+     criticality → probe evidence); `run.git.ensure-committed` +
+     `run.git.push-pr` open the PR — the flow NEVER merges, and a second
+     human gate (`pr_review_gating`) parks until the PR is dispositioned
+     on the forge. All four agent leaves stay on the effort-safe
+     commodity-led `review` chain (docs/docs-fmeca.models.yaml).
+     `run.git.branch-ensure` (1.1.0) now also accepts positional args.
+
 - **Two-tier composition** — typed `cap.*` capabilities composed by `flow.*`
   lifecycle orchestrators (`flow.add-feature`, `flow.bugfix-from-error-log`,
   `flow.safe-refactor`, `flow.triage-issue`, `flow.audit-codebase`),
