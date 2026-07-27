@@ -1,0 +1,210 @@
+version: "1.0.0"
+scripts:
+  inspect.docs-fmeca.cogsci-metrics:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env python3
+      # DETERMINISTIC cognitive-science metrics for ONE markdown doc — the
+      # computed half of flow.review.docs-fmeca's cog-sci FMECA pass. The
+      # measurable slices of the information-processing literature are
+      # computed HERE, in code, and handed to the cog-sci reviewer leaf as
+      # evidence; the leaf may only cite these numbers (evidence_basis:
+      # deterministic) or make tagged advisory judgments — it never invents
+      # a measurement. Metric → principle mapping:
+      #
+      #   flesch_kincaid_grade, avg_sentence_words, pct_long_sentences
+      #     → plain-language (Redish; Flesch/Kincaid readability)
+      #   max_section_words, oversized_sections, max_list_items
+      #     → chunking-structure (Horn's Information Mapping; Miller 1956)
+      #   heading_level_jumps, h1_count, max_heading_depth
+      #     → mayer-signaling (Mayer's signaling principle; heading
+      #       hierarchy as the structural cue system)
+      #   link_count, link_density, is_orphan_candidate
+      #     → ia-findability (Morville/Rosenfeld: scent needs links)
+      #   code_fence_count, has_worked_example
+      #     → clt-germane-worked-examples (Sweller's worked-example
+      #       effect; presence signal only — whether an example is NEEDED
+      #       stays an advisory judgment)
+      #
+      # Prose metrics are computed with code fences STRIPPED (code blocks
+      # would corrupt sentence statistics — a split-attention artifact of
+      # measurement, not of the doc).
+      #
+      # Arg $1 = the doc's ABSOLUTE path (current_item.abs_path — this
+      #          script must not assume cwd is the doc's repo).
+      # Arg $2 = the doc's repo-relative path (report identity).
+      # Stdout: {"record": {path, metrics: {...}, signals: [{metric,
+      #          value, threshold, breach, principle}...]}}
+      # FAIL-CLOSED: unreadable/empty doc exits non-zero — a metrics pass
+      # over nothing must never render as "no breaches".
+      import json, os, re, sys
+
+      def die(msg):
+          print(json.dumps({"error": msg}), file=sys.stderr)
+          sys.exit(1)
+
+      abs_path = sys.argv[1] if len(sys.argv) > 1 else ""
+      rel_path = sys.argv[2] if len(sys.argv) > 2 else abs_path
+      if not abs_path:
+          die("missing doc path")
+      try:
+          with open(abs_path, encoding="utf-8", errors="replace") as f:
+              raw = f.read()
+      except OSError as e:
+          die(f"cannot read {abs_path}: {e}")
+      if not raw.strip():
+          die(f"{abs_path} is empty — nothing to measure")
+
+      lines = raw.splitlines()
+
+      # ── structural scan (fence-aware) ─────────────────────────────────
+      headings = []          # (level, text)
+      code_fence_count = 0
+      in_fence = False
+      prose_lines = []
+      list_runs, cur_run = [], 0
+      for ln in lines:
+          if re.match(r"^\s*(```|~~~)", ln):
+              if not in_fence:
+                  code_fence_count += 1
+              in_fence = not in_fence
+              cur_run = 0
+              continue
+          if in_fence:
+              continue
+          m = re.match(r"^(#{1,6})\s+(.*)", ln)
+          if m:
+              headings.append((len(m.group(1)), m.group(2).strip()))
+              if cur_run:
+                  list_runs.append(cur_run)
+              cur_run = 0
+              continue
+          if re.match(r"^\s*([-*+]|\d+[.)])\s+", ln):
+              cur_run += 1
+          else:
+              if cur_run:
+                  list_runs.append(cur_run)
+              cur_run = 0
+          prose_lines.append(ln)
+      if cur_run:
+          list_runs.append(cur_run)
+
+      h1_count = sum(1 for lv, _ in headings if lv == 1)
+      max_heading_depth = max((lv for lv, _ in headings), default=0)
+      level_jumps = sum(1 for a, b in zip(headings, headings[1:])
+                        if b[0] - a[0] > 1)
+
+      # ── sections: words between consecutive headings ──────────────────
+      section_words, cur = [], 0
+      fence = False
+      for ln in lines:
+          if re.match(r"^\s*(```|~~~)", ln):
+              fence = not fence
+              continue
+          if not fence and re.match(r"^#{1,6}\s+", ln):
+              section_words.append(cur)
+              cur = 0
+              continue
+          cur += len(ln.split())
+      section_words.append(cur)
+      section_words = [w for w in section_words if w > 0] or [0]
+      max_section_words = max(section_words)
+      oversized_sections = sum(1 for w in section_words if w > 400)
+
+      # ── prose statistics (fences stripped, markdown de-noised) ────────
+      prose = "\n".join(prose_lines)
+      prose = re.sub(r"`[^`]*`", " ", prose)                    # inline code
+      prose = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", prose)    # links → text
+      prose = re.sub(r"[#>*_|]", " ", prose)
+      sentences = [s.strip() for s in re.split(r"[.!?]+(?:\s|$)", prose)
+                   if len(s.split()) >= 3]
+      words = [w for s in sentences for w in s.split()]
+      word_count = len(words)
+
+      def syllables(word):
+          w = re.sub(r"[^a-z]", "", word.lower())
+          if not w:
+              return 0
+          groups = len(re.findall(r"[aeiouy]+", w))
+          if w.endswith("e") and groups > 1:
+              groups -= 1
+          return max(1, groups)
+
+      if sentences and word_count:
+          avg_sentence_words = word_count / len(sentences)
+          syl = sum(syllables(w) for w in words)
+          fk_grade = round(0.39 * avg_sentence_words
+                           + 11.8 * (syl / word_count) - 15.59, 1)
+          pct_long = round(100 * sum(1 for s in sentences
+                                     if len(s.split()) > 25) / len(sentences))
+      else:
+          avg_sentence_words, fk_grade, pct_long = 0.0, 0.0, 0
+      avg_sentence_words = round(avg_sentence_words, 1)
+
+      # ── links (whole doc, fenced code excluded already in prose scan) ─
+      link_count = len(re.findall(r"\[[^\]]*\]\([^)]+\)", raw))
+      total_words_all = len(raw.split())
+      link_density = round(100 * link_count / total_words_all, 2) \
+          if total_words_all else 0.0
+      is_orphan_candidate = bool(total_words_all > 500 and link_count == 0)
+
+      max_list_items = max(list_runs, default=0)
+      has_worked_example = code_fence_count > 0
+
+      metrics = {
+          "word_count": word_count,
+          "sentence_count": len(sentences),
+          "avg_sentence_words": avg_sentence_words,
+          "pct_long_sentences": pct_long,
+          "flesch_kincaid_grade": fk_grade,
+          "heading_count": len(headings),
+          "h1_count": h1_count,
+          "max_heading_depth": max_heading_depth,
+          "heading_level_jumps": level_jumps,
+          "section_count": len(section_words),
+          "max_section_words": max_section_words,
+          "oversized_sections": oversized_sections,
+          "max_list_items": max_list_items,
+          "link_count": link_count,
+          "link_density_per_100w": link_density,
+          "code_fence_count": code_fence_count,
+          "has_worked_example": has_worked_example,
+      }
+
+      # Threshold table — the deterministic breach signals. Thresholds are
+      # the conventional literature-adjacent defaults (FK grade 12 ≈ Redish
+      # plain-language ceiling for practitioner docs; 400 words ≈ Horn
+      # block ceiling; 9 items = Miller's 7±2 upper bound; one H1 and no
+      # skipped levels = well-formed signaling hierarchy).
+      SIGNALS = [
+          ("flesch_kincaid_grade", fk_grade, 12, fk_grade > 12,
+           "plain-language"),
+          ("avg_sentence_words", avg_sentence_words, 25,
+           avg_sentence_words > 25, "plain-language"),
+          ("pct_long_sentences", pct_long, 30, pct_long > 30,
+           "plain-language"),
+          ("max_section_words", max_section_words, 400,
+           max_section_words > 400, "chunking-structure"),
+          ("oversized_sections", oversized_sections, 0,
+           oversized_sections > 0, "chunking-structure"),
+          ("max_list_items", max_list_items, 9, max_list_items > 9,
+           "chunking-structure"),
+          ("heading_level_jumps", level_jumps, 0, level_jumps > 0,
+           "mayer-signaling"),
+          ("h1_count", h1_count, 1, h1_count > 1, "mayer-signaling"),
+          ("is_orphan_candidate", int(is_orphan_candidate), 0,
+           is_orphan_candidate, "ia-findability"),
+          ("has_worked_example", int(has_worked_example), 1,
+           not has_worked_example, "clt-germane-worked-examples"),
+      ]
+      signals = [{"metric": m, "value": v, "threshold": t,
+                  "breach": bool(b), "principle": p}
+                 for m, v, t, b, p in SIGNALS]
+
+      print(json.dumps({"record": {
+          "path": rel_path,
+          "metrics": metrics,
+          "signals": signals,
+      }}))

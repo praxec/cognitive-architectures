@@ -1,0 +1,201 @@
+version: "1.0.0"
+scripts:
+  verify.docs-fmeca.fixes:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env python3
+      # Code-side verification of the fixer leaf's work for
+      # flow.review.docs-fmeca — the praxec law applied to edits:
+      # verification is EARNED from evidence (git), never ASSERTED (the
+      # agent's report). Run from `$.run.repo_root` AFTER the fixer
+      # submitted and BEFORE anything is committed:
+      #   1. every approved fix_id must be dispositioned exactly once
+      #      (applied | skipped) in the agent's report — a silently
+      #      dropped fix fails the check;
+      #   2. every fix CLAIMED applied must show as a real change to its
+      #      named file in `git status --porcelain` — a claimed-but-
+      #      unchanged file fails the check (the agent said, git denies);
+      #   3. a disposition for an id outside the approved set fails the
+      #      check (the gate's scope is the whole mandate);
+      #   4. working-tree changes to files OUTSIDE the approved scope
+      #      are reported as `unrelated_dirt` — surfaced (and echoed in
+      #      the PR body as a warning) rather than halting, because the
+      #      target repo may have been dirty before the run; the human
+      #      PR review (gate #2) sees them in the diff.
+      # Also BUILDS the PR title/body: every applied fix traced back to
+      # its finding, its lens or cog-sci principle, its computed
+      # criticality, and its probe evidence — the justification trail
+      # the fix gate approved.
+      #
+      # Args ($*, spill contract honored via arg()):
+      #   $1 approved_fixes (from inspect.docs-fmeca.fix-scope)
+      #   $2 applied_report (the fixer leaf's applied_fixes submission)
+      #   $3 docs_fmeca_report (the aggregate report — findings join)
+      #   $4 fix_branch (title context)
+      # Stdout: {"ok": bool, "applied_count": N, "skipped_count": N,
+      #          "missing_ids": [...], "unapproved_ids": [...],
+      #          "claimed_not_changed": [...], "unrelated_dirt": [...],
+      #          "pr_title": "...", "pr_body": "..."}
+      # Every failure is DATA (exit 0) so the flow gate can branch; only
+      # malformed JSON or a non-git cwd exits non-zero.
+      import json, os, subprocess, sys
+
+      def die(msg):
+          print(json.dumps({"error": msg}), file=sys.stderr)
+          sys.exit(1)
+
+      def arg(i, default=""):
+          v = sys.argv[i] if len(sys.argv) > i else default
+          spilled = json.loads(os.environ.get("PRAXEC_SPILLED_ARGS", "[]"))
+          if (i - 1) in spilled and isinstance(v, str) and v.startswith("@argfile:"):
+              with open(v[len("@argfile:"):]) as f:
+                  return f.read()
+          return v
+
+      def load(i, default):
+          raw = arg(i, "")
+          if not isinstance(raw, str):
+              return raw if raw is not None else default
+          if not raw.strip():
+              return default
+          try:
+              val = json.loads(raw)
+          except ValueError as e:
+              die(f"arg {i} is not valid JSON: {e}")
+          return val if val is not None else default
+
+      approved = load(1, [])
+      applied_report = load(2, [])
+      report = load(3, {})
+      fix_branch = arg(4, "") or "docs-fmeca/fixes"
+      if not isinstance(approved, list) or not isinstance(applied_report, list):
+          die("approved_fixes and applied_report must be JSON arrays")
+
+      # ── the git evidence ──────────────────────────────────────────────
+      try:
+          proc = subprocess.run(["git", "status", "--porcelain"],
+                                capture_output=True, text=True, timeout=60)
+      except OSError as e:
+          die(f"git unavailable: {e}")
+      if proc.returncode != 0:
+          die(f"git status failed: {proc.stderr.strip()[:200]}")
+      changed_files = set()
+      for line in proc.stdout.splitlines():
+          if len(line) > 3:
+              path = line[3:].strip().strip('"')
+              if " -> " in path:  # rename: take the new side
+                  path = path.split(" -> ", 1)[1].strip().strip('"')
+              changed_files.add(path)
+
+      approved_by_id = {r.get("fix_id"): r for r in approved
+                        if isinstance(r, dict) and r.get("fix_id")}
+      scope_files = {r.get("item") for r in approved_by_id.values()
+                     if r.get("item")}
+
+      dispositions = {}
+      unapproved_ids = []
+      for entry in applied_report:
+          if not isinstance(entry, dict):
+              continue
+          fid = entry.get("fix_id")
+          if fid not in approved_by_id:
+              unapproved_ids.append(str(fid))
+              continue
+          dispositions[fid] = entry
+      missing_ids = sorted(set(approved_by_id) - set(dispositions))
+
+      claimed_not_changed = []
+      applied, skipped = [], []
+      for fid, entry in dispositions.items():
+          item = approved_by_id[fid].get("item", "")
+          if entry.get("status") == "applied":
+              if item not in changed_files:
+                  claimed_not_changed.append(
+                      {"fix_id": fid, "item": item,
+                       "reason": "claimed applied but git shows no "
+                                 "change to this file"})
+              else:
+                  applied.append((fid, entry))
+          else:
+              skipped.append((fid, entry))
+
+      unrelated_dirt = sorted(changed_files - scope_files)
+      ok = (not missing_ids and not unapproved_ids
+            and not claimed_not_changed and len(applied) >= 1)
+
+      # ── the traceability PR body ──────────────────────────────────────
+      findings = {f.get("fm_id"): f
+                  for f in (report.get("findings") or [])
+                  if isinstance(f, dict)}
+
+      def lens_of(fix):
+          return fix.get("principle") or fix.get("role_lens") or ""
+
+      lines = ["## Docs-FMECA remediation (human-approved fix set)", ""]
+      lines.append(f"Applies {len(applied)} of {len(approved_by_id)} "
+                   "human-approved fixes from the docs x role-lens x "
+                   "FMECA review. Every edit below traces to a computed-"
+                   "criticality finding and its probe evidence; nothing "
+                   "outside the approved set was touched.")
+      lines.append("")
+      lines.append("| fix | file | pass/lens | criticality | status |")
+      lines.append("|---|---|---|---|---|")
+      for fid, entry in applied + skipped:
+          fix = approved_by_id[fid]
+          lines.append(f"| {fid} ({fix.get('fm_id', '')}) "
+                       f"| `{fix.get('item', '')}` "
+                       f"| {lens_of(fix)} "
+                       f"| {fix.get('criticality', '')} "
+                       f"| {entry.get('status', '')} |")
+      lines.append("")
+      lines.append("### Trace")
+      for fid, entry in applied + skipped:
+          fix = approved_by_id[fid]
+          fm = findings.get(fix.get("fm_id"), {})
+          lines.append(f"#### {fid} — `{fix.get('item', '')}` "
+                       f"({entry.get('status', '')})")
+          if fm.get("description"):
+              lines.append(f"- **Finding** ({fix.get('fm_id', '')}, "
+                           f"criticality {fix.get('criticality', '?')}): "
+                           f"{fm.get('description', '')}")
+          lines.append(f"- **Approved mitigation** "
+                       f"({fix.get('kind', '')}): {fix.get('fix', '')}")
+          if entry.get("status") == "applied":
+              lines.append(f"- **Edit**: {entry.get('edit_summary', '')}")
+          else:
+              lines.append(f"- **Skipped**: {entry.get('reason', '')}")
+          for pe in (fm.get("probe_evidence") or []):
+              lines.append(f"- **Probe** `{pe.get('command', '')}` -> "
+                           f"{pe.get('status', '')} "
+                           f"(exit {pe.get('exit_code')})")
+          lines.append("")
+      if unrelated_dirt:
+          lines.append("### WARNING: working-tree changes outside the "
+                       "approved scope")
+          lines.append("These files were already (or otherwise) modified "
+                       "in the working tree and ride into this branch via "
+                       "the finalize-commit — review them explicitly:")
+          for p in unrelated_dirt:
+              lines.append(f"- `{p}`")
+          lines.append("")
+      lines.append("---")
+      lines.append("Review gate: this PR is the SECOND human gate — it is "
+                   "never auto-merged; merge only after reviewing the "
+                   "diff against the trace above.")
+
+      pr_title = (f"docs-fmeca: apply {len(applied)} approved "
+                  f"documentation fixes ({fix_branch})")
+
+      print(json.dumps({
+          "ok": ok,
+          "applied_count": len(applied),
+          "skipped_count": len(skipped),
+          "missing_ids": missing_ids,
+          "unapproved_ids": unapproved_ids,
+          "claimed_not_changed": claimed_not_changed,
+          "unrelated_dirt": unrelated_dirt,
+          "pr_title": pr_title,
+          "pr_body": "\n".join(lines),
+      }))
