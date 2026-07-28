@@ -38,6 +38,7 @@ workflows:
     initialState: iterating
     states:
       iterating:
+        requires_file_write: true  # coding-evidence forcing function: success = real file writes
         goal: Pick the next plan slice; execute one red-green-refactor cycle.
         transitions:
           submit_result:
