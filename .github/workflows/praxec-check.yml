@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 env:
-  PRAXEC_VERSION: v0.0.24
+  PRAXEC_VERSION: v0.0.40
   CHECK_CONFIG: examples/praxec-cognitive-only.yaml
 
 jobs:
