@@ -17,6 +17,17 @@
 #                            "something real changed" threshold; it can never
 #                            falsely report zero when work exists.
 #
+# MEASURE mode additionally emits the DEDUPED changed-file LIST (`files`) and
+# its React-source subset (`react_files` — *.tsx/*.jsx/*.ts/*.js, excluding
+# *.d.ts, *.test.*/*.spec.* and anything under a generated/ dir) with a flat
+# `react_files_count`. These feed the diff-scoped React anti-pattern gate in
+# flow.implement.deliverable (docs/react-antipatterns.build-loop-wiring.md):
+# the gate scopes cap.review.react-antipatterns to `react_files` and skips
+# cleanly when `react_files_count == 0` (honest "no react files" skip, never a
+# fabricated pass). Purely additive — SNAPSHOT mode and the existing
+# head/files_changed/commits_ahead fields are unchanged, so every current
+# consumer is unaffected.
+#
 # Counting BOTH committed and uncommitted is deliberate: the build-loop commits
 # each green slice (so a converged build shows commits_ahead > 0), but an agent
 # that wrote real code the loop couldn't yet commit still leaves on-disk changes
@@ -25,7 +36,8 @@
 # Args:
 #   $1 / REPO_PATH   — the repo to measure
 #   $2 / BASE_COMMIT — baseline sha; empty ⇒ snapshot mode (returns head)
-# Emits {head, files_changed, commits_ahead, error} JSON, read at $.output.json.*.
+# Emits {head, files_changed, commits_ahead, error} JSON (SNAPSHOT), plus
+# {files, react_files, react_files_count} in MEASURE mode. Read at $.output.json.*.
 version: "1.0.0"
 scripts:
   inspect.git.progress:
@@ -54,7 +66,7 @@ scripts:
 
       if [ -z "$BASE" ]; then
         # SNAPSHOT mode — record the baseline HEAD; nothing measured yet.
-        printf '{"head":"%s","files_changed":0,"commits_ahead":0,"error":null}\n' "$head_sha"
+        printf '{"head":"%s","files_changed":0,"commits_ahead":0,"files":[],"react_files":[],"react_files_count":0,"error":null}\n' "$head_sha"
         exit 0
       fi
 
@@ -64,5 +76,36 @@ scripts:
       [ -z "$commits_ahead" ] && commits_ahead=0
       files_changed=$(( committed + uncommitted ))
 
-      printf '{"head":"%s","files_changed":%d,"commits_ahead":%d,"error":null}\n' \
-        "$head_sha" "$files_changed" "$commits_ahead"
+      # DEDUPED changed-file list: committed diff names ∪ uncommitted porcelain
+      # paths (porcelain prefix stripped; a rename's "old -> new" keeps `new`).
+      committed_names="$(git diff --name-only "$BASE"..HEAD 2>/dev/null || true)"
+      uncommitted_names="$(git status --porcelain --untracked-files=all 2>/dev/null \
+        | grep -v '^ *D' \
+        | sed -e 's/^...//' -e 's/.* -> //' || true)"
+      all_names="$(printf '%s\n%s\n' "$committed_names" "$uncommitted_names" \
+        | sed '/^$/d' | sort -u || true)"
+
+      files_json="$(printf '%s' "$all_names" | jq -R -s 'split("\n") | map(select(length > 0))')"
+      [ -z "$files_json" ] && files_json='[]'
+      # React source subset: .tsx/.jsx/.ts/.js, excluding declaration/test/spec
+      # files and anything under a generated/ directory (never hand-authored).
+      react_json="$(printf '%s' "$files_json" | jq -c '
+        map(select(
+          (test("\\.(tsx|jsx|ts|js)$"))
+          and (test("\\.d\\.ts$") | not)
+          and (test("\\.(test|spec)\\.") | not)
+          and (test("(^|/)generated/") | not)
+        ))')"
+      [ -z "$react_json" ] && react_json='[]'
+      react_count="$(printf '%s' "$react_json" | jq 'length')"
+
+      jq -n \
+        --arg head "$head_sha" \
+        --argjson files_changed "$files_changed" \
+        --argjson commits_ahead "$commits_ahead" \
+        --argjson files "$files_json" \
+        --argjson react_files "$react_json" \
+        --argjson react_files_count "$react_count" \
+        '{head: $head, files_changed: $files_changed, commits_ahead: $commits_ahead,
+          files: $files, react_files: $react_files, react_files_count: $react_files_count,
+          error: null}'

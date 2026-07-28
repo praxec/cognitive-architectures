@@ -126,6 +126,16 @@ workflows:
           the minimal type signatures / stubs needed for the test to COMPILE
           (e.g. a fn returning `unimplemented!()`), NOT the behavior — the next
           step verifies the test compiles and FAILS. Do not touch unrelated code.
+          REACT/TYPESCRIPT deliverables ONLY — when `plan.stack` is
+          ts/tsx/react/frontend OR `plan.metadata.react_constraints` is present:
+          honor every entry in `plan.metadata.react_constraints` (if any) and
+          write the test so it PINS deterministic, composition-friendly
+          behavior — assert values DERIVED during render from props/state (not
+          state mirrored into other state via an Effect), and drive any
+          time-dependent behavior through an INJECTED clock/`now` (never
+          wall-clock `Date.now`/`setTimeout`/`setInterval`) so the test is
+          deterministically mockable. Deliverables in any other stack have none
+          of these — ignore this paragraph.
           If $.context.atomic_violations is non-empty, your last test had ≠1
           assertion — split it into one-assertion-per-test. If
           $.context.build_issues is present with compiled=false, fix ONLY the
@@ -239,8 +249,19 @@ workflows:
         goal: >
           GREEN step. Write the MINIMUM implementation that makes the failing
           test pass — replace the stubs with real behavior, laser-focused on the
-          one assertion; do NOT add untested behavior or speculative code. The
-          next step runs fmt + clippy + the full test suite. If
+          one assertion; do NOT add untested behavior or speculative code.
+          REACT/TYPESCRIPT deliverables ONLY — when `plan.stack` is
+          ts/tsx/react/frontend OR `plan.metadata.react_constraints` is present:
+          satisfy every entry in `plan.metadata.react_constraints` (if any) and
+          these non-negotiable invariants — derive from props/state DURING
+          RENDER instead of syncing via `useEffect`; NEVER mirror or copy
+          state/props into other state through an Effect (no
+          derived-state-in-Effect); make time INJECTABLE (accept a clock/`now`;
+          no wall-clock `setTimeout`/`setInterval`/`Date.now` in logic that must
+          be deterministically testable); keep render pure; give lists stable
+          domain-id keys. Deliverables in any other stack have none of these —
+          ignore this paragraph.
+          The next step runs fmt + clippy + the full test suite. If
           $.context.build_issues is present, the last verdict was
           `$.context.verdict` — fix EVERY listed issue (errors, warnings, failed
           tests, fmt/clippy) in one pass. If $.context.qa_findings is present, a

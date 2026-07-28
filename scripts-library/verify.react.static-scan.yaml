@@ -32,6 +32,14 @@
 #                        { id, pattern, category, message }) are merged in at
 #                        confidence "profile" (the repo profile hook — see the
 #                        design doc's "generic core + optional repo profile").
+#                        `.scope_files[]` (optional) restricts BOTH sub-checks
+#                        to exactly those files (repo-relative or absolute) —
+#                        the diff-scoped path used by the per-deliverable React
+#                        gate (docs/react-antipatterns.build-loop-wiring.md).
+#                        Absent/empty ⇒ the whole repo is scanned, unchanged.
+#                        A non-empty scope whose files don't exist on disk ⇒ an
+#                        HONEST empty scan (eslint ran:false, zero candidates),
+#                        never a fabricated finding.
 #
 # Emits JSON on stdout: { eslint: {ran, tool_present, plugin_detected,
 # violations[]}, candidates[] (file, line, snippet, rule, category,
@@ -60,6 +68,23 @@ scripts:
       TMP="$(mktemp -d)"
       trap 'rm -rf "$TMP"' EXIT
 
+      # ---- Optional diff-scope: restrict BOTH sub-checks to these files ----
+      # `.scope_files` in the profile (repo-relative or absolute). Non-empty ⇒
+      # SCOPED mode: scan only the resolved-existing files. Empty/absent ⇒
+      # whole-repo (legacy). Files that don't resolve on disk are dropped; a
+      # scope that resolves to nothing yields an honest empty scan below.
+      scoped=false
+      declare -a SCOPE_PATHS=()
+      if [ -n "$PROFILE_JSON" ] && printf '%s' "$PROFILE_JSON" | jq -e '(.scope_files? // []) | type == "array" and length > 0' >/dev/null 2>&1; then
+        scoped=true
+        while IFS= read -r rel; do
+          [ -z "$rel" ] && continue
+          if [ -f "$rel" ]; then SCOPE_PATHS+=("$rel")
+          elif [ -f "$REPO_PATH/$rel" ]; then SCOPE_PATHS+=("$REPO_PATH/$rel")
+          fi
+        done < <(printf '%s' "$PROFILE_JSON" | jq -r '.scope_files[]')
+      fi
+
       # ---- ESLint sub-check (honest degrade if not configured) ----
       eslint_ran=false
       tool_present=false
@@ -73,8 +98,13 @@ scripts:
           for f in .eslintrc .eslintrc.js .eslintrc.cjs .eslintrc.json .eslintrc.yaml .eslintrc.yml eslint.config.js eslint.config.mjs eslint.config.cjs eslint.config.ts; do
             [ -f "$REPO_PATH/$f" ] && has_config=true
           done
-          if [ "$has_config" = true ]; then
-            ( cd "$REPO_PATH" && CI=1 npx --no-install eslint . \
+          if [ "$has_config" = true ] && { [ "$scoped" = false ] || [ "${#SCOPE_PATHS[@]}" -gt 0 ]; }; then
+            if [ "$scoped" = true ]; then
+              eslint_targets=("${SCOPE_PATHS[@]}")
+            else
+              eslint_targets=(".")
+            fi
+            ( cd "$REPO_PATH" && CI=1 npx --no-install eslint "${eslint_targets[@]}" \
                 --ext .js,.jsx,.ts,.tsx \
                 --no-error-on-unmatched-pattern \
                 --format json >"$TMP/eslint.json" 2>"$TMP/eslint.stderr" )
@@ -102,7 +132,18 @@ scripts:
                   --exclude-dir=.next --exclude-dir=coverage --exclude-dir=generated
                   --exclude-dir=.git --exclude=*.d.ts --exclude=*.test.* --exclude=*.spec.*)
 
-      run_grep() { grep "${GREP_FLAGS[@]}" -E "$1" "$REPO_PATH" 2>/dev/null || true; }
+      # SCOPED mode greps the explicit file list (-H forces the file: prefix the
+      # candidate parser needs, which grep omits for a single file); whole-repo
+      # mode keeps the recursive include/exclude sweep. A scope that resolved to
+      # zero files makes every run_grep a no-op ⇒ honest empty candidate set.
+      run_grep() {
+        if [ "$scoped" = true ]; then
+          [ "${#SCOPE_PATHS[@]}" -eq 0 ] && return 0
+          grep -H -n -E "$1" "${SCOPE_PATHS[@]}" 2>/dev/null || true
+        else
+          grep "${GREP_FLAGS[@]}" -E "$1" "$REPO_PATH" 2>/dev/null || true
+        fi
+      }
 
       # jq -R -s: parse raw `file:line:text` lines into candidate objects.
       to_candidates() {
@@ -160,13 +201,23 @@ scripts:
       # observer/subscription inside an Effect. Correlate against whether the
       # FILE contains any `return () =>` at all (cannot correlate per-Effect via
       # grep alone -- that precision is Layer B's job).
-      effect_resource_files="$(grep -rl -E \
-        '(setInterval|setTimeout|addEventListener|new WebSocket|new IntersectionObserver|new MutationObserver|new ResizeObserver|\.subscribe\()\(' \
-        --include=*.tsx --include=*.jsx --include=*.ts --include=*.js \
-        --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build --exclude-dir=.next \
-        --exclude-dir=coverage --exclude-dir=generated --exclude-dir=.git \
-        --exclude=*.test.* --exclude=*.spec.* \
-        "$REPO_PATH" 2>/dev/null || true)"
+      if [ "$scoped" = true ]; then
+        if [ "${#SCOPE_PATHS[@]}" -eq 0 ]; then
+          effect_resource_files=""
+        else
+          effect_resource_files="$(grep -l -E \
+            '(setInterval|setTimeout|addEventListener|new WebSocket|new IntersectionObserver|new MutationObserver|new ResizeObserver|\.subscribe\()\(' \
+            "${SCOPE_PATHS[@]}" 2>/dev/null || true)"
+        fi
+      else
+        effect_resource_files="$(grep -rl -E \
+          '(setInterval|setTimeout|addEventListener|new WebSocket|new IntersectionObserver|new MutationObserver|new ResizeObserver|\.subscribe\()\(' \
+          --include=*.tsx --include=*.jsx --include=*.ts --include=*.js \
+          --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build --exclude-dir=.next \
+          --exclude-dir=coverage --exclude-dir=generated --exclude-dir=.git \
+          --exclude=*.test.* --exclude=*.spec.* \
+          "$REPO_PATH" 2>/dev/null || true)"
+      fi
 
       cleanup_hits=""
       if [ -n "$effect_resource_files" ]; then
