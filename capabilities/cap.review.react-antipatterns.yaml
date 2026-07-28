@@ -129,8 +129,21 @@ workflows:
 
       # Layer B -- agent, fuzzy. Evidence-grounded confirm/refute + independent
       # sweep. Raw findings only, no verdict.
+      #
+      # AFFINITY = `react-review` (NOT the shared `review` chain). This gate has a
+      # different model contract from the other affinity:review consumers
+      # (doc-drift, assertion-quality, diagnose-finding, docs-fmeca, ...): it must
+      # CONVERGE a STRUCTURED-findings result, and the proven commodity model for
+      # that is deepseek-v4-pro (glm-5.2 burns its full budget without finalizing).
+      # deepseek only advertises none|high effort — fine HERE because this leaf
+      # never requests low/medium — but it is a landmine for the medium-effort
+      # docs-fmeca leaves that share affinity:review. Splitting the affinity lets
+      # `react-review` lead with deepseek(high) while `review` stays glm→kimi
+      # (medium-safe) — and keeps BOTH chains free of any frontier model (owner
+      # directive). Chains live in the gateway models_yaml; the pack reference is
+      # docs/docs-fmeca.models.yaml (activity.react-review).
       reviewing:
-        affinity: review
+        affinity: react-review
         goal: >
           You are reviewing React source with file-read tools. Read
           $.context.static_candidates (Layer A's cheap, noisy candidates) and
