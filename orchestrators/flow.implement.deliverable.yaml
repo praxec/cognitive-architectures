@@ -35,6 +35,15 @@
 # The HONEST definition of done (top-level `outcomes:`) keys on BOTH real file
 # changes AND the verifier passing — not a value true regardless of the build.
 #
+# REACT GATE (ts arm, opt-in — docs/react-antipatterns.build-loop-wiring.md):
+# when `react_review` is true and the ts verifier passed, `react_gate` reviews
+# THIS deliverable's own changed React files (cap.review.react-antipatterns,
+# diff-scoped, runtime oracle disabled) and fails the deliverable on a new
+# correctness-class anti-pattern BEFORE mark_status. Every non-ts / opt-out /
+# no-React-files path is a single no-op hop to marking_complete — byte-for-byte
+# the prior behavior. This is the CATCH half that stops commodity FE agents'
+# derived-state-in-Effect / wall-clock-timer regressions at the source cohort.
+#
 # This is a FLOW (not a capability): capabilities are composition leaves
 # (SPEC §3/§4.1, V6/V10) — only flows may invoke other workflows via
 # `kind: workflow`. It is the execution LEAF the cohort driver
@@ -73,6 +82,15 @@ workflows:
       # backstop. Declared with a default so callers that predate this input
       # (flow.drive-program) don't need to change.
       verify_scope:   { type: string, default: "" }
+      # OPT-IN diff-scoped React anti-pattern gate on the TS arm only
+      # (docs/react-antipatterns.build-loop-wiring.md). false (default) = OFF:
+      # a flow-input default DOES apply (unlike a capability snippet input —
+      # cf. verify_scope), so every existing caller that omits it gets the exact
+      # prior behavior (no gate; ts pass → marking_complete). true = after
+      # cap.verify.ts passes, review THIS deliverable's own changed React files
+      # (cap.review.react-antipatterns, scoped to them, oracle disabled) and
+      # FAIL the deliverable on a new correctness-class finding, before mark.
+      react_review:   { type: boolean, default: false }
       # cpm-planner coordinates: which plan/deliverable, and the lock holder.
       plan_id:        { type: string, required: true }
       deliverable_id: { type: string, required: true }
@@ -85,6 +103,14 @@ workflows:
       status_complete: { status: complete }
       base_commit: ""
       impl_files_changed: 0
+      # React-gate slots — seeded so a guard never hits GUARD_UNSET_SLOT on a
+      # path that skips the gate (non-ts stack / react_review off). impl_react_*
+      # are overwritten by measuring_impl; the gate reads the flat count.
+      impl_react_files: []
+      impl_react_files_count: 0
+      react_findings: []
+      react_gate_pass: false
+      react_gate_reason: ""
     # HONEST definition of done (deterministic `met` flags): a deliverable is
     # only complete when BOTH real files changed AND the stack-appropriate
     # verifier passed on them — NOT a value that is true regardless of what the
@@ -191,6 +217,10 @@ workflows:
                 - "$.context.base_commit"
             output:
               impl_files_changed: "$.output.json.files_changed"
+              # Diff-scope for the React gate: this deliverable's own changed
+              # React source files (+ a flat count the gate guards on).
+              impl_react_files: "$.output.json.react_files"
+              impl_react_files_count: "$.output.json.react_files_count"
 
       # FAILED / EMPTY IMPLEMENT GUARD: the build-loop always resolves
       # structurally (it converges OR parks at a human who signs off), so it
@@ -324,14 +354,93 @@ workflows:
                   "$.context.ws_verify": verify
 
       # Branch on the chosen verifier's verifyOut status (exhaustive: pass | anything else).
+      # `pass` no longer goes straight to marking_complete — it routes through
+      # react_gate, which for every NON-ts / opt-out path is a single no-op hop
+      # to marking_complete (byte-for-byte the prior outcome).
       verified_decision:
         transitions:
           pass:
-            target: marking_complete
+            target: react_gate
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.ws_verify.status == 'pass'" }
           fail:
+            target: failed
+            actor: deterministic
+
+      # ── DIFF-SCOPED REACT ANTI-PATTERN GATE (ts arm, opt-in) ─────────────
+      # Runs the React review ONLY when ALL hold: the stack is ts, the caller
+      # opted in (react_review), and this deliverable actually changed React
+      # source (impl_react_files_count > 0). Any miss → skip cleanly to
+      # marking_complete (the HONEST "nothing to review" path — never a
+      # fabricated pass or finding). rust/dotnet deliverables always take skip.
+      react_gate:
+        transitions:
+          run_review:
+            target: reviewing_react
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.stack == 'ts'" }
+              - { kind: expr, expr: "$.workflow.input.react_review == true" }
+              - { kind: expr, expr: "$.context.impl_react_files_count > 0" }
+          # Unguarded default — non-ts, opt-out, or no React files changed.
+          skip:
+            target: marking_complete
+            actor: deterministic
+
+      # Scoped review of THIS deliverable's changed React files only. The
+      # react_profile object literal carries scope_files (the diff), disables
+      # the runtime oracle (oracle_command "none" — never run the whole test
+      # suite per slice), and supplies suppressions/extra_rules so every nested
+      # arg-path cap.review dereferences resolves (its own header's poka-yoke).
+      reviewing_react:
+        goal: Review this deliverable's own changed React files for new anti-patterns.
+        transitions:
+          review:
+            target: react_gating
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.react-antipatterns
+              use:
+                inputs:
+                  react_profile:
+                    oracle_command: "none"
+                    suppressions: []
+                    extra_rules: []
+                    scope_files: "$.context.impl_react_files"
+                outputs:
+                  "$.context.react_findings": findings
+
+      # Deterministic pass/fail on the ADJUDICATED findings (correctness-class
+      # blocks; maintainability/performance never fail a build). Flat gate_pass
+      # scalar for the guard (GUARD_UNSET_SLOT poka-yoke).
+      react_gating:
+        goal: Fold the adjudicated React findings into a pass/fail gate.
+        transitions:
+          gate:
+            target: react_review_verdict
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.react.review-gate
+              args:
+                - "$.context.react_findings"
+            output:
+              react_gate_pass:   "$.output.json.gate_pass"
+              react_gate_reason: "$.output.json.reason"
+
+      react_review_verdict:
+        transitions:
+          clean:
+            target: marking_complete
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.react_gate_pass == true" }
+          # Unguarded default — a blocking correctness finding: fail the
+          # deliverable (NOT marked complete), reverting it to ready for a
+          # re-drive with the fix. $.context.react_gate_reason carries why.
+          blocked:
             target: failed
             actor: deterministic
 

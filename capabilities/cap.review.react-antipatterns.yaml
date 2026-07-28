@@ -136,7 +136,14 @@ workflows:
           $.context.static_candidates (Layer A's cheap, noisy candidates) and
           $.context.runtime_result (Layer C's probe, if it ran). For each
           candidate, open the file and confirm or refute it with real
-          evidence; independently sweep the touched files (and hooks/
+          evidence. When $.workflow.input.react_profile.scope_files is
+          non-empty your review is DIFF-SCOPED to exactly those files (the
+          deliverable's own changed React files) — Layer A already restricted
+          its candidates to them; confine your independent sweep to that set
+          (and the hooks/components they directly call), NOT the whole repo, and
+          do not raise findings on files outside the scope. An empty
+          scope_files means whole-repo review (legacy). Then
+          independently sweep the touched files (and hooks/
           components they call) for the anti-patterns static analysis cannot
           see (Effects-as-derived-state, copied-props-into-state, impossible/
           contradictory state, Effect chains). Apply the skill's derived-state

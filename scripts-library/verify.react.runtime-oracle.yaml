@@ -6,6 +6,13 @@
 # honest capability without this script ever running.
 #
 # Detection order:
+#   0. $2 / ORACLE_COMMAND == an explicit DISABLE sentinel (none | off | - |
+#      skip | disabled, case-insensitive) -- caller has deliberately opted OUT
+#      of the runtime layer (e.g. the diff-scoped per-deliverable React gate,
+#      which must never run the whole test suite per slice). Emit an honest
+#      skip (ran:false, oracle:"disabled") and stop -- findings downstream stay
+#      PLAUSIBLE, never a fabricated CONFIRMED. This is a caller-requested skip,
+#      NOT auto-detection.
 #   1. $2 / ORACLE_COMMAND (profile override) -- the repo profile's
 #      `oracle_command`, when the generic auto-detection below would guess
 #      wrong for this repo's actual test invocation.
@@ -56,6 +63,15 @@ scripts:
           '{oracle: "none", ran: false, exit_code: null, warnings: [], degrade_reason: $reason}'
         exit 0
       }
+
+      # Explicit caller-requested DISABLE (see detection order step 0). Honest
+      # skip, distinct from "no oracle found": the caller chose not to run one.
+      case "$(printf '%s' "$ORACLE_COMMAND" | tr '[:upper:]' '[:lower:]')" in
+        none|off|-|skip|disabled)
+          jq -n '{oracle: "disabled", ran: false, exit_code: null, warnings: [],
+                  degrade_reason: "runtime oracle explicitly disabled by caller (oracle_command sentinel); Layer C skipped by request"}'
+          exit 0 ;;
+      esac
 
       if [ ! -d "$REPO_PATH" ]; then
         emit_none "repo_path not found: $REPO_PATH"
