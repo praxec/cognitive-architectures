@@ -1,0 +1,47 @@
+# capabilities/cap.inspect.owned-files-scope.yaml
+#
+# Snippet-bearing wrapper around the `inspect.owned-files-scope` script: derive
+# the SPACE-SEPARATED scope string for a TS slice's per-deliverable scoped verify
+# from `deliverable.owned_files` (or an explicit caller override).
+#
+# WHY A CAPABILITY (not just a script step): flow.implement.ts-slice feeds the
+# derived scope into cap.verify.ts via `use.inputs`, and SPEC §7.3 / V13 only let
+# a `use.inputs` reference a slot seeded by the flow's own `inputs:` OR by a
+# child workflow's `use.outputs` — a bare `kind: script` transition `output:`
+# does NOT seed such a slot (UNREACHABLE_SLOT). Wrapping the derivation as a
+# capability with a typed `scope` output means the slice can bind it via
+# `use.outputs`, which legally seeds `$.context.scope` for the verify step.
+workflows:
+  cap.inspect.owned-files-scope:
+    verb: inspect
+    lifecycle: experimental
+    description: >
+      Derive the space-separated scope string for a per-deliverable scoped TS
+      verify from deliverable.owned_files (top-level or under metadata), or take
+      an explicit override verbatim. Empty when neither is present — the honest
+      full-barrier fallback for cap.verify.ts.
+    snippet:
+      # Both OPTIONAL (mirrors cap.verify.ts's cwd) so a deterministic slot call
+      # degrades to an empty scope rather than failing the sub-workflow start.
+      inputs:
+        deliverable:    { type: object }
+        scope_override: { type: string, default: "" }
+      outputs:
+        scope: { type: string }
+    initialState: ready
+    states:
+      ready:
+        goal: Derive the scoped-verify string from the deliverable's owned_files.
+        transitions:
+          run:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.owned-files-scope
+              args:
+                - "$.workflow.input.deliverable"
+                - "$.workflow.input.scope_override"
+            output:
+              scope: "$.output.json.scope"
+      done: { terminal: true }

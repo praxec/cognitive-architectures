@@ -1,0 +1,78 @@
+# scripts-library/inspect.owned-files-scope.yaml
+#
+# DETERMINISTIC scope-string derivation for the TS build slice
+# (flow.implement.ts-slice). cap.verify.ts / verify.ts.green take `scope` as a
+# SPACE-SEPARATED STRING of repo-relative paths, but a cpm-planner deliverable
+# carries its file-disjoint surface as an ARRAY (`deliverable.owned_files`, or
+# `deliverable.metadata.owned_files`). The engine's binding language can join
+# integers ({add}) and concat literals ({concat}) but cannot space-join the
+# ELEMENTS of a single array path — so this tiny normalizer bridges the array to
+# the string the verify cap expects. Code decides the scope; the flow only routes
+# it (same split as inspect.stack / verify.test.tdd-verdict).
+#
+# WHY per-deliverable (not the flow-wide verify_scope): flow.execute-cohorts'
+# `verify_scope` is ONE value shared by every deliverable in a run — it cannot
+# scope the vitest/lint verdict to THIS deliverable's own files. owned_files is
+# the planner's per-deliverable, file-disjoint partition, so scoping the TS
+# verdict to it is what makes the per-slice check both fast AND honest (it only
+# lints/tests the surface this slice actually owns).
+#
+# Precedence for the scope:
+#   1. OVERRIDE ($2) when non-empty — an explicit caller-supplied scope string
+#      wins verbatim (lets flow.execute-cohorts' verify_scope still override).
+#   2. else deliverable.owned_files (array) space-joined.
+#   3. else deliverable.metadata.owned_files (array) space-joined.
+#   4. else "" — the HONEST empty scope. cap.verify.ts treats an empty scope as
+#      the FULL barrier gate (install + tsc + vite build); an empty owned_files
+#      is a planner-shape anomaly, so the full gate is the safe (never-disguised)
+#      fallback rather than a silent skip.
+#
+# Args:
+#   $1 / DELIVERABLE_JSON — the deliverable metadata object (JSON string; the
+#                           script-arg renderer stringifies object/array values)
+#   $2 / OVERRIDE         — optional explicit scope string (verify_scope); ""
+#                           means "derive from owned_files"
+# Emits {scope, source, count} JSON on stdout, read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  inspect.owned-files-scope:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      META="${1:-${DELIVERABLE_JSON:-}}"
+      OVERRIDE="${2:-}"
+
+      # 1. Explicit override wins verbatim (trim surrounding whitespace only).
+      trimmed_override="$(printf '%s' "$OVERRIDE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      if [ -n "$trimmed_override" ]; then
+        jq -n --arg s "$trimmed_override" '{scope:$s, source:"override", count:($s|split(" ")|map(select(length>0))|length)}'
+        exit 0
+      fi
+
+      # 2/3. Space-join owned_files (top-level, else metadata.owned_files).
+      scope=""
+      source="none"
+      if printf '%s' "$META" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        # Coalesce the two accepted locations; keep only non-empty string entries.
+        joined="$(printf '%s' "$META" | jq -r '
+          ((.owned_files // .metadata.owned_files // [])
+            | if type == "array" then . else [] end
+            | map(select(type == "string" and (. | length) > 0)))
+          | join(" ")' 2>/dev/null || printf '')"
+        if [ -n "${joined// /}" ]; then
+          scope="$joined"
+          if printf '%s' "$META" | jq -e '.owned_files | type == "array"' >/dev/null 2>&1; then
+            source="owned_files"
+          else
+            source="metadata.owned_files"
+          fi
+        fi
+      fi
+
+      # 4. Emit — empty scope is honest (cap.verify.ts full-barrier fallback).
+      jq -n --arg s "$scope" --arg src "$source" \
+        '{scope:$s, source:$src, count:($s|split(" ")|map(select(length>0))|length)}'
