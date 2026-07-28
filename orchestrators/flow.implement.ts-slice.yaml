@@ -1,0 +1,298 @@
+# orchestrators/flow.implement.ts-slice.yaml
+#
+# TypeScript/React implement-a-deliverable loop — the TS analogue of
+# flow.implement.dotnet-slice, and the BUILD-phase builder a `stack: ts`
+# deliverable routes to (via flow.implement.deliverable's build gate). It exists
+# because the generic cap.implement.build-loop is a RUST/cargo TDD verdict engine:
+# pointed at a TS repo it runs `cargo` (→ "could not find Cargo.toml") and the
+# model chain burns out on a build that can never go green. A frontend
+# deliverable must be built + verified with its OWN toolchain — tsc + vitest,
+# NOT cargo.
+#
+# THE VERDICT (reused, not reinvented): the per-slice build/test verdict is
+# cap.verify.ts (verify.ts.green) SCOPED to the deliverable's owned_files — the
+# TS analogue of cargo build+test. On the scoped path that script runs
+# eslint-on-touched-files + `vitest run` on the affected test file(s) ONLY, and
+# HONESTLY SKIPS (criterion met=true, evidence says why) when the slice touched
+# no test file or no runner is present — it never invents a pass or a failure.
+#
+# WHY NO PER-SLICE `tsc --noEmit` / `vite build`: those are inherently
+# WHOLE-PROGRAM — they cannot be scoped to one file at any less cost than running
+# them over the entire package. verify.ts.green documents exactly this and keeps
+# them in its UNSCOPED (scope="") barrier arm, meant to run ONCE at cohort/plan
+# close. So the whole-program TS backstop for a ts deliverable is NOT this
+# per-slice loop; it is (a) flow.implement.deliverable's own post-build verify_ts
+# gate and (b) flow.execute-cohorts' single closing `barrier_verifying` pass —
+# both call cap.verify.ts with scope="" (full install + tsc + vite build). This
+# is the deliberate difference from dotnet-slice's second gate: .NET's backstop
+# (a composition-root DI-validation test project) is a CHEAP, TARGETED superset
+# surface worth running per slice; TS's backstop is the whole-program typecheck +
+# bundle, which belongs at the barrier, not per slice. Running it here would pay
+# for the full program on every slice and defeat the velocity discipline.
+#
+# AGENT FILE ACCESS (the gap this loop was failing on): the build agents in the
+# real wave-2 run self-diagnosed "read-only, no search tool — can't find
+# package.json / navigate the tree". The auto-driven agent leaves inherit the
+# gateway's `file:{{ $.run.repo_root }}` host = read_file / write_file /
+# edit_file / search_file (WITHIN a named file) / read_range — there is NO
+# repo-wide glob / directory-list / repo-grep tool, and a per-state `tools:`
+# block cannot add one (it REPLACES the inherited set, and no glob token exists).
+# So this loop does NOT rely on blind discovery: the `scoping` step derives the
+# deliverable's owned_files and the `implementing` goal hands the agent that
+# EXACT path list to read/write. The agent never has to find its files — it is
+# told them. (A true repo-wide glob/grep tool is a gateway/kernel change tracked
+# separately; this loop is correct without it because owned_files is authoritative.)
+#
+# Loop (single scoped gate — see "WHY NO PER-SLICE" above):
+#   scoping        (inspect.owned-files-scope) → derive the scope string →
+#   implementing   (agent, reasoning tier) writes the slice + its scoped test →
+#   verifying_scoped (cap.verify.ts, scope=owned_files) →
+#   scoped_gate:  pass→staging | fail&iter<cap→implementing(build_issues) | fail→failed
+#   staging       (inspect.changed-files) → git-derive the slice's real file set →
+#   committing    (run.git.commit-slice) → done
+#
+# This is a FLOW (not a capability): only flows may invoke other workflows via
+# `kind: workflow` (SPEC §3/§4.1). Like flow.implement.dotnet-slice it is the
+# stack-specific BUILD leaf; flow.implement.deliverable couples it to the durable
+# mark_status transition, and flow.execute-cohorts drives cohorts on top.
+
+workflows:
+  flow.implement.ts-slice:
+    lifecycle: experimental
+    description: >
+      TypeScript/React implement-a-deliverable loop with a per-slice tsc/vitest
+      verdict (cap.verify.ts SCOPED to the deliverable's owned_files) — the TS
+      analogue of flow.implement.dotnet-slice. The agent is handed its exact
+      owned_files (no repo-wide search needed); the whole-program tsc/vite
+      backstop stays at the cohort barrier, not per slice.
+    inputs:
+      # The deliverable spec — goal + owned_files + acceptance_criteria. Passed
+      # to the agent goal (which reads $.workflow.input.plan.owned_files for the
+      # exact files to touch) and to `scoping` to derive the verify scope.
+      plan: { type: object, required: true }
+      # OPTIONAL explicit scope override (space-separated repo-relative paths).
+      # "" (default) ⇒ derive the scope from plan.owned_files. Lets a caller
+      # thread flow.execute-cohorts' verify_scope through verbatim when set.
+      scope_override: { type: string, default: "" }
+    blackboard:
+      plan:           { type: object }
+      scope_override: { type: string }
+      scope:          { type: string }
+      verify_out:     { type: object }
+      build_issues:   { type: string }
+      files_written:  { type: string }
+      commit_message: { type: string }
+      iter:           { type: integer }
+      iter_cap:       { type: integer }
+      last_commit:    { type: object }
+    initialContext:
+      iter: 0
+      iter_cap: 3
+      scope: ""
+      build_issues: ""
+      files_written: ""
+      commit_message: "praxec: verified TypeScript slice (scoped tsc/vitest)"
+    initialState: scoping
+    states:
+
+      # ── DERIVE the per-slice scope ── space-join the deliverable's owned_files
+      # (or take scope_override verbatim) into the string cap.verify.ts expects.
+      # Deterministic: code decides the scope, the loop only routes it.
+      # Invoked as a CAPABILITY (kind: workflow) so its `scope` output is bound
+      # via `use.outputs`, which legally SEEDS $.context.scope for the later
+      # verifying_scoped `use.inputs` (SPEC §7.3/V13 — a bare script `output:`
+      # would not, → UNREACHABLE_SLOT).
+      scoping:
+        goal: Derive the scoped-verify string from the deliverable's owned_files.
+        transitions:
+          derive:
+            target: implementing
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.inspect.owned-files-scope
+              use:
+                inputs:
+                  deliverable:    "$.workflow.input.plan"
+                  scope_override: "$.workflow.input.scope_override"
+                outputs:
+                  "$.context.scope": scope
+
+      # ── AGENT (reasoning tier) ── writes the deliverable + its scoped test.
+      # Inherits the gateway's file host (read_file/write_file/edit_file/
+      # search_file/read_range) — NO per-state `tools:` override (that would
+      # REPLACE the inherited set). It does NOT need repo-wide search because the
+      # goal hands it the exact owned_files to operate on.
+      implementing:
+        goal: >
+          Implement the deliverable described in $.context.plan in the target
+          TypeScript/React repository. The EXACT files you may create or change
+          are the space-separated paths in $.context.scope (the deliverable's
+          owned_files) — read those directly with your read_file tool and write
+          them with write_file/edit_file. $.context.scope is RE-DERIVED on every
+          iteration, so it is ALWAYS present — including on retries — even when
+          the full deliverable object is not carried forward; trust it for your
+          file list. You do NOT have a repo-wide search/glob tool, so do not guess
+          at or depend on paths outside $.context.scope; if a faithful
+          implementation genuinely needs a file outside that list, STOP and report
+          "deliverable under-scoped: needs <path>" rather than inventing a
+          stand-in.
+          GROUND FIRST: before writing a test, read one existing sibling test in
+          the same area and match its idiom exactly — this repo tests with VITEST
+          + React Testing Library (`describe`/`it`/`expect`, `render`,
+          `screen.*`), NOT jest globals or a foreign matcher set; guessing the
+          wrong runner/matcher is a type or resolve error.
+          REACT INVARIANTS (non-negotiable — the diff-scoped React gate runs at
+          verify and will fail the deliverable on a new violation): DERIVE values
+          from props/state DURING RENDER — never mirror or copy state/props into
+          other state through a useEffect (no derived-state-in-Effect); make time
+          INJECTABLE (accept a clock/`now`; no wall-clock
+          Date.now/setTimeout/setInterval in logic that must be deterministically
+          testable); keep render pure; give lists stable domain-id keys.
+          If $.context.build_issues is non-empty, the last scoped tsc/vitest/lint
+          verdict FAILED with those issues — fix EVERY one this pass and do not
+          resubmit unchanged.
+          Report `files_written` (a single space-separated string of the
+          repo-relative paths you created or changed) and a one-line
+          `commit_message`. EVERY field is OPTIONAL — the loop derives the real
+          changed-file set from git, so once the files are on disk ALWAYS call
+          final_answer to sign off (even with an empty object); never withhold the
+          sign-off because a field is unknown.
+        transitions:
+          write_slice:
+            target: verifying_scoped
+            actor: agent
+            # The agent MAY report files_written / commit_message, but the loop
+            # does NOT bind them to typed slots — git is the source of truth for
+            # what changed (staging derives files_written) and commit_message
+            # keeps its fixed initialContext default. WHY (BLACKBOARD_TYPE_ERROR
+            # fix): `apply_schema_defaults` only fills an ABSENT key, not a null —
+            # so an agent (or auto-drive on model exhaustion) that yields a null
+            # for these optional fields would write null into a typed
+            # `{type: string}` slot and fail the run with
+            # "output write to typed slot 'commit_message': null is not of type
+            # string". Not mapping them removes the null-write vector entirely
+            # (both slots always hold a valid string), the same "the agent report
+            # is a hint, not authority" discipline as cap.implement.build-loop.
+            inputSchema:
+              type: object
+              properties:
+                files_written:  { type: string, default: "" }
+                commit_message: { type: string, default: "praxec: verified TypeScript slice (scoped tsc/vitest)" }
+            executor: { kind: noop }
+            output:
+              iter: { add: ["$.context.iter", 1] }
+
+      # ── SCOPED per-slice verdict ── cap.verify.ts on owned_files: eslint on the
+      # touched files + `vitest run` on the affected test(s), honest-skip when
+      # there is nothing to test. cwd = $.run.repo_root (the deliverable's repo —
+      # re-rooted by flow.implement.deliverable's `repoRoot` override on the
+      # sub-workflow spawn). This CAPTURES a status:fail verdict as output (the
+      # cap sets treatNonZeroAsFailure:false) rather than erroring the transition.
+      verifying_scoped:
+        transitions:
+          verify:
+            target: scoped_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.ts
+              use:
+                inputs:
+                  cwd:   "$.run.repo_root"
+                  scope: "$.context.scope"
+                outputs:
+                  "$.context.verify_out": verify
+
+      scoped_gate:
+        transitions:
+          # Scoped green → commit the verified slice.
+          commit:
+            target: staging
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.verify_out.status == 'pass'" }
+          # INFRASTRUCTURE failure (status: not_evaluated) → escalate IMMEDIATELY,
+          # do NOT retry. verify.ts.green emits not_evaluated when it could not run
+          # the check at all — no node_modules to reuse / cold install failed / no
+          # tsc binary / not a node project. That is NOT a code defect the agent
+          # can fix by re-editing, so retrying is pure fleet burn (the loop that
+          # was hard-cancelled). Fail loud on the FIRST occurrence; the operator
+          # provisions the toolchain and re-drives.
+          escalate_infra:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.verify_out.status == 'not_evaluated'" }
+          # CODE failure (status: fail) with attempts remaining → RE-DERIVE the
+          # scope (so the retrying agent still gets its owned_files/file list, which
+          # is not otherwise carried into the retry context), then back to the fix
+          # state with the verdict detail. Bounded by iter_cap.
+          retry:
+            target: scoping
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.verify_out.status != 'pass'" }
+              - { kind: expr, expr: "$.context.verify_out.status != 'not_evaluated'" }
+              - { kind: expr, expr: "$.context.iter < $.context.iter_cap" }
+            executor: { kind: noop }
+            output:
+              build_issues: "$.context.verify_out.summary"
+          # Out of attempts on a CODE failure → fail loud (outcome: failure), never
+          # a disguised pass. flow.implement.deliverable reverts it to ready.
+          give_up:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.verify_out.status != 'pass'" }
+              - { kind: expr, expr: "$.context.verify_out.status != 'not_evaluated'" }
+              - { kind: expr, expr: "$.context.iter >= $.context.iter_cap" }
+          # Default (V23) — an out-of-domain/absent status routes to failure
+          # rather than dead-stalling.
+          unexpected:
+            target: failed
+            actor: deterministic
+
+      # ── DETERMINISTIC staging ── compute the slice's real changed files from
+      # git (tracked mods + untracked non-ignored) rather than trusting the
+      # agent's optional files_written. Mirrors cap.implement.build-loop's
+      # staging so an empty/fumbled report can't produce a no-op commit.
+      staging:
+        transitions:
+          stage:
+            target: committing
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.changed-files
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.run.repo_root"
+            output:
+              files_written: "$.output.json.files"
+
+      # ── COMMIT the verified slice ── stages the git-derived files, refuses the
+      # default branch, credits this flow (run.git.commit-slice's own guards).
+      committing:
+        transitions:
+          commit:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.commit-slice
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.context.commit_message"
+                - "$.context.files_written"
+                - "cognitive/flow.implement.ts-slice"
+            output:
+              last_commit: "$.output.json"
+
+      done:
+        terminal: true
+        outcome: success
+
+      failed:
+        terminal: true
+        outcome: failure
