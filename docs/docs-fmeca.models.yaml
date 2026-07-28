@@ -1,35 +1,63 @@
-# docs/docs-fmeca.models.yaml — a REFERENCE models chain for
-# cognitive/flow.review.docs-fmeca (copy into your gateway's models_yaml,
-# or point gateway.models_yaml at this file).
+# docs/docs-fmeca.models.yaml — the canonical REFERENCE models chains for the
+# `review` affinity family (copy into your gateway's models_yaml, or point
+# gateway.models_yaml at this file). Named for cognitive/flow.review.docs-fmeca,
+# the effort-strictest consumer, but it governs EVERY affinity:review consumer
+# in the pack (cap.review.doc-drift / assertion-quality, cap.diagnose.finding /
+# browser-probe, cap.implement.resolve-conflicts, the build-loop QA reviewers,
+# flow.review.docs-fmeca's leaves) PLUS the diff-scoped React gate.
 #
-# WHY THIS CHAIN EXISTS (the flow.qa.explore charter lesson): the engine
-# hard-fails an agent step whose SELECTED model does not advertise the
-# requested reasoning-effort level — and selection walks the whole
-# fallback chain, so ONE member that lacks the level is a landmine
-# (deepseek-v4-pro advertises only `none|high`; a chain leading elsewhere
-# still dies with REASONING_EFFORT_UNSUPPORTED the moment fallback
-# reaches it while the step asks for `low` or `medium`).
+# NO FRONTIER MODEL ANYWHERE (owner directive 2026-07-28): nothing in any chain
+# below may be pegged to a frontier-priced model. The former last rung
+# anthropic/claude-sonnet-4-6 ($15/M output, over the $5 cap) is REMOVED from
+# every chain. Cost governance made it a live hazard, not just a cost line:
+# auto-drive refuses to SPEND on a frontier model without approval, so once the
+# commodity leads failed the React gate fell through to sonnet and HARD-BLOCKED
+# with AGENT_INVALID_MODEL_BINDING: FRONTIER_NOT_APPROVED — stalling the drain.
 #
-# flow.review.docs-fmeca's agent leaves — reviewing_doc, the cog-sci pass
-# reviewing_doc_cogsci, reviewing_script, and the human-gated fixer's
-# `fixing` leaf — ALL declare `affinity: review` + `reasoning_effort:
-# medium` (one known-good chain covers the whole flow; the gateway ships
-# a default of `low` for engines that predate the per-state knob). EVERY
-# member below advertises BOTH `low` and `medium` in the model catalog,
-# so no fallback depth can hit the unsupported-effort failure:
-#   z-ai/glm-5.2                 -> none|low|medium|high (commodity lead)
-#   moonshotai/kimi-k2.6         -> none|low|medium|high
-#   anthropic/claude-sonnet-4-6  -> none|low|medium|high (frontier rung)
-# Do NOT add deepseek/deepseek-v4-pro (or any none|high-only model) to
-# the `review` chain while running this flow.
+# WHY TWO REVIEW CHAINS (the tension this file resolves): two consumer classes
+# share the review affinity but have INCOMPATIBLE model contracts.
 #
-# COST GOVERNANCE (live-verified): auto-drive refuses to SPEND on a
-# frontier-priced model without human approval — claude-sonnet-4-6
-# ($15/M output, over the $5 cap) fails AGENT_INVALID_MODEL_BINDING:
-# FRONTIER_NOT_APPROVED unless your gateway lists it under
-# `gateway.cost.approve_frontier`. The chain therefore LEADS with the
-# commodity reasoning model; the sonnet rung only engages if you approve
-# it (or is skipped by fallback if you don't).
+#   (1) EFFORT-strict, effort:medium — flow.review.docs-fmeca's agent leaves
+#       (reviewing_doc, reviewing_doc_cogsci, reviewing_script, the fixer's
+#       `fixing`) and the other adjudication reviewers declare `reasoning_effort:
+#       medium`. The engine HARD-FAILS an agent step whose SELECTED model does
+#       not advertise the requested effort — and selection walks the whole
+#       fallback chain, so ONE none|high-only member is a landmine
+#       (REASONING_EFFORT_UNSUPPORTED the moment fallback reaches it at low|medium).
+#       => `activity.review` must contain ONLY models that advertise low+medium.
+#
+#   (2) CONVERGENCE-strict, effort:high — the diff-scoped React anti-pattern gate
+#       (cap.review.react-antipatterns, state `reviewing`) must converge a
+#       STRUCTURED-findings result. The only commodity model that reliably does
+#       is deepseek-v4-pro (glm-5.2 burns its full step budget without
+#       finalizing). deepseek advertises ONLY none|high — a landmine for class
+#       (1), but fine here because this gate never requests low|medium.
+#
+# Rather than gamble on whether a per-member `effort:` pin overrides a step's
+# requested effort (engine-version-dependent, and a wrong guess hard-fails the
+# medium leaves), the two classes get SEPARATE affinities:
+#
+#   activity.review        -> z-ai/glm-5.2 -> moonshotai/kimi-k2.6
+#       Every member advertises none|low|medium|high, so no fallback depth hits
+#       the unsupported-effort failure. Medium-safe. NO deepseek (none|high-only).
+#       NO frontier. This is the effort-safe chain the docs-fmeca leaves need.
+#
+#   activity.react-review  -> deepseek/deepseek-v4-pro (effort:high)
+#                          -> moonshotai/kimi-k2.6 -> z-ai/glm-5.2
+#       deepseek LEADS for structured-findings convergence; kimi + glm backstop.
+#       Consumed by cap.review.react-antipatterns (affinity: react-review). deepseek
+#       is pinned effort:high; the gate requests high (never low|medium), so the
+#       none|high advertisement is never violated. NO frontier.
+#
+# Catalog effort advertisements (for the effort-safety argument above):
+#   z-ai/glm-5.2            -> none|low|medium|high
+#   moonshotai/kimi-k2.6    -> none|low|medium|high
+#   deepseek/deepseek-v4-pro-> none|high            (react-review ONLY)
+#
+# NOTE (engine compatibility): the per-member `effort:` key on the react-review
+# lead requires a praxec engine that supports it (0.0.25+). On an older engine
+# drop the `effort: high` line — deepseek then runs at the step's requested
+# effort, which for the React gate is already high.
 
 version: 1
 default:
@@ -39,10 +67,10 @@ default:
 - provider:
     name: openrouter
   model: moonshotai/kimi-k2.6
-- provider:
-    name: openrouter
-  model: anthropic/claude-sonnet-4-6
 activity:
+  # EFFORT-SAFE (none|low|medium|high everywhere) — the docs-fmeca leaves and
+  # every other adjudication reviewer. NO deepseek (none|high-only landmine for
+  # medium), NO frontier.
   review:
   - provider:
       name: openrouter
@@ -50,9 +78,21 @@ activity:
   - provider:
       name: openrouter
     model: moonshotai/kimi-k2.6
+  # CONVERGENCE-FIRST — the diff-scoped React anti-pattern gate
+  # (cap.review.react-antipatterns). deepseek(high) leads because it reliably
+  # finalizes the structured-findings contract; the gate only ever requests
+  # high, so deepseek's none|high advertisement is never violated. NO frontier.
+  react-review:
   - provider:
       name: openrouter
-    model: anthropic/claude-sonnet-4-6
+    model: deepseek/deepseek-v4-pro
+    effort: high
+  - provider:
+      name: openrouter
+    model: moonshotai/kimi-k2.6
+  - provider:
+      name: openrouter
+    model: z-ai/glm-5.2
 overrides:
   reasoning:
   - provider:
@@ -61,6 +101,3 @@ overrides:
   - provider:
       name: openrouter
     model: moonshotai/kimi-k2.6
-  - provider:
-      name: openrouter
-    model: anthropic/claude-sonnet-4-6
