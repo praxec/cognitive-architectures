@@ -135,6 +135,35 @@ scripts:
       crit() { printf '{"id":"%s","met":%s,"evidence":"%s"}' "$1" "$2" "$3"; }
       STATUS="pass"
 
+      # ── DEPENDENCIES (NuGet restore) — REUSE restored packages; never let a
+      # COLD restore hang or masquerade as a code failure. `dotnet build` does an
+      # IMPLICIT restore; when packages are ALREADY on disk
+      # (obj/project.assets.json present) that implicit restore is incremental and
+      # offline (and still correctly fetches a genuinely-new dependency the slice
+      # adds). When they are NOT present, a full cold restore against an
+      # unreachable NuGet feed is the .NET analogue of a cold `npm ci` — so we run
+      # ONE explicit `dotnet restore` and, if it fails, emit `not_evaluated`
+      # (INFRASTRUCTURE — the code was never built/tested), NOT `fail` (a code
+      # defect), so the caller ESCALATES immediately instead of burning retries on
+      # an edit that cannot fix a missing package feed. (NuGet's own per-request
+      # timeouts bound a cold restore to a failure rather than an unbounded hang;
+      # a portable `timeout` wrapper is impractical across the native/WSL `dn`
+      # modes — noted as a follow-up if a pathological feed ever hangs restore.)
+      if ! find "$cwd" -maxdepth 6 -type f -name project.assets.json -path '*/obj/*' -print -quit 2>/dev/null | grep -q .; then
+        if [ -n "$build_target" ]; then
+          restore_out=$(dn restore "$build_target" 2>&1); restore_rc=$?
+        else
+          restore_out=$(dn restore 2>&1); restore_rc=$?
+        fi
+        printf '%s\n' "$restore_out" >&2
+        if [ "$restore_rc" -ne 0 ]; then
+          rsummary=$(printf 'dotnet restore failed (mode: %s) — dependencies unavailable; build/test not run. See restore log for detail.' "$mode" | json_escape)
+          printf '{"status":"not_evaluated","summary":"%s","criteria":[%s],"findings":[],"provenance":{"stack":"language:dotnet","source":"pack"}}\n' \
+            "$rsummary" "$(crit restore false "cold dotnet restore failed and no restored packages to reuse")"
+          exit 1
+        fi
+      fi
+
       # Capture build/test output so we can BOTH stream it to stderr (logs) AND
       # parse compiler diagnostics out of it for the failure payload.
       build_out=""

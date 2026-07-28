@@ -1,0 +1,76 @@
+# scripts-library/verify.react.review-gate.yaml
+#
+# The pass/fail GATE for the diff-scoped per-deliverable React anti-pattern
+# check (design: docs/react-antipatterns.build-loop-wiring.md). Folds the
+# ADJUDICATED findings emitted by cap.review.react-antipatterns (Layer D
+# survivors -- NOT the high-recall Layer-A candidates) into a flat verdict the
+# flow guards on directly.
+#
+# A finding BLOCKS the deliverable iff its `category` is in the blocking set
+# (default: just "correctness" -- the reliability/real-bug bucket, e.g. the
+# derived-state-in-Effect / Effect-over-composition class this whole wiring
+# exists to stop). maintainability and performance findings are surfaced but
+# NEVER fail a build -- performance is explicitly de-prioritized by the review
+# skill, and failing a slice on a style nit would be a non-actionable gate.
+#
+# HONESTY (mirrors verify.ts.green / the pack's verify.*.green discipline):
+#   - an EMPTY findings array (the common "no react files in the diff, nothing
+#     to review" case) ⇒ gate_pass:true, reason states zero findings. Never a
+#     fabricated finding.
+#   - a MALFORMED findings input ⇒ gate_pass:FALSE (fail-closed): the gate
+#     cannot honestly certify a slice whose review state it can't read.
+#
+# Emits a FLAT top-level `gate_pass` boolean (the pack's GUARD_UNSET_SLOT
+# poka-yoke: the flow must guard a top-level scalar, never a nested field).
+#
+# Args (positional first, env fallback):
+#   $1 / FINDINGS_JSON        -- cap.review.react-antipatterns `findings` array
+#   $2 / BLOCKING_CATEGORIES  -- optional JSON array of blocking categories;
+#                                default ["correctness"]
+#
+# Emits JSON on stdout: { gate_pass, blocking_count, blocking[], total_findings,
+# reason }. Read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  verify.react.review-gate:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      FINDINGS_JSON="${1:-${FINDINGS_JSON:-[]}}"
+      [ -z "$FINDINGS_JSON" ] && FINDINGS_JSON='[]'
+      BLOCKING_CATEGORIES="${2:-${BLOCKING_CATEGORIES:-}}"
+      [ -z "$BLOCKING_CATEGORIES" ] && BLOCKING_CATEGORIES='["correctness"]'
+
+      # Fail-closed on malformed input: a gate that cannot read the review
+      # state must NOT certify the slice (never a disguised pass).
+      if ! printf '%s' "$FINDINGS_JSON" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        jq -n '{gate_pass: false, blocking_count: 0, blocking: [], total_findings: 0,
+                reason: "findings input was not a JSON array -- gate fails closed (cannot certify an unreadable review)"}'
+        exit 0
+      fi
+      if ! printf '%s' "$BLOCKING_CATEGORIES" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        BLOCKING_CATEGORIES='["correctness"]'
+      fi
+
+      jq -n \
+        --argjson findings "$FINDINGS_JSON" \
+        --argjson blocking_cats "$BLOCKING_CATEGORIES" '
+        ($findings | map(select(((.category // "correctness")) as $c | $blocking_cats | index($c)))) as $blocking
+        | ($blocking | length) as $bc
+        | {
+            gate_pass: ($bc == 0),
+            blocking_count: $bc,
+            blocking: ($blocking | map({file, line, category, verdict, summary})),
+            total_findings: ($findings | length),
+            reason: (if $bc == 0
+                       then "no blocking React findings (" + ($findings | length | tostring)
+                            + " adjudicated finding(s), 0 in blocking categories "
+                            + ($blocking_cats | tostring) + ")"
+                       else ($bc | tostring) + " blocking React finding(s) in categories "
+                            + ($blocking_cats | tostring)
+                            + " -- deliverable not marked complete; re-drive with fixes"
+                     end)
+          }'

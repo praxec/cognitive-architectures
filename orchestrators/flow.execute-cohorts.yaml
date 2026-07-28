@@ -85,6 +85,14 @@ workflows:
       # An unrecognized non-empty value falls to cap.verify.generic's honest
       # not_evaluated, which FAILS the barrier — never a disguised pass.
       stack: { type: string, default: "" }
+      # OPT-IN diff-scoped React anti-pattern gate, threaded straight to
+      # flow.implement.deliverable's ts arm (docs/react-antipatterns.build-loop-
+      # wiring.md). false (default) = OFF for every existing caller — byte-for-
+      # byte unchanged. A commodity FE cohort driver sets true so each ts
+      # deliverable's own changed React files are reviewed (cap.review.react-
+      # antipatterns, scoped) before it is marked complete; a NEW correctness-
+      # class antipattern fails the deliverable and re-drives it.
+      react_review: { type: boolean, default: false }
     initialState: acquiring
     states:
 
@@ -149,6 +157,9 @@ workflows:
                   # Per-deliverable narrowing (see header) — "" preserves the
                   # exact old full-backstop-per-deliverable behavior.
                   verify_scope:   "$.workflow.input.verify_scope"
+                  # Opt-in diff-scoped React gate on the ts arm; false default
+                  # keeps every existing caller unchanged.
+                  react_review:   "$.workflow.input.react_review"
                   plan_id:        "$.workflow.input.plan_id"
                   deliverable_id: "$.context.next_deliverable_id"
                   caller_id:      "$.workflow.input.caller_id"
