@@ -91,6 +91,7 @@ workflows:
 
       # ── AGENT (reasoning tier) ── writes the deliverable + its scoped test.
       implementing:
+        requires_file_write: true  # coding-evidence forcing function: success = real file writes
         goal: >
           Implement the deliverable described in $.context.spec in the target
           .NET repository using your file tools. Keep it minimal and correct.

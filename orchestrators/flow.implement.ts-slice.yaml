@@ -124,6 +124,7 @@ workflows:
       # REPLACE the inherited set). It does NOT need repo-wide search because the
       # goal hands it the exact owned_files to operate on.
       implementing:
+        requires_file_write: true  # coding-evidence forcing function: success = real file writes
         goal: >
           Implement the deliverable described in $.context.plan in the target
           TypeScript/React repository. The EXACT files you may create or change
