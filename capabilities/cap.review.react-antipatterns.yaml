@@ -53,7 +53,16 @@ workflows:
       summary), never asserting runtime confirmation when nothing ran.
     snippet:
       inputs:
-        react_profile: { type: object, default: {} }
+        # Default carries every nested field a later arg path dereferences
+        # ($.workflow.input.react_profile.oracle_command at detecting_runtime,
+        # .suppressions at adjudicating). Dogfood run wf_7ef46c9e (2026-07-28)
+        # proved the bare `{}` default dies at Layer C with "unresolved arg
+        # path '$.workflow.input.react_profile.oracle_command'" -- this pack's
+        # documented unresolved-arg-path failure class, on this capability's
+        # own doorstep.
+        react_profile:
+          type: object
+          default: { oracle_command: "", suppressions: [], extra_rules: [] }
       outputs:
         findings:      { type: array }
         killed:        { type: array }
@@ -130,7 +139,12 @@ workflows:
           evidence; independently sweep the touched files (and hooks/
           components they call) for the anti-patterns static analysis cannot
           see (Effects-as-derived-state, copied-props-into-state, impossible/
-          contradictory state, Effect chains). Submit `findings` per the
+          contradictory state, Effect chains). Apply the skill's derived-state
+          vs external-sync discriminator before flagging any Effect+setState:
+          an Effect syncing an external async source (server fetch/query-hook
+          result, subscription, non-React store) into local state on mount/
+          param-change is legitimate synchronization, not derived state.
+          Submit `findings` per the
           review.react.antipatterns skill's output contract -- raw, evidence-
           backed, classified (category + fix_class), NO verdict field.
         skills: [review.react.antipatterns]
