@@ -81,6 +81,26 @@ skills:
         `useMemo` if expensive), not in an Effect ("You Might Not Need an
         Effect"). The tell: an Effect whose only job is `setSomething(f(props,
         state))`.
+      - **Derived-state vs external-sync discriminator (apply BEFORE flagging
+        any Effect+setState):** the anti-pattern above requires that the
+        derived value be computable from props/state ALREADY present during
+        render. An Effect that synchronizes an EXTERNAL ASYNC SOURCE into
+        local state on mount/param-change is NOT this anti-pattern -- it is
+        legitimate external-source synchronization: server-fetched/query-hook
+        data seeded into local editable form state on load, a subscription/
+        event-bus/socket mirrored into state, a dialog re-seeding its form
+        fields from a server-loaded entity when it (re)opens. Ask: "could
+        this value be computed inline during render from values the component
+        already has?" -- only a YES makes it derived state. Worked example:
+        `useEffect(() => setFullName(first + ' ' + last), [first, last])` IS
+        the anti-pattern (both inputs are render-available; derive inline).
+        `useEffect(() => { if (contact) setForm(toForm(contact)) },
+        [contact])` where `contact` arrives from a query hook is NOT -- the
+        form state is an intentionally divergent editable copy of an async
+        source; at most note (confidence: low, maintainability) that a `key`
+        remount could replace a reset-on-open Effect. This server-to-form
+        sync is the single most common false positive of this review -- do
+        not flag it as derived state.
       - **Effect chains**: Effect A's `setState` triggers Effect B, which sets
         more state, which triggers Effect C. Each hop is an extra render and a
         stale-data window; collapse into one event handler or one derived

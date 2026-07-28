@@ -41,6 +41,15 @@ skills:
         vague, plausible-sounding, or "probably right" is a REFUTE, not an
         uphold. Require the SAME evidence discipline Layer B was held to: does
         the quoted `evidence` actually show the claimed misuse, in context?
+      - **Apply the derived-state vs external-sync discriminator** to every
+        "Effect-as-derived-state" finding: the anti-pattern requires the
+        derived value to be computable from props/state ALREADY present
+        during render. If the quoted evidence shows the Effect syncing an
+        external async source into state (server-fetched/query-hook data
+        seeded into editable form state on load, a subscription/non-React
+        store mirror, a dialog re-seeding fields from a loaded entity on
+        open), that is LEGITIMATE synchronization -- the single most common
+        false positive of this review -- and the vote is REFUTE.
       - **Attack the weakest point of each finding**, not the strongest:
         could the flagged code be intentional and correct (e.g. a `key={index}`
         on a list that is provably append-only and never reordered)? Could the

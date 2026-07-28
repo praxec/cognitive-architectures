@@ -10,11 +10,13 @@
 # still dies with REASONING_EFFORT_UNSUPPORTED the moment fallback
 # reaches it while the step asks for `low` or `medium`).
 #
-# flow.review.docs-fmeca's agent leaves declare `reasoning_effort: medium`
-# (and the gateway ships a default of `low` for engines that predate the
-# per-state knob). EVERY member below advertises BOTH `low` and `medium`
-# in the model catalog, so no fallback depth can hit the unsupported-
-# effort failure:
+# flow.review.docs-fmeca's agent leaves — reviewing_doc, the cog-sci pass
+# reviewing_doc_cogsci, reviewing_script, and the human-gated fixer's
+# `fixing` leaf — ALL declare `affinity: review` + `reasoning_effort:
+# medium` (one known-good chain covers the whole flow; the gateway ships
+# a default of `low` for engines that predate the per-state knob). EVERY
+# member below advertises BOTH `low` and `medium` in the model catalog,
+# so no fallback depth can hit the unsupported-effort failure:
 #   z-ai/glm-5.2                 -> none|low|medium|high (commodity lead)
 #   moonshotai/kimi-k2.6         -> none|low|medium|high
 #   anthropic/claude-sonnet-4-6  -> none|low|medium|high (frontier rung)

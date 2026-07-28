@@ -1,0 +1,100 @@
+version: "1.0.0"
+scripts:
+  inspect.docs-fmeca.fix-scope:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env python3
+      # Deterministic fix-scope resolver for flow.review.docs-fmeca's
+      # human-gated fixer leg. Joins the ids the HUMAN approved at the
+      # gate against the code-computed remediation checklist and emits
+      # the exact fix set the fixer leaf is allowed to touch. The agent
+      # never sees an unapproved fix as in-scope, and an approval that
+      # references a nonexistent id FAILS LOUDLY (a typo'd approval that
+      # silently shrank the fix set would be a self-serve bypass of the
+      # gate's intent).
+      #
+      # Arg $1 = approved_fix_ids — the human gate's PRIMITIVE string
+      #          (push-elicitation forms only collect primitives, V36):
+      #          comma/whitespace-separated checklist fix_ids
+      #          ("fix-001,fix-004"), the sentinel "all" for the whole
+      #          checklist, or "" for none. A JSON array of strings is
+      #          also accepted (pull-path callers).
+      # Arg $2 = remediation_checklist (the aggregate's fix_id-carrying
+      #          checklist; spill contract honored via arg()).
+      # Stdout: {"approved_fixes": [...], "fix_count": N,
+      #          "files_in_scope": [paths]}
+      # fix_count == 0 (an empty approval) is LEGAL data — the flow's
+      # scope gate routes it to the review-only terminal; only malformed
+      # input or unknown ids exit non-zero.
+      import json, os, re, sys
+
+      def die(msg):
+          print(json.dumps({"error": msg}), file=sys.stderr)
+          sys.exit(1)
+
+      def arg(i, default=""):
+          v = sys.argv[i] if len(sys.argv) > i else default
+          spilled = json.loads(os.environ.get("PRAXEC_SPILLED_ARGS", "[]"))
+          if (i - 1) in spilled and isinstance(v, str) and v.startswith("@argfile:"):
+              with open(v[len("@argfile:"):]) as f:
+                  return f.read()
+          return v
+
+      raw_ids = arg(1, "")
+      raw_checklist = arg(2, "[]")
+      # Accept the gate's primitive string ("fix-001, fix-004" / "all" /
+      # "") or a JSON array of strings.
+      ids = raw_ids
+      if isinstance(raw_ids, str):
+          try:
+              parsed = json.loads(raw_ids)
+          except ValueError:
+              parsed = None
+          if isinstance(parsed, list):
+              ids = parsed
+          else:
+              ids = [t for t in re.split(r"[,\s]+", raw_ids.strip()) if t]
+      try:
+          checklist = (json.loads(raw_checklist)
+                       if isinstance(raw_checklist, str) else raw_checklist)
+      except ValueError as e:
+          die(f"remediation_checklist is not valid JSON: {e}")
+      if ids is None:
+          ids = []
+      if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+          die("approved_fix_ids must be a comma-separated id string, "
+              "\"all\", or a JSON array of strings")
+      if not isinstance(checklist, list):
+          die("remediation_checklist must be a JSON array")
+
+      rows = [r for r in checklist if isinstance(r, dict)]
+      by_id = {}
+      for r in rows:
+          fid = r.get("fix_id")
+          if isinstance(fid, str) and fid:
+              by_id[fid] = r
+
+      if ids == ["all"]:
+          approved = list(by_id.values())
+      else:
+          unknown = sorted(set(ids) - set(by_id))
+          if unknown:
+              die("approved_fix_ids reference unknown checklist fix_id(s): "
+                  + ", ".join(unknown)
+                  + " — the approval must name ids from the checklist "
+                  "exactly (or the single sentinel \"all\")")
+          # Preserve the checklist's criticality order, dedupe repeats.
+          wanted = set(ids)
+          approved = [r for r in rows
+                      if r.get("fix_id") in wanted]
+
+      files = sorted({r.get("item") for r in approved
+                      if isinstance(r.get("item"), str) and r.get("item")})
+
+      print(json.dumps({
+          "approved_fixes": approved,
+          "fix_count": len(approved),
+          "files_in_scope": files,
+      }))

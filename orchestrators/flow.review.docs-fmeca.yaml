@@ -6,6 +6,62 @@
 # executable claims by ACTUALLY RUNNING the safe ones, and emit a
 # code-computed, criticality-ranked remediation report.
 #
+# TWO FMECA PASSES PER DOC, one engine:
+#   content pass  → reviewing_doc: role-lens failure modes (misreads /
+#                   cannot-run / cannot-find / missing-step / outdated /
+#                   unsafe) — does the doc tell the truth and work?
+#   cog-sci pass  → reviewing_doc_cogsci: information-processing failure
+#                   modes grounded in the cognitive-science literature
+#                   (Sweller's Cognitive Load Theory, Mayer's multimedia
+#                   principles, Morville/Rosenfeld findability, Procida's
+#                   Diátaxis, Carroll's minimalism, Horn/Miller chunking,
+#                   progressive disclosure, Redish plain language) — even
+#                   a factually perfect doc can overload, bury, blend, or
+#                   lose its reader. A deterministic metrics step
+#                   (measuring) computes the measurable slice per doc
+#                   (reading grade, sentence stats, section sizes,
+#                   heading hierarchy, list runs, link density,
+#                   worked-example presence); the leaf cites those
+#                   breaches as `evidence_basis: deterministic` and tags
+#                   everything code cannot measure `advisory`. Each doc's
+#                   pass also files a principle_assessments ledger — the
+#                   aggregate turns any unassessed (doc, principle) pair
+#                   into a BLIND SPOT in the report, and enumerates the
+#                   literature deliberately out of scope, so a clean run
+#                   can never hide an unexamined principle. Both passes
+#                   submit fmeca-analyze-shaped rows into the SAME batch:
+#                   fmeca-mcp computes every criticality; one merged
+#                   risk-ranked checklist comes out.
+#
+# HUMAN-GATED FIXER LEG (review → person approves → apply → PR):
+#   fix_approval_gating → ASYNC-HITL park (actor: human — the structural
+#                   guarantee an agent cannot self-approve): the operator
+#                   reads the ranked findings + checklist and approves
+#                   WHICH fixes apply — specific fix_ids, ["all"], or
+#                   skip. NOTHING is edited before this gate passes.
+#   fix_scoping   → deterministic join of the approved ids against the
+#                   code-computed checklist (unknown id fails LOUDLY —
+#                   a typo cannot silently shrink or grow the mandate).
+#   fix_branching → run.git.branch-ensure: the fix branch, never the
+#                   default branch.
+#   fixing        → agent leaf applies ONLY the approved fixes to the
+#                   markdown (markdown-administrator navigation + file
+#                   tools; deterministic-style mechanical edits where the
+#                   mitigation is mechanical, drafted rewrites where it
+#                   is not — but only ever the approved set). NO git.
+#   fix_verifying → verify.docs-fmeca.fixes: git-grounded evidence — a
+#                   fix claimed applied whose file git says is unchanged
+#                   halts the run; also builds the traceability PR body
+#                   (fix → finding → lens/principle → criticality →
+#                   probe evidence).
+#   fix_committing / pr_opening → run.git.ensure-committed +
+#                   run.git.push-pr: commit, push, open the PR. NEVER
+#                   merges.
+#   pr_review_gating → the SECOND human gate: the flow parks until the
+#                   operator has dispositioned the PR on the forge
+#                   (merged / closed / left_open) — merging is a human
+#                   act on GitHub, never a workflow transition.
+#
 #   structure_scanning → structureos MCP: one deterministic structural scan
 #                        of the repo — the evidence base for the
 #                        script-organization lens (entry-point vs internal,
@@ -65,9 +121,19 @@
 #                        scalars the outcomes gate on.
 #
 # MODEL + EFFORT BINDING (read before running — the flow.qa.explore
-# charter lesson): both agent leaves declare `affinity: review` +
-# `reasoning_effort: medium` (the per-state knob, praxec 0.0.27+; older
-# engines ignore the key and fall back to the gateway default `low`).
+# charter lesson): all FOUR agent leaves (reviewing_doc,
+# reviewing_doc_cogsci, reviewing_script, fixing) declare
+# `affinity: review` + `reasoning_effort: medium` (the per-state knob,
+# praxec 0.0.27+; older engines ignore the key and fall back to the
+# gateway default `low`). The fixer leaf deliberately rides the SAME
+# effort-safe `review` chain rather than introducing a second affinity:
+# one known-good, commodity-led, cost-gate-safe chain covers the whole
+# flow, and no member may be a none|high-only model (the charter bug).
+# BUDGET ASSUMPTION (logged, not worked around): step budgets are still
+# SHARED across a chain's fallback attempts in current engines — a
+# starved fallback chain can exhaust the budget before the frontier rung
+# engages. The praxec team is shipping per-attempt budgets; this flow is
+# designed for that landing and does not hard-code compensations.
 # The engine HARD-FAILS an agent step whose selected model does not
 # advertise the requested effort level — deepseek-v4-pro, for example,
 # advertises only `none|high`, so ANY chain that can fall back to it dies
@@ -80,11 +146,19 @@
 #
 # Requires: connections `fmeca-mcp` (scoring.catalog + analyze),
 # `structureos` (point STRUCTUREOS_WORKSPACE_ROOT at the TARGET repo), and
-# `markdown-administrator` (outline / read_section); scripts
-# inspect.docs-fmeca.inventory, inspect.docs-fmeca.next,
-# verify.docs-fmeca.batch, run.docs-fmeca.probes,
-# audit.docs-fmeca.aggregate; skill review.docs-fmeca.method; a gateway
-# with auto_drive ON and a per-member effort-safe `review` chain (above).
+# `markdown-administrator` (outline / read_section — read-only today; when
+# it ships write ops, the fixer's MECHANICAL edit subset should move from
+# the fixing leaf's file tools to deterministic mcp steps — logged gap);
+# scripts inspect.docs-fmeca.inventory, inspect.docs-fmeca.next,
+# inspect.docs-fmeca.cogsci-metrics, inspect.docs-fmeca.fix-scope,
+# verify.docs-fmeca.batch, verify.docs-fmeca.fixes, run.docs-fmeca.probes,
+# run.git.branch-ensure, run.git.ensure-committed, run.git.push-pr,
+# audit.docs-fmeca.aggregate; skills review.docs-fmeca.method,
+# review.docs-cogsci.method, implement.docs-fmeca.fix; `gh` on PATH and
+# authenticated (the fixer leg's PR); a gateway with auto_drive ON, a
+# HITL surface for the two human gates, and a per-member effort-safe
+# `review` chain (above). The target repo must be a writable git checkout
+# (`_writableRepos` with push allowed) for the fixer leg to commit/push.
 #
 # MCP OUTPUT SHAPES (live-verified conventions, do not "simplify"):
 #   - fmeca-mcp returns STRUCTURED results → bind `$.output.<field>`
@@ -98,17 +172,26 @@
 workflows:
   flow.review.docs-fmeca:
     lifecycle: experimental
-    tags: [docs, review, fmeca, role-lens, runnable-verification, governed]
-    aliases: [docs-fmeca, docs-review-fmeca]
+    tags: [docs, review, fmeca, role-lens, cognitive-science, runnable-verification, human-gated, governed]
+    aliases: [docs-fmeca, docs-review-fmeca, docs-fmeca-fix]
     description: >
-      Docs × role-lens × FMECA review: deterministically inventory a repo's
-      documentation and scripts, review each item through every role lens
-      (local-dev/new-hire, devops/deploy, on-call/SRE, security,
-      contributor by default), score the failure modes through the
-      deterministic fmeca-mcp engine (observations in, computed
+      Docs × role-lens × FMECA review with a cognitive-science second
+      pass and a human-gated fixer: deterministically inventory a repo's
+      documentation and scripts, run TWO FMECA passes per doc — a
+      content pass through every role lens (local-dev/new-hire,
+      devops/deploy, on-call/SRE, security, contributor by default) and
+      a cog-sci information-processing pass (Sweller/Mayer/Diátaxis/
+      minimalism/chunking/plain-language, deterministic metrics where
+      measurable, advisory-tagged judgment where not, with a per-doc
+      principle blind-spot ledger) — score every failure mode through
+      the deterministic fmeca-mcp engine (observations in, computed
       criticality out), execute the safe runnable probes as evidence
-      (destructive ones are flagged, never run), and aggregate a
-      code-computed, criticality-ranked remediation report.
+      (destructive ones are flagged, never run), aggregate one merged
+      criticality-ranked remediation checklist, then PARK for a human to
+      approve which fixes apply; on approval an agent applies exactly
+      the approved edits, git-grounded verification checks the claims,
+      and the flow opens (never merges) a traceability PR the human
+      dispositions as the second gate.
 
     inputs:
       # The role perspectives every item is reviewed through. Free strings;
@@ -124,6 +207,23 @@ workflows:
       max_items:  { type: integer, default: 12 }
       # fmeca-mcp criticality matrix selection.
       matrix_strategy: { type: string, enum: [qualitative3x3, nasa8004_5x5], default: qualitative3x3 }
+      # The cog-sci principle roster the second pass walks per doc. The
+      # canonical ids (and their literature grounding + the deterministic
+      # metrics that feed them) live in review.docs-cogsci.method; the
+      # aggregate computes the per-doc blind-spot ledger against THIS
+      # list, so narrowing it narrows the claimed coverage too.
+      cogsci_principles:
+        type: array
+        default: [clt-intrinsic-load, clt-extraneous-load,
+                  clt-germane-worked-examples, mayer-signaling,
+                  mayer-coherence, mayer-contiguity, ia-findability,
+                  diataxis-type-purity, minimalism-action-first,
+                  minimalism-error-recovery, chunking-structure,
+                  progressive-disclosure, plain-language]
+      # Fixer leg: the branch the approved fixes land on, and the PR
+      # base ("" = the target repo's default branch, resolved in git).
+      fix_branch: { type: string, default: docs-fmeca/fixes }
+      pr_base:    { type: string, default: "" }
 
     outputs:
       docs_fmeca_report:      { type: object }
@@ -133,6 +233,11 @@ workflows:
       probe_break_count:      { type: integer }
       probe_unevaluated_count: { type: integer }
       fmeca_ready:            { type: boolean }
+      cogsci_blindspot_count: { type: integer }
+      fix_decision:           { type: string }
+      applied_fix_count:      { type: integer }
+      pr_url:                 { type: string }
+      pr_disposition:         { type: string }
 
     # Seed EVERY declared output + accumulator (V24): gates can route past
     # the writers and the halted terminal must still resolve them. The -1
@@ -143,14 +248,31 @@ workflows:
       fmeca_log: ""
       probe_log: ""
       script_org_log: ""
+      cogsci_log: ""
+      metrics_log: ""
+      cogsci_metrics: {}
       structure_text: ""
       outline_text: ""
       fm_total: -1
       probe_break_count: -1
       probe_unevaluated_count: -1
+      cogsci_blindspot_count: -1
       fmeca_ready: false
       docs_fmeca_report: {}
       remediation_checklist: []
+      # Fixer-leg floors: `unreviewed` / -1 are HONEST — a run that never
+      # reached (or was halted before) the human gate must not read as a
+      # dispositioned fix set; pr_disposition `none` = no PR exists.
+      fix_decision: "unreviewed"
+      fix_gate_passed: false
+      approved_fix_ids: ""
+      approved_fixes: []
+      applied_report: []
+      applied_fix_count: -1
+      pr_title: ""
+      pr_body: ""
+      pr_url: ""
+      pr_disposition: "none"
       # `kind: mcp` map literals bind by path (the frontrails precedent) —
       # seed the structureos action + empty params here.
       act_scan: "scan_repo"
@@ -173,6 +295,25 @@ workflows:
           Paired with criticality_computed this separates "the documented
           steps work" from "we could not try them".
         check: "$.context.probe_unevaluated_count == 0"
+      - id: cogsci_coverage_computed
+        statement: >
+          The cog-sci pass's coverage ledger was computed in code over
+          the code-enumerated doc queue — cogsci_blindspot_count is a
+          code-side count of (doc, principle) pairs never assessed
+          (>= 0), not an LLM claim of coverage. A run that halted before
+          the rollup stays on the -1 floor and does NOT meet this
+          outcome; a nonzero count is an HONEST published blind-spot
+          list, not a failure.
+        check: "$.context.cogsci_blindspot_count >= 0"
+      - id: fix_set_human_dispositioned
+        statement: >
+          The remediation checklist reached the human approval gate and a
+          PERSON dispositioned it (approved a fix set, or skipped fixing)
+          — fix_gate_passed is written only by the decision gate behind
+          the actor:human transition, so no agent path can set it. A run
+          that never parked at the gate stays false and does NOT meet
+          this outcome; nothing is ever edited before it.
+        check: "$.context.fix_gate_passed == true"
 
     initialState: seeding
 
@@ -189,10 +330,11 @@ workflows:
             actor: deterministic
             executor: { kind: noop }
             output:
-              role_lenses:     "$.workflow.input.role_lenses"
-              doc_globs:       "$.workflow.input.doc_globs"
-              max_items:       "$.workflow.input.max_items"
-              matrix_strategy: "$.workflow.input.matrix_strategy"
+              role_lenses:      "$.workflow.input.role_lenses"
+              doc_globs:        "$.workflow.input.doc_globs"
+              max_items:        "$.workflow.input.max_items"
+              matrix_strategy:  "$.workflow.input.matrix_strategy"
+              cogsci_principles: "$.workflow.input.cogsci_principles"
 
       # ── DETERMINISTIC EVIDENCE BASE ──────────────────────────────────────
       # One structureos scan up front: structural facts (size outliers,
@@ -332,7 +474,7 @@ workflows:
         goal: Outline the current markdown doc (markdown-administrator).
         transitions:
           outline:
-            target: reviewing_doc
+            target: measuring
             actor: deterministic
             executor:
               kind: mcp
@@ -343,11 +485,38 @@ workflows:
             output:
               outline_text: "$.output.content.0.text"
 
-      # Agent leaf 1: review ONE doc through EVERY role lens. The reviewer
-      # reads sections via markdown-administrator (read_section) and the
-      # file tools, proposes probes for every executable claim, and submits
-      # fmeca-shaped failure modes whose observations are catalog IDS. The
-      # submission folds into the concat logs; the loop re-enters advancing.
+      # Deterministic cog-sci metrics for the CURRENT doc — the computed
+      # half of the second FMECA pass (reading grade, sentence stats,
+      # section sizes, heading hierarchy, list runs, link density,
+      # worked-example presence, plus threshold-breach signals mapped to
+      # principles). The cog-sci leaf may only CITE these numbers; the
+      # metrics_log accumulates every doc's record for the report.
+      measuring:
+        goal: Compute the doc's deterministic cognitive-science metrics.
+        transitions:
+          measure:
+            target: reviewing_doc
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.docs-fmeca.cogsci-metrics
+              args:
+                - "$.context.current_item.abs_path"
+                - "$.context.current_item.path"
+            output:
+              cogsci_metrics: "$.output.json.record"
+              metrics_log:
+                concat:
+                  - "$.context.metrics_log"
+                  - "$.output.json.record"
+                  - "\n"
+
+      # Agent leaf 1 (CONTENT pass): review ONE doc through EVERY role
+      # lens. The reviewer reads sections via markdown-administrator
+      # (read_section) and the file tools, proposes probes for every
+      # executable claim, and submits fmeca-shaped failure modes whose
+      # observations are catalog IDS. The submission folds into the
+      # concat logs; the doc then continues into the cog-sci pass.
       reviewing_doc:
         affinity: review
         reasoning_effort: medium
@@ -375,7 +544,7 @@ workflows:
         tools: ["markdown-administrator", "file:{{ $.run.repo_root }}"]
         transitions:
           submit_review:
-            target: advancing
+            target: reviewing_doc_cogsci
             actor: agent
             inputSchema:
               type: object
@@ -435,6 +604,133 @@ workflows:
                 concat:
                   - "$.context.probe_log"
                   - "$.arguments.probes"
+                  - "\n"
+              # items_reviewed increments at the END of the doc chain
+              # (reviewing_doc_cogsci) — a doc counts as reviewed only
+              # when BOTH FMECA passes have submitted.
+
+      # Agent leaf 1b (COG-SCI pass): the second FMECA pass over the SAME
+      # doc — information-processing failure modes grounded in the
+      # cognitive-science literature (the review.docs-cogsci.method
+      # roster). Deterministic evidence comes from $.context.cogsci_metrics
+      # (computed in `measuring` — the leaf cites breaches, never invents
+      # numbers, evidence_basis: deterministic); everything code cannot
+      # measure is tagged advisory. The leaf also files the per-doc
+      # principle_assessments ledger the aggregate turns into the
+      # blind-spot report. Rows join the SAME fmeca_log/batch — one
+      # engine, one merged ranking.
+      reviewing_doc_cogsci:
+        affinity: review
+        reasoning_effort: medium
+        goal: >
+          Apply the COGNITIVE-SCIENCE FMECA pass to this ONE doc —
+          nothing else. Read $.context.current_item (id, path, abs_path,
+          kind), $.context.outline_text (the computed heading outline),
+          and $.context.cogsci_metrics (the doc's computed metrics +
+          threshold-breach signals — the ONLY numbers you may cite; you
+          never invent or re-estimate a measurement). Read the doc's
+          content via your markdown-administrator tools (outline /
+          read_section with doc = the item's abs_path) and file tools.
+          Walk EVERY principle in $.context.cogsci_principles using your
+          loaded review.docs-cogsci.method skill: where does this doc's
+          STRUCTURE or PRESENTATION fail the reader's information
+          processing? Submit `failure_modes` (fmeca analyze shape:
+          component.id = the item path; `principle` = the roster id
+          violated; `evidence_basis` = deterministic ONLY when citing a
+          breached signal from cogsci_metrics — quote metric, value, and
+          threshold in `cause` — else advisory with the offending
+          passage quoted; observations are IDS from
+          $.context.fmeca_catalog, NEVER a score; every failure mode
+          carries a concrete restructure as its mitigation), `probes`
+          (usually empty for this pass — only when a structural claim is
+          mechanically checkable), and `principle_assessments` (one
+          entry PER roster principle: item = the doc path, status
+          violated | clean | not_assessable, note = one line of
+          evidence; a skipped principle becomes a published blind spot,
+          so never claim clean without looking). An all-clean ledger for
+          a genuinely well-structured doc is a legal, honest result —
+          never pad.
+        skills: [review.docs-cogsci.method]
+        tools: ["markdown-administrator", "file:{{ $.run.repo_root }}"]
+        transitions:
+          submit_review:
+            target: advancing
+            actor: agent
+            inputSchema:
+              type: object
+              required: [failure_modes, probes, principle_assessments]
+              properties:
+                failure_modes:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, component, description, cause, effect, domain, principle, evidence_basis, failure_class, severity_observations, probability_observations, mitigations]
+                    properties:
+                      id:          { type: string }
+                      component:
+                        type: object
+                        required: [id]
+                        properties:
+                          id: { type: string }
+                      description: { type: string }
+                      cause:       { type: string }
+                      effect:      { type: string }
+                      domain:      { type: string, enum: [ux, runtime, architecture, delivery] }
+                      principle:   { type: string }
+                      evidence_basis: { type: string, enum: [deterministic, advisory] }
+                      failure_class: { type: string, enum: [extraneous-load, split-attention, redundancy, missing-worked-example, weak-signaling, incoherent-content, poor-contiguity, low-findability, diataxis-blend, not-action-oriented, no-error-recovery, oversized-chunk, no-progressive-disclosure, readability] }
+                      severity_observations:    { type: array, minItems: 1, items: { type: string } }
+                      probability_observations: { type: array, minItems: 1, items: { type: string } }
+                      mitigations:
+                        type: array
+                        minItems: 1
+                        items:
+                          type: object
+                          required: [id, kind, description]
+                          properties:
+                            id:          { type: string }
+                            kind:        { type: string, enum: [prevention, detection, fail_fast] }
+                            description: { type: string }
+                probes:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, item, command, danger, expectation]
+                    properties:
+                      id:          { type: string }
+                      fm_id:       { type: string }
+                      item:        { type: string }
+                      command:     { type: string }
+                      cwd:         { type: string }
+                      danger:      { type: string, enum: [safe, destructive, not_executable] }
+                      expectation: { type: string }
+                principle_assessments:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [item, principle, status, note]
+                    properties:
+                      item:      { type: string }
+                      principle: { type: string }
+                      status:    { type: string, enum: [violated, clean, not_assessable] }
+                      note:      { type: string }
+            executor: { kind: noop }
+            output:
+              fmeca_log:
+                concat:
+                  - "$.context.fmeca_log"
+                  - "$.arguments.failure_modes"
+                  - "\n"
+              probe_log:
+                concat:
+                  - "$.context.probe_log"
+                  - "$.arguments.probes"
+                  - "\n"
+              cogsci_log:
+                concat:
+                  - "$.context.cogsci_log"
+                  - "$.arguments.principle_assessments"
                   - "\n"
               items_reviewed: { add: ["$.context.items_reviewed", 1] }
 
@@ -571,6 +867,8 @@ workflows:
                 - "$.context.probe_log"
                 - "$.context.script_org_log"
                 - "$.context.fmeca_catalog"
+                - "$.context.cogsci_log"
+                - "$.context.metrics_log"
             output:
               fmeca_batch:    "$.output.json.fmeca_batch"
               lens_index:     "$.output.json.lens_index"
@@ -578,6 +876,8 @@ workflows:
               script_org:     "$.output.json.script_org"
               unscored_rows:  "$.output.json.unscored_rows"
               unscored_count: "$.output.json.unscored_count"
+              cogsci_assessments: "$.output.json.cogsci_assessments"
+              doc_metrics:    "$.output.json.doc_metrics"
 
       # THE FMECA GATE — fmeca-mcp computes criticality/residual/standing/
       # response_class/risk_ranking/ready from the enumerated observations.
@@ -616,14 +916,15 @@ workflows:
             output:
               probe_results: "$.output.json.results"
 
-      # Code-computed rollup → the ranked report + the outcome scalars.
-      # Plain script-executor `output:` — LEFT-hand keys are BARE slot
-      # names (the flow.audit-docs GUARD_UNSET_SLOT trap).
+      # Code-computed rollup → the ranked report (both passes merged, the
+      # cog-sci blind-spot ledger, fix_id-carrying checklist) + the
+      # outcome scalars. Plain script-executor `output:` — LEFT-hand keys
+      # are BARE slot names (the flow.audit-docs GUARD_UNSET_SLOT trap).
       aggregating:
-        goal: Aggregate the FMECA verdict, probe evidence, and org rows into the ranked report.
+        goal: Aggregate the FMECA verdict, probe evidence, cog-sci ledger, and org rows into the ranked report.
         transitions:
           aggregate:
-            target: done
+            target: fix_approval_gating
             actor: deterministic
             executor:
               kind: script
@@ -634,6 +935,10 @@ workflows:
                 - "$.context.probe_results"
                 - "$.context.script_org"
                 - "$.context.unscored_rows"
+                - "$.context.cogsci_assessments"
+                - "$.context.doc_metrics"
+                - "$.context.cogsci_principles"
+                - "$.context.review_queue"
             output:
               docs_fmeca_report:       "$.output.json.report"
               remediation_checklist:   "$.output.json.remediation_checklist"
@@ -641,17 +946,362 @@ workflows:
               probe_break_count:       "$.output.json.probe_break_count"
               probe_unevaluated_count: "$.output.json.probe_unevaluated_count"
               fmeca_ready:             "$.output.json.fmeca_ready"
+              cogsci_blindspot_count:  "$.output.json.cogsci_blindspot_count"
 
-      # Terminal: $.context.docs_fmeca_report is the full ranked report;
-      # fm_total / probe_unevaluated_count are the code-computed outcome
-      # scalars.
-      done:
+      # ── THE FIRST HUMAN GATE: approve the fix set (ASYNC-HITL park) ─────
+      # The flow PARKS here with the full ranked report + checklist in
+      # context. actor: human is the structural guarantee — no agent can
+      # drive this transition, so nothing downstream (edits, commits, PR)
+      # can happen without a person's explicit disposition. Approving is
+      # selecting fix_ids from the code-computed checklist (or the
+      # sentinel ["all"]); skipping ends the run as review-only with the
+      # report intact.
+      fix_approval_gating:
+        goal: >
+          HUMAN GATE — review the ranked findings and approve the fix
+          set. Read $.context.docs_fmeca_report (findings ranked by
+          computed criticality, both FMECA passes, probe evidence, the
+          cog-sci blind-spot ledger) and
+          $.context.remediation_checklist (each entry carries a stable
+          fix_id). Decide: `approve` with approved_fix_ids = the exact
+          checklist fix_ids to apply as a comma-separated string (e.g.
+          "fix-001,fix-004", or "all" for the whole checklist), or
+          `skip` with approved_fix_ids = "" to end the run as
+          review-only. Nothing is edited, committed, or pushed before
+          this gate; an unknown fix_id fails loudly downstream rather
+          than silently changing the mandate.
+        transitions:
+          disposition:
+            title: >
+              Approve which docs-FMECA fixes to apply (comma-separated
+              fix_ids from the checklist, "all", or skip)
+            target: fix_decision_gate
+            actor: human
+            inputSchema:
+              type: object
+              required: [decision, approved_fix_ids]
+              properties:
+                decision: { type: string, enum: [approve, skip] }
+                # A PRIMITIVE on purpose (V36): a push-elicitation form
+                # can only collect primitives, and this gate is the
+                # flow's HITL centerpiece. fix-scope parses either a
+                # comma/space-separated id string, "all", or a JSON
+                # array (pull-path callers may still send one as text).
+                approved_fix_ids: { type: string }
+                rationale:        { type: string, default: "" }
+            executor: { kind: noop }
+            output:
+              fix_decision:     "$.arguments.decision"
+              approved_fix_ids: "$.arguments.approved_fix_ids"
+
+      # Route on the human's decision. BOTH legitimate arms record that
+      # the gate was passed by a person (the fix_set_human_dispositioned
+      # outcome reads fix_gate_passed — written HERE and nowhere else).
+      # Default (V23): an out-of-domain decision halts loudly.
+      fix_decision_gate:
+        transitions:
+          to_fixing:
+            target: fix_scoping
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.fix_decision == 'approve'" }
+            executor: { kind: noop }
+            output:
+              fix_gate_passed: { set: true }
+          to_review_only:
+            target: done_review_only
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.fix_decision == 'skip'" }
+            executor: { kind: noop }
+            output:
+              fix_gate_passed: { set: true }
+          unexpected_decision:
+            target: halted
+            actor: deterministic
+
+      # Deterministic mandate resolution: join the approved ids against
+      # the code-computed checklist. Unknown ids FAIL the script (loud
+      # stop — a typo cannot silently shrink the fix set); an empty
+      # approval is legal data the scope gate routes to review-only.
+      fix_scoping:
+        goal: Resolve the human-approved fix_ids into the exact fix mandate.
+        transitions:
+          scope:
+            target: fix_scope_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.docs-fmeca.fix-scope
+              args:
+                - "$.context.approved_fix_ids"
+                - "$.context.remediation_checklist"
+            output:
+              approved_fixes: "$.output.json.approved_fixes"
+              fix_count:      "$.output.json.fix_count"
+
+      fix_scope_gate:
+        transitions:
+          proceed:
+            target: fix_branching
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.fix_count >= 1" }
+          empty_approval:
+            target: done_review_only
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.fix_count == 0" }
+          unexpected_count:
+            target: halted
+            actor: deterministic
+
+      # Branch-first safety: the approved edits land on the fix branch,
+      # never the default branch. Failure is data → halted (never edit
+      # on an unknown branch state).
+      fix_branching:
+        goal: Ensure the fix branch exists and is checked out in the target repo.
+        transitions:
+          branch:
+            target: fix_branch_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.branch-ensure
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.workflow.input.fix_branch"
+            output:
+              branch_ok:    "$.output.json.on_branch"
+              branch_error: "$.output.json.error"
+
+      fix_branch_gate:
+        transitions:
+          proceed:
+            target: fixing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.branch_ok == true" }
+          halt_branch:
+            target: halted
+            actor: deterministic
+
+      # THE FIXER LEAF: apply ONLY the human-approved fixes. Mechanical
+      # mitigations (dead links, wrong commands, heading normalization,
+      # section splits at a proposed boundary) are applied as written;
+      # rewrite mitigations (readability, coherence, Diátaxis re-typing)
+      # are drafted minimally — but only ever the approved set. NO git
+      # operations (deterministic downstream steps own them), and the
+      # git-grounded verifier catches any claim the working tree denies.
+      # NOTE (logged gap): markdown-administrator is read-only today, so
+      # the actual writes go through the file tools; when it ships write
+      # ops, the mechanical subset should become deterministic mcp steps.
+      fixing:
+        affinity: review
+        reasoning_effort: medium
+        goal: >
+          Apply EXACTLY the human-approved fix set to the target repo's
+          markdown — nothing else. $.context.approved_fixes is your
+          entire mandate (each entry: fix_id, fm_id, item = the file,
+          fix = the approved mitigation text, kind, principle or
+          role_lens, criticality). Use your loaded
+          implement.docs-fmeca.fix skill: read each target file first
+          (markdown-administrator outline / read_section + file tools),
+          apply mechanical mitigations as written, draft the smallest
+          faithful rewrite where the mitigation demands one, and NEVER
+          touch a file or problem outside the approved set. NO git
+          commands — branching/commit/push/PR are deterministic
+          downstream steps, and a code-side git check verifies every
+          claim you make. Submit `applied_fixes` with EXACTLY one entry
+          per approved fix_id: status applied (with a precise
+          edit_summary — it rides into the PR body verbatim) or skipped
+          (with the reason; an honestly skipped fix beats a creative
+          reinterpretation).
+        skills: [implement.docs-fmeca.fix]
+        tools: ["markdown-administrator", "file:{{ $.run.repo_root }}"]
+        transitions:
+          submit_fixes:
+            target: fix_verifying
+            actor: agent
+            inputSchema:
+              type: object
+              required: [applied_fixes]
+              properties:
+                applied_fixes:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [fix_id, fm_id, item, status, edit_summary, reason]
+                    properties:
+                      fix_id:       { type: string }
+                      fm_id:        { type: string }
+                      item:         { type: string }
+                      status:       { type: string, enum: [applied, skipped] }
+                      edit_summary: { type: string }
+                      reason:       { type: string }
+            executor: { kind: noop }
+            output:
+              applied_report: "$.arguments.applied_fixes"
+
+      # GIT-GROUNDED VERIFICATION — the praxec law (verification is
+      # earned from evidence, never asserted): every approved fix must be
+      # dispositioned, every applied claim must show as a real change to
+      # its named file in `git status`, and out-of-scope working-tree
+      # changes are surfaced. Also builds the traceability PR title/body
+      # (fix → finding → lens/principle → criticality → probe evidence).
+      fix_verifying:
+        goal: Verify the fixer's claims against git; build the traceability PR body.
+        transitions:
+          verify:
+            target: fix_verify_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.docs-fmeca.fixes
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.context.approved_fixes"
+                - "$.context.applied_report"
+                - "$.context.docs_fmeca_report"
+                - "$.workflow.input.fix_branch"
+            output:
+              fix_ok:            "$.output.json.ok"
+              applied_fix_count: "$.output.json.applied_count"
+              fix_verify_detail: "$.output.json"
+              pr_title:          "$.output.json.pr_title"
+              pr_body:           "$.output.json.pr_body"
+
+      fix_verify_gate:
+        transitions:
+          proceed:
+            target: fix_committing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.fix_ok == true" }
+          # Default (V23): a dropped fix_id, an unapproved disposition, a
+          # claimed-but-unchanged file, or zero applied fixes — the
+          # working tree is preserved for inspection, nothing committed.
+          halt_verify:
+            target: halted
+            actor: deterministic
+
+      # Finalize the fix branch: commit the applied edits (and resolve
+      # the PR base from the input / the repo's default branch).
+      fix_committing:
+        goal: Commit the verified fixes on the fix branch; resolve the PR base.
+        transitions:
+          commit:
+            target: fix_commit_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.ensure-committed
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.workflow.input.fix_branch"
+                - "$.workflow.input.pr_base"
+                - "$.context.pr_title"
+            output:
+              commit_ok:    "$.output.json.ok"
+              base_ref:     "$.output.json.base"
+              commit_error: "$.output.json.error"
+
+      fix_commit_gate:
+        transitions:
+          proceed:
+            target: pr_opening
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.commit_ok == true" }
+          halt_commit:
+            target: halted
+            actor: deterministic
+
+      # Push + open the PR (idempotent; reuses an open PR for the head
+      # branch on re-entry). The flow NEVER merges — the PR is the second
+      # human gate's artifact.
+      pr_opening:
+        goal: Push the fix branch and open (or reuse) the traceability PR.
+        transitions:
+          open:
+            target: pr_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.push-pr
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.workflow.input.fix_branch"
+                - "$.context.base_ref"
+                - "$.context.pr_title"
+                - "$.context.pr_body"
+            output:
+              pr_ok:    "$.output.json.ok"
+              pr_url:   "$.output.json.pr_url"
+              pr_error: "$.output.json.error"
+
+      pr_gate:
+        transitions:
+          proceed:
+            target: pr_review_gating
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.pr_ok == true" }
+          halt_pr:
+            target: halted
+            actor: deterministic
+
+      # ── THE SECOND HUMAN GATE: review the PR ────────────────────────────
+      # The flow parks until the operator has actually reviewed the PR on
+      # the forge. Merging (or closing) is a HUMAN act performed there —
+      # this workflow contains no merge transition, so auto-merge is
+      # structurally impossible; the gate records the disposition.
+      pr_review_gating:
+        goal: >
+          HUMAN GATE — review the fix PR before anything lands. The PR at
+          $.context.pr_url carries the full trace: each applied fix, the
+          finding and computed criticality that justified it, its lens or
+          cog-sci principle, and its probe evidence. Review the diff
+          against that trace on the forge, then merge, close, or leave it
+          open THERE — this flow never merges — and record your
+          disposition here to close out the run.
+        transitions:
+          disposition:
+            title: >
+              Record the PR review disposition (merge/close happen on the
+              forge, never here)
+            target: done_fixed
+            actor: human
+            inputSchema:
+              type: object
+              required: [pr_disposition]
+              properties:
+                pr_disposition: { type: string, enum: [merged, closed, left_open] }
+                note:           { type: string, default: "" }
+            executor: { kind: noop }
+            output:
+              pr_disposition: "$.arguments.pr_disposition"
+
+      # Terminal (fix path): the report, the merged checklist, the
+      # applied-fix count (git-verified), the PR URL, and the human's PR
+      # disposition are all in context.
+      done_fixed:
+        terminal: true
+        outcome: success
+
+      # Terminal (review-only path): the human dispositioned the fix set
+      # as skip (or approved nothing) — the ranked report stands, nothing
+      # was edited. fix_decision / the -1 applied_fix_count floor say so
+      # honestly.
+      done_review_only:
         terminal: true
         outcome: success
 
       # Loud stop for a broken wire shape (out-of-domain exhaustion flag /
-      # item kind, or an exhausted-on-arrival queue). Never a silent finish
-      # rendering as a clean report (V23).
+      # item kind / decision, an exhausted-on-arrival queue, a failed git
+      # step, or a fixer claim git denies). Never a silent finish
+      # rendering as a clean report or a phantom fix (V23).
       halted:
         terminal: true
         outcome: failure

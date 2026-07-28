@@ -45,6 +45,25 @@
 # target repo (behind its destructive-command denylist, timeout, and path
 # jail — installs/deletes/pushes are always vetoed). Run against a
 # checkout you could afford to rebuild, not your only copy of anything.
+#
+# FIXER LEG (two human gates — live-verified):
+#   - After aggregation the flow PARKS at fix_approval_gating. The engine
+#     REFUSES a non-human submitter (ACTOR_MISMATCH: "requires a human
+#     principal") — answer the gate from a human principal (CLI:
+#     `praxec command --human ...`; MCP: a gateway principal with the
+#     `human` role). decision=approve + approved_fix_ids as a
+#     comma-separated string of checklist fix_ids ("fix-001,fix-004"),
+#     "all", or decision=skip to end review-only.
+#   - Applying fixes needs the target repo to be a REAL git checkout with
+#     an `origin` remote and `gh` authenticated — the leg commits on
+#     `fix_branch` (input, default docs-fmeca/fixes) and opens a PR; it
+#     NEVER merges. A push/PR failure halts loudly with the working tree
+#     preserved. The second gate (pr_review_gating) parks until you have
+#     dispositioned the PR on the forge.
+#   - CWD GOTCHA (praxec 0.0.32, live-verified): the run's repo_root
+#     resolves from the CLI's working directory — run `praxec command` /
+#     `orchestrate` FROM the target repo; a start-level repoRoot field is
+#     silently ignored.
 
 version: "1.0.0"
 

@@ -1,4 +1,4 @@
-version: "1.0.0"
+version: "1.1.0"
 scripts:
   verify.docs-fmeca.batch:
     verb: verify
@@ -26,14 +26,27 @@ scripts:
       #   3. dedupes/uniquifies failure-mode ids (analyze joins by id);
       #   4. re-materializes the probe list and script-organization rows.
       #
-      # Arg $1 = fmeca_log (concat string of failure-mode arrays; spill
-      #          contract honored via arg()).
+      # The fmeca_log carries BOTH FMECA passes' rows — the content pass
+      # (role_lens/failure_class carriage) and the cog-sci pass
+      # (principle/evidence_basis carriage). The pass discriminator is
+      # DERIVED, not asserted: a row with a `principle` field is a
+      # cog-sci row (only the cog-sci leaf's schema requires it); all
+      # carriage fields move to the lens_index either way and the
+      # analyze batch stays exactly fmeca-mcp's contract.
+      #
+      # Arg $1 = fmeca_log (concat string of failure-mode arrays from
+      #          BOTH passes; spill contract honored via arg()).
       # Arg $2 = probe_log (concat string of probe arrays).
       # Arg $3 = script_org_log (concat string of assessment arrays).
       # Arg $4 = fmeca_catalog (the scoring.catalog response object).
+      # Arg $5 = cogsci_log (concat string of principle_assessments
+      #          arrays from the cog-sci pass).
+      # Arg $6 = metrics_log (concat string of per-doc deterministic
+      #          cogsci-metrics records).
       # Stdout: {"fmeca_batch": [...], "lens_index": {id: {...}},
       #          "probes": [...], "script_org": [...],
-      #          "unscored_rows": [...], "unscored_count": N}
+      #          "unscored_rows": [...], "unscored_count": N,
+      #          "cogsci_assessments": [...], "doc_metrics": [...]}
       import json, os, sys
 
       ANALYZE_FIELDS = ("id", "component", "description", "cause", "effect",
@@ -73,6 +86,8 @@ scripts:
       rows = scan(arg(1, ""))
       probes = scan(arg(2, ""))
       org_rows = scan(arg(3, ""))
+      cogsci_assessments = scan(arg(5, ""))
+      doc_metrics = scan(arg(6, ""))
       raw_catalog = arg(4, "{}")
       try:
           catalog = json.loads(raw_catalog) if isinstance(raw_catalog, str) else raw_catalog
@@ -115,6 +130,11 @@ scripts:
               "cause": row.get("cause", ""),
               "effect": row.get("effect", ""),
               "mitigations": row.get("mitigations", []),
+              # Cog-sci pass carriage (empty on content-pass rows); the
+              # pass discriminator is derived from `principle` presence.
+              "principle": row.get("principle", ""),
+              "evidence_basis": row.get("evidence_basis", ""),
+              "pass": "cogsci" if row.get("principle") else "content",
           }
 
           obs = [o for o in (row.get("severity_observations") or [])
@@ -140,4 +160,6 @@ scripts:
           "script_org": org_rows,
           "unscored_rows": unscored,
           "unscored_count": len(unscored),
+          "cogsci_assessments": cogsci_assessments,
+          "doc_metrics": doc_metrics,
       }))
