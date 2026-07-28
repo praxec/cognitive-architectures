@@ -52,6 +52,7 @@ workflows:
       # it does NOT run cargo (the building step does). On a re-entry after a
       # failed build, $.context.build_summary carries the cargo errors to fix.
       coding:
+        requires_file_write: true  # coding-evidence forcing function: success = real file writes
         goal: >
           Write the next slice of `plan` into the repo (one red→green→refactor
           step). You ONLY write files — do NOT run cargo; the build step runs it

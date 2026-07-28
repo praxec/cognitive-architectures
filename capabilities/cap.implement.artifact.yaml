@@ -43,6 +43,7 @@ workflows:
       # The agent writes the artifact file(s) with its file tools, then submits
       # what it wrote. Judgment + writing here; committing is deterministic.
       authoring:
+        requires_file_write: true  # coding-evidence forcing function: success = real file writes
         goal: >
           You are authoring a NON-CODE deliverable and you HAVE file tools
           rooted at the target repo. Read $.context.deliverable — its `spec`

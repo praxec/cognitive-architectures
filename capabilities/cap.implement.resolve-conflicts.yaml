@@ -33,6 +33,7 @@ workflows:
     initialState: resolving
     states:
       resolving:
+        requires_file_write: true  # coding-evidence forcing function: success = real file writes
         # ESCALATED tier: the model chain the driving models.yaml binds to
         # `review` (senior/frontier), not the base coding tier.
         affinity: review

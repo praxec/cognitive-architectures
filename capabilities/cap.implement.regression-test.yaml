@@ -49,6 +49,7 @@ workflows:
     initialState: writing
     states:
       writing:
+        requires_file_write: true  # coding-evidence forcing function: success = real file writes
         goal: >
           Write EXACTLY ONE regression test that pins this Finding. Read
           $.context — the Finding ($.context.finding), the charter
