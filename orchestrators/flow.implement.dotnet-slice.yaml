@@ -115,6 +115,19 @@ workflows:
           write_slice:
             target: verifying_scoped
             actor: agent
+            # The agent MAY report files_written / commit_message, but the loop
+            # does NOT bind them to typed slots — git is the source of truth for
+            # what changed (run.git.commit-slice git-derives the working tree when
+            # FILES is empty) and commit_message keeps its fixed initialContext
+            # default. WHY (BLACKBOARD_TYPE_ERROR fix): `apply_schema_defaults`
+            # only fills an ABSENT key, not a null — so an agent (or auto-drive on
+            # model exhaustion) that yields a null for these optional fields would
+            # write null into a typed `{type: string}` slot and hard-fail the run
+            # with "output write to typed slot 'commit_message': null is not of
+            # type string". Not mapping them removes the null-write vector
+            # entirely (both slots always hold a valid string), the same "the
+            # agent report is a hint, not authority" discipline as
+            # cap.implement.build-loop / flow.implement.ts-slice.
             inputSchema:
               type: object
               properties:
@@ -122,8 +135,6 @@ workflows:
                 commit_message: { type: string, default: "praxec: verified .NET slice (scoped + backstop)" }
             executor: { kind: noop }
             output:
-              files_written:  "$.arguments.files_written"
-              commit_message: "$.arguments.commit_message"
               iter: { add: ["$.context.iter", 1] }
 
       # ── GATE (a): SCOPED inner-loop verify ── touched test project only.
@@ -150,11 +161,23 @@ workflows:
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.scoped_out.status == 'pass'" }
+          # INFRASTRUCTURE failure (status: not_evaluated) → escalate IMMEDIATELY,
+          # do NOT retry. verify.dotnet emits not_evaluated when it could not run
+          # the gate at all — no dotnet SDK, or a cold NuGet restore that could not
+          # complete offline. That is NOT a code defect the agent can fix by
+          # re-editing, so retrying is pure fleet burn. Fail loud on the FIRST
+          # occurrence; the operator provisions the toolchain and re-drives.
+          escalate_infra:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.scoped_out.status == 'not_evaluated'" }
           retry:
             target: implementing
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.scoped_out.status != 'pass'" }
+              - { kind: expr, expr: "$.context.scoped_out.status != 'not_evaluated'" }
               - { kind: expr, expr: "$.context.iter < $.context.iter_cap" }
             executor: { kind: noop }
             output:
@@ -164,6 +187,7 @@ workflows:
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.scoped_out.status != 'pass'" }
+              - { kind: expr, expr: "$.context.scoped_out.status != 'not_evaluated'" }
               - { kind: expr, expr: "$.context.iter >= $.context.iter_cap" }
           unexpected:
             target: failed
@@ -195,6 +219,13 @@ workflows:
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.backstop_out.status == 'pass'" }
+          # INFRASTRUCTURE failure (status: not_evaluated) → escalate IMMEDIATELY
+          # (no SDK / cold NuGet restore). Not a code defect — retrying is waste.
+          escalate_infra:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.backstop_out.status == 'not_evaluated'" }
           # Backstop caught a cross-project break the scoped gate missed → route
           # BACK to the fix state with the backstop's failure detail (bounded).
           fix:
@@ -202,6 +233,7 @@ workflows:
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.backstop_out.status != 'pass'" }
+              - { kind: expr, expr: "$.context.backstop_out.status != 'not_evaluated'" }
               - { kind: expr, expr: "$.context.iter < $.context.iter_cap" }
             executor: { kind: noop }
             output:
@@ -213,6 +245,7 @@ workflows:
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.backstop_out.status != 'pass'" }
+              - { kind: expr, expr: "$.context.backstop_out.status != 'not_evaluated'" }
               - { kind: expr, expr: "$.context.iter >= $.context.iter_cap" }
           unexpected:
             target: failed
