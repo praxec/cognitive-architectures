@@ -148,6 +148,10 @@ workflows:
                 inputs:
                   deliverable:  "$.workflow.input.deliverable"
                   backstop_cwd: "$.workflow.input.backstop_cwd"
+                  # flow.change now reads cargo_scope as its OWN input (decoupled
+                  # from the deliverable object); thread the deliverable's real
+                  # scope through so the scoped inner loop is unchanged.
+                  cargo_scope: "$.workflow.input.deliverable.cargo_scope"
                   verify_scope: "$.workflow.input.verify_scope"
                   react_review: "$.workflow.input.react_review"
                 outputs:

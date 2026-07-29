@@ -87,6 +87,14 @@ workflows:
       # it exists to catch. Also re-roots the child build-loop (repoRoot override
       # in `building`) so a multi-repo change writes into the RIGHT repo.
       backstop_cwd:   { type: string, required: true }
+      # SCOPED inner build-loop narrowing, DECOUPLED from the deliverable object
+      # (top-level input, not deliverable.cargo_scope): a consumer whose
+      # deliverable doesn't carry a cargo_scope key (e.g. mini-vee's design
+      # sketch, a cap.plan.technical-design output) can still wrap this atom.
+      # "" (default) = full-workspace inner loop (the tdd-verdict script
+      # defaults to --workspace). Threaded to `building` below; full-workspace
+      # correctness is still enforced by verify_rust before `done` regardless.
+      cargo_scope:    { type: string, default: "" }
       # OPTIONAL per-slice narrowing for the ts/dotnet verify arms. "" (default)
       # = unchanged full backstop. Declared with a default so callers that don't
       # narrow (the common case) don't need to pass it.
@@ -219,14 +227,16 @@ workflows:
               use:
                 inputs:
                   plan:      "$.workflow.input.deliverable"
-                  # SCOPED inner loop: cargo_scope rides in the deliverable spec
-                  # so a single-crate slice tests only its crate (fast RED/GREEN).
-                  # MUST be passed explicitly — snippet-input defaults are NOT
-                  # merged into $.workflow.input for path resolution. "" ⇒ the
-                  # tdd-verdict script defaults to --workspace. A missing key is
-                  # an unresolved-arg-path permanent error. Full-workspace
+                  # SCOPED inner loop: cargo_scope is this atom's OWN top-level
+                  # input (decoupled from the deliverable object — see the
+                  # header input comment) so a single-crate slice tests only its
+                  # crate (fast RED/GREEN), and a consumer whose deliverable
+                  # doesn't carry the key can still wrap the atom. MUST be
+                  # passed explicitly — snippet-input defaults are NOT merged
+                  # into $.workflow.input for path resolution. "" ⇒ the
+                  # tdd-verdict script defaults to --workspace. Full-workspace
                   # correctness is enforced by verify_rust below BEFORE `done`.
-                  cargo_scope: "$.workflow.input.deliverable.cargo_scope"
+                  cargo_scope: "$.workflow.input.cargo_scope"
                   # Coverage floor — MUST be passed explicitly (snippet-input
                   # defaults don't merge). "1": a TDD build must add ≥1 test.
                   min_tests: "1"
