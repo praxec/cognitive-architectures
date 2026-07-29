@@ -129,7 +129,15 @@ workflows:
       change_verify:        { status: "" }
       cumulative_files:     []
       cumulative_files_changed: 0
-      atomic_passed:        false
+      # Seeded TRUE (vacuously): on the first-pass all-covered path (scope
+      # already fully covered → `covering`/`enforcing_atomicity` never run),
+      # nothing is authored this run, so the one-assertion invariant holds
+      # vacuously and the `atomicity_holds` DoD must read true at `done`.
+      # On any covering path `enforcing_atomicity` OVERWRITES this with the
+      # real scan verdict BEFORE `reporting`, and a real violation routes
+      # through `atomicity_gate`→escalate/failed (never to `reporting`), so
+      # seeding true cannot mask an actual atomicity failure.
+      atomic_passed:        true
       atomic_violations:    []
       scanned_test_count:   0
       atomicity_decision:   ""
