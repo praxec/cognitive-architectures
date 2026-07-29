@@ -259,8 +259,14 @@ workflows:
       # (building_ts → flow.implement.ts-slice).
       build_gate:
         transitions:
-          # Guarded FIRST (ahead of the stack arms) — an explicit build_mode
-          # opt-in always wins over stack-derived routing.
+          # An explicit build_mode opt-in wins over stack-derived routing. The
+          # engine requires EXACTLY ONE guarded transition to be viable per state
+          # (no first-match/priority ordering — an overlap is an `ambiguous
+          # deterministic transition` error), so build_mode and the stack arm must
+          # be MUTUALLY EXCLUSIVE: build_ts carries a `build_mode != 'tdd'`
+          # exclusion so a ts deliverable with build_mode=='tdd' takes ONLY
+          # build_tdd. With build_mode=="" (the default) the exclusion is vacuously
+          # true, so default routing is byte-identical to before.
           build_tdd:
             target: building_tdd
             actor: deterministic
@@ -268,7 +274,9 @@ workflows:
           build_ts:
             target: building_ts
             actor: deterministic
-            guards: [ { kind: expr, expr: "$.context.stack == 'ts'" } ]
+            guards:
+              - { kind: expr, expr: "$.context.stack == 'ts'" }
+              - { kind: expr, expr: "$.workflow.input.build_mode != 'tdd'" }
           # Unguarded default — rust | dotnet | unknown → the existing cargo
           # build-loop, unchanged.
           build_default:
@@ -418,8 +426,15 @@ workflows:
       # never-disguised-pass poka-yoke, at the routing layer.
       stack_gate:
         transitions:
-          # Guarded FIRST (ahead of the stack arms) — an explicit verify_mode
-          # opt-in always wins over stack-derived routing.
+          # An explicit verify_mode opt-in wins over stack-derived routing. The
+          # engine requires EXACTLY ONE guarded transition to be viable per state
+          # (no first-match/priority ordering — an overlap is an `ambiguous
+          # deterministic transition` error), so the verify_mode arm and the stack
+          # arms must be MUTUALLY EXCLUSIVE: each stack arm carries a
+          # `verify_mode != 'regression'` exclusion so a regression override takes
+          # ONLY verify_regression regardless of stack. With verify_mode=="" (the
+          # default) each exclusion is vacuously true → ts|rust|dotnet routing is
+          # byte-identical to before.
           regression:
             target: verify_regression
             actor: deterministic
@@ -427,15 +442,21 @@ workflows:
           ts:
             target: verify_ts
             actor: deterministic
-            guards: [ { kind: expr, expr: "$.context.stack == 'ts'" } ]
+            guards:
+              - { kind: expr, expr: "$.context.stack == 'ts'" }
+              - { kind: expr, expr: "$.workflow.input.verify_mode != 'regression'" }
           rust:
             target: verify_rust
             actor: deterministic
-            guards: [ { kind: expr, expr: "$.context.stack == 'rust'" } ]
+            guards:
+              - { kind: expr, expr: "$.context.stack == 'rust'" }
+              - { kind: expr, expr: "$.workflow.input.verify_mode != 'regression'" }
           dotnet:
             target: verify_dotnet
             actor: deterministic
-            guards: [ { kind: expr, expr: "$.context.stack == 'dotnet'" } ]
+            guards:
+              - { kind: expr, expr: "$.context.stack == 'dotnet'" }
+              - { kind: expr, expr: "$.workflow.input.verify_mode != 'regression'" }
           unknown_stack:
             target: failed
             actor: deterministic
