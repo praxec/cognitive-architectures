@@ -1,0 +1,77 @@
+# capabilities/cap.diagnose.coverage-gaps.yaml
+#
+# COVERAGE-GAP diagnosis — the judgment half of flow.behavioral-coverage's
+# baseline measure. Cognitive cap (verb `diagnose`): given the PRIMITIVE
+# INVENTORY (cap.diagnose.primitive-contracts' output) and a DETERMINISTIC
+# digest of the EXISTING test functions already in the repo (the
+# `inspect.test-inventory` script — code gathers the facts, the agent never
+# has to grep for coverage itself), match each inventoried contract against
+# the existing tests and classify it covered | uncovered.
+#
+# NO file tools here (unlike the enumeration cap): this is pure judgment over
+# two already-structured inputs (same shape-of-leaf as cap.plan.track-gaps,
+# which diffs a plan against a result with no tool access either) — matching
+# is a reasoning task over the two lists, not a codebase exploration task.
+# Kept deliberately separate from enumeration (cap.diagnose.primitive-
+# contracts) so this same gap-diagnosis leaf can be re-run cheaply (no re-read
+# of the whole codebase) on every completeness-gate retry pass.
+
+workflows:
+  cap.diagnose.coverage-gaps:
+    verb: diagnose
+    lifecycle: experimental
+    description: >
+      Match the primitive-contract inventory against the repo's existing test
+      inventory; classify each contract covered or uncovered; emit the
+      uncovered set (the residual build list) plus honest counts.
+    snippet:
+      inputs:
+        # cap.diagnose.primitive-contracts' inventory (or a residual subset on
+        # a completeness-gate retry pass).
+        inventory:      { type: array, required: true }
+        # inspect.test-inventory's deterministic existing-test digest
+        # ({ tests: [{file, test_name}], test_count }) — the code-gathered
+        # facts this judgment leaf works from.
+        existing_tests: { type: object, required: true }
+      outputs:
+        # [{ primitive, kind, location, contracts: [{ contract, rationale }] }]
+        # — same shape as inventory, narrowed to ONLY the uncovered contracts.
+        uncovered:       { type: array }
+        covered_count:   { type: integer }
+        uncovered_count: { type: integer }
+    initialState: diagnosing
+    states:
+      diagnosing:
+        goal: >
+          Read $.context — the primitive inventory ($.workflow.input.inventory)
+          and the existing-test digest ($.workflow.input.existing_tests,
+          i.e. every #[test]/#[tokio::test] function already in scope). For
+          EVERY contract in the inventory, decide whether an existing test
+          already pins that exact behavior (a test whose name/assertion
+          plausibly matches — not merely "some test touches this file"; a
+          contract with NO test that asserts its specific behavior is
+          uncovered even if the primitive has OTHER tests). Emit `uncovered`
+          — the inventory narrowed to primitives/contracts with no matching
+          existing test (drop fully-covered primitives entirely; for a
+          partially-covered primitive, list only its uncovered contracts).
+          Emit `covered_count` and `uncovered_count` (contract-level counts,
+          summed across the whole inventory — verify your own arithmetic;
+          covered_count + uncovered_count MUST equal the inventory's total
+          contract count).
+        transitions:
+          submit_gaps:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [uncovered, covered_count, uncovered_count]
+              properties:
+                uncovered:       { type: array }
+                covered_count:   { type: integer, minimum: 0 }
+                uncovered_count: { type: integer, minimum: 0 }
+            executor: { kind: noop }
+            output:
+              uncovered:       "$.arguments.uncovered"
+              covered_count:   "$.arguments.covered_count"
+              uncovered_count: "$.arguments.uncovered_count"
+      done: { terminal: true }

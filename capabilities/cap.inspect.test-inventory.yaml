@@ -1,0 +1,43 @@
+# capabilities/cap.inspect.test-inventory.yaml
+#
+# Deterministic existing-test digest as a reusable capability: bind the
+# `inspect.test-inventory` script and surface it as a typed `existing_tests`
+# output. Wrapping the script in a cap (vs. calling it inline) is what lets
+# flow.behavioral-coverage's `diagnosing_gaps` step consume `existing_tests`
+# via `use:.inputs` — the cap's `snippet.outputs` seed the flow's slot table
+# (V13); a bare inline `output:` block would not (cap.inspect.repo-digest's
+# own header note — same pattern, applied here for test enumeration instead
+# of the general repo digest).
+
+workflows:
+  cap.inspect.test-inventory:
+    verb: inspect
+    lifecycle: experimental
+    description: >
+      Enumerate the repo's existing #[test]/#[tokio::test] functions under a
+      scope via the inspect.test-inventory script; surface as a typed
+      existing_tests digest for the coverage-gap diagnosis leaf.
+    snippet:
+      inputs:
+        coverage_scope: { type: string, default: "" }
+      outputs:
+        existing_tests: { type: object }
+      # repo_root is run-ambient ($.run.repo_root).
+    initialState: ready
+    states:
+      ready:
+        goal: Enumerate the repo's existing tests under coverage_scope (code-gathered facts).
+        transitions:
+          scan:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.test-inventory
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.run.repo_root"
+                - "$.workflow.input.coverage_scope"
+            output:
+              existing_tests: "$.output.json"
+      done: { terminal: true }

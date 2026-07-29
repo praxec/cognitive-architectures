@@ -1,0 +1,473 @@
+# orchestrators/flow.behavioral-coverage.yaml
+#
+# REUSABLE, REPO-AGNOSTIC behavioral-coverage flow. Encodes a standing team
+# practice: for primitives WE own, assert DESIRED behavior as a suite of
+# ATOMIC declarative behavioral assertions — one contract per test (unit-test
+# level), authored RED-FIRST (a desired-but-unmet contract is an
+# `#[ignore = "RED: <gap>"]` test = the build list) — rather than deriving
+# behavior by reading source. One assertion per test is a HARD invariant this
+# flow enforces, not a suggestion.
+#
+#   baselining          → snapshot repo HEAD (honest cumulative-progress
+#                         baseline, same idiom as flow.change's own
+#                         `baselining`; kept SEPARATE from flow.change's
+#                         internal per-call baseline because THIS baseline
+#                         must span every covering/completeness-gate pass).
+#   enumerating         → cap.diagnose.primitive-contracts: an agent (full
+#                         read reach, PROMPT-bounded to coverage_scope) lists
+#                         every primitive in scope and its distinct desired
+#                         behavioral contracts. Non-mutating.
+#   scanning_tests      → inspect.test-inventory (deterministic): enumerate
+#                         the repo's EXISTING #[test]/#[tokio::test] functions
+#                         under coverage_scope — the code-gathered facts side
+#                         of "already asserted".
+#   diagnosing_gaps     → cap.diagnose.coverage-gaps: match the inventory
+#                         against existing_tests; emit the UNCOVERED set (the
+#                         residual build list) + honest counts. The judgment
+#                         side of "already asserted".
+#   completeness_gate   → bounded completeness-critic loop (LoopGuard: a round
+#                         counter + cap, same shape as
+#                         flow.harden.fmeca-converge's `gate`): uncovered ==
+#                         0 → done covering, straight to reporting; uncovered
+#                         > 0 and rounds remain → covering (again, now against
+#                         whatever is STILL uncovered); rounds exhausted →
+#                         reporting anyway — this run's honest, documented
+#                         residual (the DoD's "or an explicit documented gap"
+#                         clause), never a silent stop and never a fabricated
+#                         "done".
+#   covering            → flow.change (the reusable change atom): author the
+#                         missing atomic assertions for the CURRENT uncovered
+#                         set as ONE red-first TDD plan. flow.change routes
+#                         rust to cap.implement.build-loop, whose OWN internal
+#                         red→green→QA→commit loop already iterates PER
+#                         BEHAVIOR (one atomic test at a time) until the whole
+#                         plan converges or parks at a human — this flow does
+#                         NOT re-implement that inner loop, it hands the
+#                         residual set to it as one plan and lets it run.
+#   covering_gate       → defense-in-depth DoD handoff (flow.change's own
+#                         failure contract already makes reaching here imply
+#                         success — same belt-and-braces shape as
+#                         flow.implement.deliverable's change_gate).
+#   measuring_cumulative→ inspect.git.progress against THIS flow's own
+#                         baseline (not flow.change's per-call one) — the
+#                         real evidence of everything changed so far, across
+#                         every covering pass.
+#   enforcing_atomicity → verify.test.atomicity (deterministic, static-scan
+#                         ONLY — no second cargo run): re-audit the ONE-
+#                         ASSERTION-PER-TEST invariant across every file this
+#                         run has touched so far. cap.implement.build-loop
+#                         ALREADY enforces this PER SLICE as it writes (a
+#                         `not_atomic` verdict loops the slice back before it
+#                         can commit) — this is the DEFENSE-IN-DEPTH cohort-
+#                         level re-confirmation the mission calls for, not a
+#                         re-implementation of that per-slice gate.
+#   atomicity_gate      → clean → back to scanning_tests (re-diagnose against
+#                         the now-larger existing_tests); a violation (should
+#                         be structurally impossible given build-loop's own
+#                         gate, but never trusted blindly) escalates to a
+#                         human — NEVER a silent pass.
+#   reporting           → audit.coverage-matrix (deterministic, the anti-
+#                         fake-success recount, same idiom as
+#                         flow.audit.completeness's report step): fold the
+#                         inventory + residual uncovered set + atomicity
+#                         verdict into the coverage matrix (primitive ×
+#                         contract × covered|residual) and write it to
+#                         report_path.
+#
+# Full-repo coverage is achieved by REPEATED bounded runs (coverage_scope
+# narrows each run to a coherent module/crate/glob) — never one unbounded
+# pass over an entire codebase.
+#
+# Requires (cognitive/*): cap.diagnose.primitive-contracts,
+# cap.diagnose.coverage-gaps, flow.change, cap.gate.human-signoff, and the
+# scripts inspect.test-inventory / verify.test.atomicity /
+# audit.coverage-matrix / inspect.git.progress.
+
+workflows:
+  flow.behavioral-coverage:
+    lifecycle: experimental
+    description: >
+      Repo-agnostic behavioral-coverage flow: enumerate a bounded scope's
+      primitives + desired contracts, diagnose what's already asserted,
+      author the missing atomic red-first assertions via the reusable change
+      atom (one contract per test), re-audit the one-assertion-per-test
+      invariant, loop on residual gaps (bounded), and emit an honest coverage
+      matrix + gap report — never a silent pass.
+    inputs:
+      # Module/crate/glob bounding THIS run. Required (not defaulted): a
+      # repo-agnostic flow cannot guess a target-specific slice, and a path
+      # default would not merge into $.workflow.input for resolution anyway
+      # (flow.change's own backstop_cwd precedent).
+      coverage_scope:   { type: string, required: true }
+      # Explicit stack override threaded into each deliverable; "" (default)
+      # lets flow.change's own detecting_stack sniff the repo (Cargo.toml /
+      # package.json / *.sln) — repo-agnostic by default, override only when
+      # the sniff would be ambiguous.
+      stack:            { type: string, default: "" }
+      # SCOPED inner build-loop narrowing, threaded straight to flow.change's
+      # OWN top-level cargo_scope input (decoupled from the deliverable
+      # object — see flow.change's header). "" (default) = full-workspace
+      # inner loop.
+      cargo_scope:      { type: string, default: "" }
+      # LoopGuard bound on the completeness-critic retry loop (rounds of
+      # covering → re-diagnose). Default 3: enough to absorb a build-loop
+      # human-park-and-resume without spinning forever on a scope that is
+      # simply too large for one bounded run.
+      completeness_cap: { type: integer, default: 3 }
+      # Where the final YAML coverage-matrix artifact is written (flow.audit.
+      # completeness's report_path precedent).
+      report_path:      { type: string, required: true }
+    initialContext:
+      outer_base_commit:    ""
+      inventory:            []
+      primitive_count:      0
+      contract_count:       0
+      existing_tests:       { tests: [], test_count: 0 }
+      uncovered:            []
+      covered_count:        0
+      uncovered_count:      0
+      change_verify:        { status: "" }
+      cumulative_files:     []
+      cumulative_files_changed: 0
+      # Seeded TRUE (vacuously): on the first-pass all-covered path (scope
+      # already fully covered → `covering`/`enforcing_atomicity` never run),
+      # nothing is authored this run, so the one-assertion invariant holds
+      # vacuously and the `atomicity_holds` DoD must read true at `done`.
+      # On any covering path `enforcing_atomicity` OVERWRITES this with the
+      # real scan verdict BEFORE `reporting`, and a real violation routes
+      # through `atomicity_gate`→escalate/failed (never to `reporting`), so
+      # seeding true cannot mask an actual atomicity failure.
+      atomic_passed:        true
+      atomic_violations:    []
+      scanned_test_count:   0
+      atomicity_decision:   ""
+      completeness_round:   0
+      report_emitted:       false
+      report_covered_count: 0
+      report_uncovered_count: 0
+    # HONEST definition of done: every enumerated primitive has real coverage
+    # OR the residual is an explicit, reported gap (never a silent stop) —
+    # so the DoD does NOT require uncovered_count == 0. It requires the
+    # enumeration to have actually run, the one-assertion-per-test invariant
+    # to hold on everything authored, and the coverage report to have been
+    # written (the anti-fake-success recount, never trusted from agent math).
+    outcomes:
+      - id: primitives_enumerated
+        statement: >
+          The enumeration step produced a real primitive inventory in scope
+          (primitive_count >= 1) — a genuine scope, not an empty/no-op run.
+        check: "$.context.primitive_count >= 1"
+      - id: atomicity_holds
+        statement: >
+          Every atomic assertion this run authored, across every covering
+          pass, asserts EXACTLY ONE behavior (the one-assertion-per-test
+          invariant), re-confirmed by the deterministic cohort-level scan.
+        check: "$.context.atomic_passed == true"
+      - id: coverage_reported
+        statement: >
+          The coverage matrix + gap report was written to report_path by the
+          deterministic recount script (never the agent's own arithmetic).
+        check: "$.context.report_emitted == true"
+    initialState: baselining
+    states:
+
+      # HONEST-EVIDENCE BASELINE, spanning the WHOLE run (every covering pass,
+      # not just one flow.change call) — same idiom as flow.change's own
+      # baselining, kept separate because this baseline must survive multiple
+      # completeness-gate retries.
+      baselining:
+        goal: Snapshot repo HEAD before authoring anything (baseline for the whole run).
+        transitions:
+          snapshot:
+            target: enumerating
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.git.progress
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.run.repo_root"
+                - ""
+            output:
+              outer_base_commit: "$.output.json.head"
+
+      # PRIMITIVE INVENTORY (non-mutating): an agent reads coverage_scope and
+      # lists every primitive + its distinct desired behavioral contracts.
+      enumerating:
+        goal: Enumerate every primitive in coverage_scope and its desired behavioral contracts.
+        transitions:
+          enumerate:
+            target: scanning_tests
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.diagnose.primitive-contracts
+              use:
+                inputs:
+                  coverage_scope: "$.workflow.input.coverage_scope"
+                outputs:
+                  "$.context.inventory":        inventory
+                  "$.context.primitive_count":  primitive_count
+                  "$.context.contract_count":   contract_count
+
+      # DETERMINISTIC existing-test digest (re-run on every completeness-gate
+      # retry too, so it always reflects whatever `covering` just authored).
+      # Wrapped in cap.inspect.test-inventory (rather than an inline
+      # `kind: script` call) so `existing_tests` is a `use:.outputs`-typed
+      # slot the flow's V13 slot table recognizes — a bare inline `output:`
+      # block would not (cap.inspect.repo-digest's own header note; this
+      # cap follows the exact same pattern for test enumeration).
+      scanning_tests:
+        goal: Enumerate the repo's existing tests under coverage_scope (code-gathered facts).
+        transitions:
+          scan:
+            target: diagnosing_gaps
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.inspect.test-inventory
+              use:
+                inputs:
+                  coverage_scope: "$.workflow.input.coverage_scope"
+                outputs:
+                  "$.context.existing_tests": existing_tests
+
+      # JUDGMENT: match the inventory against existing_tests; emit the
+      # uncovered residual + honest counts. Re-run every completeness-gate
+      # retry against the SAME original inventory, so a shrinking uncovered
+      # set is real evidence, not a re-enumeration artifact.
+      diagnosing_gaps:
+        goal: Diagnose which enumerated contracts are already asserted vs uncovered.
+        transitions:
+          diagnose:
+            target: completeness_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.diagnose.coverage-gaps
+              use:
+                inputs:
+                  inventory:      "$.context.inventory"
+                  existing_tests: "$.context.existing_tests"
+                outputs:
+                  "$.context.uncovered":       uncovered
+                  "$.context.covered_count":   covered_count
+                  "$.context.uncovered_count": uncovered_count
+
+      # ── BOUNDED COMPLETENESS-CRITIC GATE (LoopGuard) ─────────────────────
+      # Exhaustive over {nothing left, retry, rounds exhausted}. Serves BOTH
+      # the very first pass (round starts at 0) and every retry — a shrinking
+      # `uncovered` each time `covering` runs again. Exhaustion is NEVER a
+      # silent stop: it still reaches `reporting`, which documents the
+      # residual (the DoD's "or explicit documented gap" clause).
+      completeness_gate:
+        transitions:
+          all_covered:
+            target: reporting
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.uncovered_count == 0" }
+          retry_covering:
+            target: covering
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.uncovered_count > 0" }
+              - { kind: expr, expr: "$.context.completeness_round < $.workflow.input.completeness_cap" }
+            output:
+              completeness_round: { add: ["$.context.completeness_round", 1] }
+          escalate_residual:
+            target: reporting
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.uncovered_count > 0" }
+              - { kind: expr, expr: "$.context.completeness_round >= $.workflow.input.completeness_cap" }
+
+      # AUTHOR the missing atomic assertions for the CURRENT uncovered set as
+      # ONE red-first TDD plan, via the reusable change atom. flow.change
+      # routes rust to cap.implement.build-loop, whose OWN red→green→QA→
+      # commit loop iterates per behavior until this plan converges (or
+      # parks at a human) — this flow does not re-implement that loop.
+      covering:
+        goal: Author the missing atomic red-first assertions for the current uncovered set.
+        transitions:
+          change:
+            target: covering_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.change
+              use:
+                inputs:
+                  deliverable:
+                    goal: >
+                      Author ONE atomic, declarative behavioral assertion test
+                      per contract listed in `primitives`, red-first. Every
+                      contract gets EXACTLY ONE #[test] with EXACTLY ONE
+                      assertion macro (Arrange-Act-Assert) — never a compound
+                      test asserting more than one behavior. A contract the
+                      current implementation does NOT yet satisfy is authored
+                      as a real (not stubbed-out) test that compiles and is
+                      RED, marked `#[ignore = "RED: <gap>"]` documenting the
+                      gap in the message — never silently omitted or
+                      softened into a tautology.
+                    primitives: "$.context.uncovered"
+                    acceptance_criteria:
+                      - "Every primitive in `primitives` has >= 1 new test per its listed contracts"
+                      - "Every new test has exactly one assertion macro (one behavior per test)"
+                      - "Every contract not yet satisfied by the implementation is authored as a real, compiling, #[ignore = \"RED: <gap>\"] test — never omitted"
+                      - "cargo fmt + clippy + test all pass (ignored red tests excluded from the pass/fail count)"
+                    stack: "$.workflow.input.stack"
+                  backstop_cwd: "$.run.repo_root"
+                  cargo_scope:  "$.workflow.input.cargo_scope"
+                outputs:
+                  "$.context.change_verify": ws_verify
+
+      # Defense-in-depth DoD handoff (flow.change's own failure contract
+      # already makes reaching here imply success — belt-and-braces, same
+      # shape as flow.implement.deliverable's change_gate).
+      covering_gate:
+        transitions:
+          proceed:
+            target: measuring_cumulative
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.change_verify.status == 'pass'" }
+          blocked:
+            target: failed
+            actor: deterministic
+
+      # Real cumulative evidence of everything this RUN has changed so far
+      # (against the outer baseline, not flow.change's own per-call one).
+      measuring_cumulative:
+        goal: Measure every file this run has changed so far (cumulative, honest evidence).
+        transitions:
+          measure:
+            target: enforcing_atomicity
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.git.progress
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.run.repo_root"
+                - "$.context.outer_base_commit"
+            output:
+              cumulative_files:         "$.output.json.files"
+              cumulative_files_changed: "$.output.json.files_changed"
+
+      # DEFENSE-IN-DEPTH one-assertion-per-test re-audit across everything
+      # this run has touched so far. Static-scan ONLY (no second cargo run —
+      # flow.change's own verify_rust already ran the full suite).
+      enforcing_atomicity:
+        goal: Re-audit the one-assertion-per-test invariant across every file this run changed.
+        transitions:
+          scan:
+            target: atomicity_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.test.atomicity
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.run.repo_root"
+                - "$.context.cumulative_files"
+            output:
+              atomic_passed:      "$.output.json.atomic_passed"
+              atomic_violations:  "$.output.json.atomic_violations"
+              scanned_test_count: "$.output.json.scanned_test_count"
+
+      # Exhaustive: clean loops back to re-diagnose coverage; a violation
+      # (structurally unexpected — build-loop's own gate should have already
+      # prevented it) escalates to a human, NEVER a silent pass.
+      atomicity_gate:
+        transitions:
+          clean:
+            target: scanning_tests
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.atomic_passed == true" }
+          violation:
+            target: atomicity_escalating
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.atomic_passed == false" }
+
+      # Human decides: accept the residual violation (e.g. a pre-existing
+      # multi-assertion test this run's diff incidentally touched) and
+      # continue, or stop the run outright.
+      atomicity_escalating:
+        goal: A one-assertion-per-test violation survived the build-loop's own gate — ask a human.
+        transitions:
+          escalate:
+            target: atomicity_escalation_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.gate.human-signoff
+              use:
+                inputs:
+                  artifact:
+                    violations: "$.context.atomic_violations"
+                  prompt: >
+                    A one-assertion-per-test violation was found in this run's
+                    changed files (unexpected — the build-loop's own gate
+                    should already prevent this). Continue treating coverage
+                    as valid, or stop the run?
+                outputs:
+                  "$.context.atomicity_decision": decision
+
+      atomicity_escalation_gate:
+        transitions:
+          continue:
+            target: scanning_tests
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.atomicity_decision == 'approved'" }
+          stop:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.atomicity_decision == 'rejected'" }
+          # Default (V23) — an out-of-domain decision routes to failed rather
+          # than dead-stalling or silently continuing.
+          unexpected_decision:
+            target: failed
+            actor: deterministic
+
+      # ANTI-FAKE-SUCCESS RECOUNT + report emit: fold the inventory + residual
+      # uncovered set + atomicity verdict into the coverage matrix and write
+      # it to report_path. Reached whether coverage fully closed or the
+      # completeness-critic loop exhausted with residual gaps — either way
+      # this is the honest, documented outcome (never a silent stop).
+      reporting:
+        goal: Emit the coverage matrix + gap report (deterministic recount, never agent math).
+        transitions:
+          report:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: audit.coverage-matrix
+              args:
+                - "$.context.inventory"
+                - "$.context.uncovered"
+                - "$.context.atomic_passed"
+                - "$.context.atomic_violations"
+                - "$.workflow.input.coverage_scope"
+                - "$.run.repo_root"
+                - "$.workflow.input.report_path"
+            output:
+              report_emitted:         "$.output.json.report_emitted"
+              report_covered_count:   "$.output.json.covered_count"
+              report_uncovered_count: "$.output.json.uncovered_count"
+
+      # Reached from: an atomicity violation a human rejected, or a
+      # (structurally unreachable given flow.change's own contract) verify
+      # failure at covering_gate. Fail loud — never a disguised complete.
+      failed:
+        terminal: true
+        outcome: failure
+
+      done:
+        terminal: true
+        outcome: success
