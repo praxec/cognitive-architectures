@@ -46,16 +46,37 @@ scripts:
       META="${1:-${DELIVERABLE_JSON:-}}"
       OVERRIDE="${2:-}"
 
-      # 1. Explicit override wins verbatim (trim surrounding whitespace only).
+      # 1. Explicit override — accepted ONLY when it looks like a PATH LIST.
+      # POKA-YOKE: `scope` is the coder's authoritative file list. A bare token
+      # with neither '/' nor '.' (e.g. a surface NAME like "organization-payment"
+      # mis-threaded from a cohort's verify_scope) is NOT a file scope — trusting
+      # it verbatim hands the coder a non-existent "file" and it can only STOP
+      # ("deliverable under-scoped"), livelocking the fix loop to exhaustion (the
+      # exact failure this guard exists to kill). A non-path override is REJECTED:
+      # fall through to owned_files (the real, deterministic file list) and record
+      # the rejection so the mis-threaded value is visible in the audit + on stderr.
+      override_rejected=0
       trimmed_override="$(printf '%s' "$OVERRIDE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
       if [ -n "$trimmed_override" ]; then
-        jq -n --arg s "$trimmed_override" '{scope:$s, source:"override", count:($s|split(" ")|map(select(length>0))|length)}'
-        exit 0
+        looks_like_paths=true
+        for tok in $trimmed_override; do
+          # A path token has a directory separator OR a filename extension.
+          case "$tok" in */*|*.*) : ;; *) looks_like_paths=false; break ;; esac
+        done
+        if [ "$looks_like_paths" = true ]; then
+          jq -n --arg s "$trimmed_override" '{scope:$s, source:"override", count:($s|split(" ")|map(select(length>0))|length)}'
+          exit 0
+        fi
+        override_rejected=1
+        printf 'SCOPE_OVERRIDE_REJECTED: %s\n' \
+          "'$trimmed_override' is not a path list (a bare surface name?) — deriving scope from owned_files instead" >&2
       fi
 
       # 2/3. Space-join owned_files (top-level, else metadata.owned_files).
       scope=""
-      source="none"
+      # A rejected non-path override is surfaced even when owned_files is also
+      # empty, so an empty scope is never silently blamed on the planner alone.
+      if [ "$override_rejected" = 1 ]; then source="override_rejected_nonpath"; else source="none"; fi
       if printf '%s' "$META" | jq -e 'type == "object"' >/dev/null 2>&1; then
         # Coalesce the two accepted locations; keep only non-empty string entries.
         joined="$(printf '%s' "$META" | jq -r '
@@ -70,6 +91,8 @@ scripts:
           else
             source="metadata.owned_files"
           fi
+          # Keep the rejected-override signal visible even on the recovery path.
+          [ "$override_rejected" = 1 ] && source="${source}_after_rejected_override"
         fi
       fi
 
