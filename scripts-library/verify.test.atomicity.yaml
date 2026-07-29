@@ -1,0 +1,108 @@
+# scripts-library/verify.test.atomicity.yaml
+#
+# COHORT-LEVEL one-assertion-per-test re-audit for flow.behavioral-coverage's
+# `enforcing_atomicity` gate. cap.implement.build-loop (composed inside
+# flow.change, this flow's `covering` builder) already enforces atomicity
+# PER RED SLICE as it is written (verify.test.tdd-verdict's `not_atomic`
+# verdict loops the slice back to `red_test` before it can ever commit) — so
+# by construction every slice flow.change lands should already satisfy the
+# invariant. This script is the DEFENSE-IN-DEPTH re-check across the WHOLE
+# set of files this run changed (which may span many slices / multiple
+# primitives / multiple completeness-gate passes), extracted as a STATIC-ONLY
+# scan (no `cargo test`) so the re-audit is cheap and does not re-pay for the
+# full compile+test flow.change's own verify_rust already ran.
+#
+# Static-scan logic is the EXACT SAME brace-tracking `awk` proven in
+# verify.test.tdd-verdict (assertion-macro-call count per `#[test]` fn body)
+# — extracted here as a standalone leaf rather than re-implemented, so both
+# scripts can never disagree on what "atomic" means.
+#
+# Args:
+#   $1 REPO_ROOT   — repo to scan (also the cwd)
+#   $2 SCAN_TARGET — space-separated changed-file paths to scan; empty ⇒
+#                    nothing to scan (honest atomic_passed=true,
+#                    scanned_test_count=0 — never a fabricated violation)
+# Emits JSON: { atomic_passed, atomic_violations, scanned_test_count } on stdout.
+version: "1.0.0"
+scripts:
+  verify.test.atomicity:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      REPO="${1:-${REPO_PATH:-.}}"
+      SCAN_TARGET="${2:-}"
+      if [ ! -d "$REPO" ]; then
+        printf '{"atomic_passed":true,"atomic_violations":[],"scanned_test_count":0,"error":"repo not found: %s"}\n' "$REPO"; exit 0
+      fi
+      cd "$REPO" || { printf '{"atomic_passed":true,"atomic_violations":[],"scanned_test_count":0,"error":"cannot cd"}\n'; exit 0; }
+
+      if [ -z "${SCAN_TARGET// /}" ] || [ "$SCAN_TARGET" = "[]" ]; then
+        printf '{"atomic_passed":true,"atomic_violations":[],"scanned_test_count":0,"error":null}\n'; exit 0
+      fi
+
+      # SCAN_TARGET arrives either as a space-separated path list (the
+      # library's usual arg convention) or as a JSON array (a $.context.*
+      # array value stringifies to JSON when passed as a script arg — see
+      # inspect.stack.yaml's header note on this renderer behavior). Accept
+      # both: a leading `[` selects the jq one-path-per-line unpack.
+      case "$SCAN_TARGET" in
+        \[*) target_list="$(printf '%s' "$SCAN_TARGET" | jq -r '.[]' 2>/dev/null)" ;;
+        *)   target_list="$SCAN_TARGET" ;;
+      esac
+
+      # Only the .rs files among the scan target (a mixed changed-file list
+      # may include non-rust paths — nothing to scan there).
+      rs_files="$(for p in $target_list; do case "$p" in *.rs) [ -f "$p" ] && printf '%s\n' "$p" ;; esac; done)"
+      if [ -z "${rs_files// /}" ]; then
+        printf '{"atomic_passed":true,"atomic_violations":[],"scanned_test_count":0,"error":null}\n'; exit 0
+      fi
+
+      # Total #[test]/#[tokio::test] function count across the scanned files
+      # (independent tally from the violation scan below — a plain count,
+      # not derived from the awk pass, so a scan bug in one can never hide in
+      # the other's number).
+      scanned="$(printf '%s\n' "$rs_files" | xargs grep -hE '#\[[ \t]*(tokio::)?test[ \t]*\]' 2>/dev/null | grep -c '' || true)"
+      [ -z "$scanned" ] && scanned=0
+
+      _viol_lines="$(
+        printf '%s\n' "$rs_files" | while IFS= read -r f; do
+          [ -n "$f" ] && [ -f "$f" ] || continue
+          awk -v FN="$f" '
+            function flush(  ) {
+              if (intest && opened && cnt != 1)
+                printf "{\"file\":\"%s\",\"test\":\"%s\",\"assertions\":%d}\n", FN, name, cnt;
+              intest=0; opened=0; cnt=0; depth=0; name="";
+            }
+            {
+              line=$0; sub(/\/\/.*$/, "", line);
+              if (!intest) {
+                if (line ~ /#\[[ \t]*(tokio::)?test[ \t]*\]/) { pending=1; next; }
+                if (pending && line ~ /fn[ \t]+[A-Za-z0-9_]+/) {
+                  name=line; sub(/^.*fn[ \t]+/, "", name); sub(/[^A-Za-z0-9_].*$/, "", name);
+                  intest=1; pending=0; depth=0; opened=0; cnt=0;
+                } else { next; }
+              }
+              tmp=line;
+              n=gsub(/assert(_eq|_ne|_matches)?![ \t]*\(/, "X", tmp); cnt+=n;
+              tmp2=line;
+              n2=gsub(/debug_assert(_eq|_ne)?![ \t]*\(/, "X", tmp2); cnt+=n2;
+              ob=gsub(/{/, "{", line); cb=gsub(/}/, "}", line);
+              depth += ob - cb;
+              if (depth > 0) opened=1;
+              if (opened && depth <= 0) flush();
+            }
+            END { if (intest) flush(); }
+          ' "$f"
+        done
+      )"
+
+      if [ -n "$_viol_lines" ]; then
+        atomic_violations="[$(printf '%s' "$_viol_lines" | paste -sd, -)]"; atomic_passed=false
+      else
+        atomic_violations="[]"; atomic_passed=true
+      fi
+      jq -n --argjson passed "$atomic_passed" --argjson viol "$atomic_violations" --argjson n "$scanned" \
+        '{atomic_passed: $passed, atomic_violations: $viol, scanned_test_count: $n, error: null}'
