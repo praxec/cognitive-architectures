@@ -18,13 +18,17 @@
 #                       build_mode=='tdd' → cap.implement.tdd-loop (the
 #                                        red-green-refactor loop; a -max ts
 #                                        flow's builder)
+#                       build_mode=='scope-bounded' → cap.implement.scope-bounded
+#                                        (the scoped-edit builder wave-3 flows
+#                                        like flow.bugfix-from-error-log build
+#                                        with — refuses out-of-scope writes)
 #                     "" (default, unchanged stack routing) falls through to:
 #                       ts             → flow.implement.ts-slice (agent → scoped
 #                                        tsc/vitest verdict → commit)
 #                       rust|dotnet|*  → cap.implement.build-loop (the existing
 #                                        cargo build-loop, UNCHANGED)
-#   building[_ts|_tdd] → run the chosen builder on the deliverable, via a
-#                     `kind: workflow` sub-mission.
+#   building[_ts|_tdd|_scope] → run the chosen builder on the deliverable,
+#                     via a `kind: workflow` sub-mission.
 #   measuring_impl  → count files changed since the baseline (real evidence).
 #   implemented_decision → zero files changed ⇒ `failed` (no silent no-op).
 #   stack_gate      → route to the SELECTED verifier. `verify_mode` (input,
@@ -81,19 +85,25 @@
 # default ""): SEVERAL org flows need a DIFFERENT builder/verifier than the
 # stack-derived default this atom hard-codes above — e.g. the -max ts flows
 # build via the TDD loop (cap.implement.tdd-loop) instead of
-# flow.implement.ts-slice, and a bugfix/debug flow verifies via the
-# regression-test suite (cap.verify.regression-tests) instead of the
-# stack-appropriate verifier. A prior spike proved `definitionId` is NOT
-# templatable (and it stays literal on purpose — it's load-time-validated),
-# so selection is STATIC ENUM ROUTING to pre-declared arms with real
-# validated definitionIds, never a templated `definitionId`. Both inputs
-# default to "" — the UNGUARDED stack-routing arms stay intact and are
-# evaluated exactly as before, so a caller that passes NEITHER (every
-# existing consumer: flow.implement.deliverable, flow.shared.mini-vee) gets
-# BYTE-IDENTICAL behavior to pre-this-change. The guarded override arm is
-# always ordered FIRST in its gate (build_mode ahead of the stack arms in
-# build_gate; verify_mode ahead of the stack arms in stack_gate) so the
-# enum check short-circuits before stack detection would otherwise apply.
+# flow.implement.ts-slice, wave-3 bugfix/debug flows build via the
+# scope-bounded edit builder (cap.implement.scope-bounded, build_mode==
+# 'scope-bounded'), and a bugfix/debug flow verifies via the regression-test
+# suite (cap.verify.regression-tests) instead of the stack-appropriate
+# verifier. A prior spike proved `definitionId` is NOT templatable (and it
+# stays literal on purpose — it's load-time-validated), so selection is
+# STATIC ENUM ROUTING to pre-declared arms with real validated
+# definitionIds, never a templated `definitionId`. Both inputs default to ""
+# — the UNGUARDED stack-routing arms stay intact and are evaluated exactly
+# as before, so a caller that passes NEITHER (every existing consumer:
+# flow.implement.deliverable, flow.shared.mini-vee) gets BYTE-IDENTICAL
+# behavior to pre-this-change. The guarded override arms are always ordered
+# FIRST in their gate (build_mode's tdd/scope-bounded arms ahead of the
+# stack arms in build_gate; verify_mode ahead of the stack arms in
+# stack_gate) so the enum check short-circuits before stack detection would
+# otherwise apply. `build_skills` (optional, default "") is a SEPARATE,
+# ADDITIVE input — not a mode selector — that passes craft/skill guidance
+# text through to the TDD builder only (see cap.implement.tdd-loop's own
+# craft_guidance input); it is inert unless build_mode=='tdd'.
 
 workflows:
   flow.change:
@@ -157,6 +167,13 @@ workflows:
       # verify_mode=='regression'; every other path never touches them.
       defect_location: { type: object, default: {} }
       repro_steps:     { type: array,  default: [] }
+      # SKILLS-AS-DATA passthrough (part b — see cap.implement.tdd-loop's own
+      # `craft_guidance` input, cherry-picked from a prior branch): craft/skill
+      # guidance text threaded into the TDD builder's agent goal (build_mode==
+      # 'tdd' only). "" (default) ⇒ tdd-loop's craft_guidance is "" ⇒ its goal
+      # template renders the guidance line blank — INERT, byte-identical to
+      # before this input existed. No other build arm reads build_skills.
+      build_skills:    { type: string, default: "" }
     # DoD-EVIDENCE HANDOFF (flows have no `snippet:`) — these name the terminal
     # context slots a `kind: workflow` parent reads via `use.outputs` to drive
     # its own completion. Populated by baselining / measuring_impl / verify_*.
@@ -251,34 +268,55 @@ workflows:
       # ── BUILD-PHASE GATE ── route the change to the SELECTED builder.
       # `build_mode` (capability-mode override, see header) is checked FIRST,
       # ahead of stack routing: build_mode=='tdd' takes the new
-      # building_tdd → cap.implement.tdd-loop arm regardless of stack.
-      # Backward-compat is the invariant for build_mode=="" (the default):
-      # EVERY non-ts stack (rust, dotnet, and any undetected/unknown) falls to
-      # `building` — the EXACT cap.implement.build-loop (cargo) path,
-      # byte-for-byte. ONLY a `ts` change takes the stack arm
-      # (building_ts → flow.implement.ts-slice).
+      # building_tdd → cap.implement.tdd-loop arm, and build_mode==
+      # 'scope-bounded' takes building_scope → cap.implement.scope-bounded,
+      # both regardless of stack. Backward-compat is the invariant for
+      # build_mode=="" (the default): EVERY non-ts stack (rust, dotnet, and
+      # any undetected/unknown) falls to `building` — the EXACT
+      # cap.implement.build-loop (cargo) path, byte-for-byte. ONLY a `ts`
+      # change takes the stack arm (building_ts → flow.implement.ts-slice).
+      #
+      # MUTUAL EXCLUSION (the engine requires EXACTLY ONE guarded transition
+      # viable per state — an overlap is an `ambiguous deterministic
+      # transition` runtime error, no first-match/priority ordering): the
+      # three build_mode values ("", "tdd", "scope-bounded") and the two
+      # stack values (ts, non-ts) that matter here are pairwise disjoint by
+      # construction —
+      #   build_tdd    fires iff build_mode == 'tdd'
+      #   build_scope  fires iff build_mode == 'scope-bounded'
+      #   build_ts     fires iff stack == 'ts' AND build_mode NOT IN {tdd, scope-bounded}
+      #   build_default (unguarded) fires iff none of the above — i.e.
+      #                 build_mode == "" AND stack != 'ts'
+      # so for every (build_mode, stack) pair exactly one arm's guard set is
+      # fully satisfied. With build_mode=="" (the default) both exclusions on
+      # build_ts are vacuously true, so default routing is byte-identical to
+      # before this change.
       build_gate:
         transitions:
-          # An explicit build_mode opt-in wins over stack-derived routing. The
-          # engine requires EXACTLY ONE guarded transition to be viable per state
-          # (no first-match/priority ordering — an overlap is an `ambiguous
-          # deterministic transition` error), so build_mode and the stack arm must
-          # be MUTUALLY EXCLUSIVE: build_ts carries a `build_mode != 'tdd'`
-          # exclusion so a ts deliverable with build_mode=='tdd' takes ONLY
-          # build_tdd. With build_mode=="" (the default) the exclusion is vacuously
-          # true, so default routing is byte-identical to before.
+          # An explicit build_mode opt-in wins over stack-derived routing.
           build_tdd:
             target: building_tdd
             actor: deterministic
             guards: [ { kind: expr, expr: "$.workflow.input.build_mode == 'tdd'" } ]
+          # NEW arm (this change): scope-bounded builder override — the
+          # scoped-edit path wave-3 flows (bugfix/debug) build with. Ordered
+          # alongside build_tdd, ahead of the stack arm, same reasoning.
+          build_scope:
+            target: building_scope
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.workflow.input.build_mode == 'scope-bounded'" } ]
           build_ts:
             target: building_ts
             actor: deterministic
             guards:
               - { kind: expr, expr: "$.context.stack == 'ts'" }
               - { kind: expr, expr: "$.workflow.input.build_mode != 'tdd'" }
-          # Unguarded default — rust | dotnet | unknown → the existing cargo
-          # build-loop, unchanged.
+              # NEW exclusion (this change): without it, a ts deliverable with
+              # build_mode=='scope-bounded' would make BOTH build_scope and
+              # build_ts viable ⇒ ambiguous deterministic transition.
+              - { kind: expr, expr: "$.workflow.input.build_mode != 'scope-bounded'" }
+          # Unguarded default — build_mode=="" AND stack != 'ts' → the
+          # existing cargo build-loop, unchanged.
           build_default:
             target: building
             actor: deterministic
@@ -368,6 +406,44 @@ workflows:
             executor:
               kind: workflow
               definitionId: cognitive/cap.implement.tdd-loop
+              repoRoot: "$.workflow.input.backstop_cwd"
+              use:
+                inputs:
+                  plan:        "$.workflow.input.deliverable"
+                  scope_paths: "$.workflow.input.deliverable"
+                  # Skills-as-data passthrough (see header + this atom's
+                  # `build_skills` input): "" (default) ⇒ the cap's own
+                  # craft_guidance default ⇒ inert blank guidance line —
+                  # byte-identical to before build_skills existed.
+                  craft_guidance: "$.workflow.input.build_skills"
+                outputs:
+                  "$.context.result": result
+
+      # ── SCOPE-BOUNDED BUILD-MODE ARM (build_mode=='scope-bounded') ── build
+      # the change via the scoped-edit builder (cap.implement.scope-bounded)
+      # instead of the stack-derived builder — the builder wave-3 flows
+      # (bugfix/debug, e.g. flow.bugfix-from-error-log's `implementing` state)
+      # use: it refuses out-of-scope writes and reports an under-scoped
+      # deliverable honestly rather than inventing a parallel API. Re-rooted
+      # to THIS change's repo (repoRoot override — same reasoning as the
+      # other build arms). `plan` / `scope_paths` both thread the deliverable
+      # — the SAME convention flow.bugfix-from-error-log's own `implementing`
+      # state uses (both bound to its fix_plan; the cap's `scope_paths` is
+      # required, so it must resolve to something usable as scope). Targets
+      # measuring_impl, identical to the other build arms, so the honest
+      # file-change measure + verify + react gate flow is unchanged. Captures
+      # `result` into the SAME `$.context.result` slot the other build arms
+      # use — mutually exclusive per run (build_mode routing), so reusing the
+      # slot is safe (same idiom as `ws_verify` reused across verify_* below).
+      building_scope:
+        goal: Build the change via the scope-bounded edit builder (build_mode == 'scope-bounded').
+        transitions:
+          build:
+            target: measuring_impl
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.scope-bounded
               repoRoot: "$.workflow.input.backstop_cwd"
               use:
                 inputs:
