@@ -60,7 +60,7 @@ workflows:
       planning:
         transitions:
           plan:
-            target: implementing
+            target: changing
             actor: deterministic
             executor:
               kind: workflow
@@ -72,51 +72,58 @@ workflows:
                 outputs:
                   "$.context.fix_plan": plan
 
-      implementing:
+      # Run the reusable change atom (flow.change) in place of the old
+      # implementing/verifying pair: build_mode:"scope-bounded" routes its
+      # build_gate to the SAME cap.implement.scope-bounded this flow called
+      # directly before (deliverable = fix_plan, threaded to BOTH its `plan`
+      # and `scope_paths`, matching the old implementing state); verify_mode:
+      # "regression" routes its stack_gate to the SAME cap.verify.
+      # regression-tests, fed the SAME defect_location/repro_steps this flow's
+      # diagnostic prefix already produced. flow.change's honest DoD
+      # (impl_files_changed >= 1 AND ws_verify.status == 'pass') replaces the
+      # old `verified` gate's single regression_ok check.
+      changing:
+        goal: Run the reusable change atom (scope-bounded build + regression verify) on the fix plan.
         transitions:
-          edit:
-            target: verifying
+          change:
+            target: change_gate
             actor: deterministic
             executor:
               kind: workflow
-              definitionId: cap.implement.scope-bounded
+              definitionId: cognitive/flow.change
               use:
                 inputs:
-                  plan:        "$.context.fix_plan"
-                  scope_paths: "$.context.fix_plan"
-                outputs:
-                  "$.context.edit_result": result
-
-      verifying:
-        transitions:
-          verify:
-            target: verified
-            actor: deterministic
-            executor:
-              kind: workflow
-              definitionId: cap.verify.regression-tests
-              use:
-                inputs:
+                  deliverable:     "$.context.fix_plan"
+                  backstop_cwd:    "$.run.repo_root"
+                  build_mode:      "scope-bounded"
+                  verify_mode:     "regression"
                   defect_location: "$.context.defect_location"
                   repro_steps:     "$.context.repro_steps"
                 outputs:
-                  "$.context.regression_ok":          ok
-                  "$.context.regression_tests_added": tests_added
+                  "$.context.base_commit":        base_commit
+                  "$.context.impl_files_changed": impl_files_changed
+                  "$.context.ws_verify":          ws_verify
 
-      verified:
+      # DoD HANDOFF GATE — same shape as flow.implement.deliverable's
+      # change_gate: proceed only when BOTH of flow.change's outcomes hold
+      # (real files changed AND the regression verifier passed); the
+      # unguarded `abort` is fail-closed defense-in-depth (flow.change already
+      # routes any no-op / verifier-fail / unknown-stack to its own `failed`
+      # terminal, which errors the `changing` transition above before this
+      # gate is ever reached on an unmet DoD).
+      change_gate:
         transitions:
           advance:
             target: reviewing
             actor: deterministic
             guards:
               - kind: expr
-                expr: "$.context.regression_ok == true"
+                expr: "$.context.impl_files_changed >= 1"
+              - kind: expr
+                expr: "$.context.ws_verify.status == 'pass'"
           abort:
             target: failed
             actor: deterministic
-            guards:
-              - kind: expr
-                expr: "$.context.regression_ok == false"
 
       reviewing:
         transitions:
