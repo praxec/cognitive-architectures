@@ -7,52 +7,68 @@
 # leases ONE browser server process and both tool surfaces (if both are granted)
 # would need to share it — in practice grant ONE browser MCP per deployment and
 # size its pool for your parallelism. See browser-chrome-devtools.yaml for the
-# topology/lease rationale (identical here).
-#
-# Split-host: append ["--cdp-endpoint", "http://<host-ip>:9222"] to attach to a
-# remote Chrome instead of launching locally.
+# topology/lease rationale (identical here). THE PORTABLE DEFAULT IS THIS FILE
+# (the wrapper below) — browser-chrome-devtools.yaml's split-host attach is the
+# opt-in diagnostics path.
 #
 # ---------------------------------------------------------------------------
-# BROWSER SELECTION — the two flags that cost real dogfood runs
+# PORTABLE BY DEFAULT — scripts/browser-mcp.sh, not `npx` directly
 # ---------------------------------------------------------------------------
 # `--browser` accepts ONLY: chrome | firefox | webkit | msedge. It is a CHANNEL
 # name, not a path and not a Playwright browser id — "chromium" is rejected.
+# The DEFAULT channel (`chrome`) hunts for a system-installed Google Chrome.
+# On WSL and on most bare Linux containers/CI runners there is no such
+# install (or the distro chromium is confinement-broken), so the server
+# starts, accepts the run's lease, and then every navigate fails — which
+# surfaces as a survey that maps nothing rather than as a launch error.
 #
-# The DEFAULT (`chrome`) hunts for a system-installed Google Chrome. On WSL and
-# on most bare Linux containers there is no such install, so the server starts,
-# accepts the lease, and then every navigate fails — which surfaces as a survey
-# that maps nothing rather than as a launch error. Two working fixes:
+# The fix that works identically on Linux/macOS/Windows/WSL/containers with
+# ZERO host-specific setup: launch via `scripts/browser-mcp.sh`, which
+# bootstraps Playwright's own managed Chromium (`npx playwright install
+# chromium`, idempotent), resolves its executable path OS-agnostically via
+# Playwright's `chromium.executablePath()` API (never a hand-glob'd,
+# version-numbered cache path), fails LOUD in a preflight if that path isn't
+# an executable file, and only then execs the real @playwright/mcp server
+# with `--executable-path <resolved>` (which, unlike `--browser`, takes any
+# literal binary path on any OS). See that script for the full mechanism.
 #
-#   a) point at the Playwright-managed Chromium you already downloaded:
-#      args: ["@playwright/mcp@latest", "--isolated",
-#             "--executable-path", "/home/<you>/.cache/ms-playwright/chromium-*/chrome-linux/chrome"]
-#      (`npx playwright install chromium` first; glob the real versioned dir —
-#      the arg takes a literal path, it is not shell-expanded.)
+# `command`/`args` below resolve relative to the praxec PROCESS's cwd at
+# spawn time (connections have no config-relative interpolation), so use
+# either an ABSOLUTE path to this repo's checkout (shown below — adjust to
+# wherever you cloned cognitive-architectures) or invoke `praxec` from this
+# repo's root and use the relative form `sh scripts/browser-mcp.sh`.
 #
-#   b) use a channel that IS installed, e.g. `--browser firefox` after
-#      `npx playwright install firefox`.
+# startupTimeoutMs is generous (180000) because a cold `npx` fetch of
+# @playwright/mcp PLUS a first-time `playwright install chromium` download
+# can take a while; subsequent runs are fast (both steps no-op once cached).
 #
-# Verify BEFORE wiring a pool member — a 30-second check beats a burned run:
-#   npx @playwright/mcp@latest --isolated --executable-path <path> --version
-#
-# On WSL specifically, prefer attaching to Windows-side Chrome over installing a
-# Linux browser: see browser-chrome-devtools.yaml's split-host section, which
-# applies verbatim (swap `--browser-url` for `--cdp-endpoint` here).
+# ---------------------------------------------------------------------------
+# OPT-IN: split-host — attach to a remote/system Chrome instead
+# ---------------------------------------------------------------------------
+# Append ["--cdp-endpoint", "http://<host-ip>:9222"] as an extra arg to the
+# wrapper to attach to a remote Chrome instead of launching a local managed
+# one (e.g. Windows-side Chrome from WSL — see browser-chrome-devtools.yaml's
+# split-host section for the rationale, which applies verbatim here). Set
+# env BROWSER_MCP_SKIP_LOCAL=1 on the connection to skip the wrapper's local
+# bootstrap/resolve/preflight entirely in that case (no local Chromium is
+# needed when everything routes through --cdp-endpoint). This is an OPT-IN
+# override, not the default — the default below always launches locally.
 
 connections:
   browser_playwright_1:
     kind: mcp
-    command: npx
-    args: ["@playwright/mcp@latest", "--isolated"]
+    command: sh
+    # Adjust this absolute path to wherever you cloned cognitive-architectures.
+    args: ["/home/<you>/cognitive-architectures/scripts/browser-mcp.sh"]
     exclusive: true
     pool: browser
-    startupTimeoutMs: 120000
+    startupTimeoutMs: 180000
     idleTimeoutMs: 180000
   browser_playwright_2:
     kind: mcp
-    command: npx
-    args: ["@playwright/mcp@latest", "--isolated"]
+    command: sh
+    args: ["/home/<you>/cognitive-architectures/scripts/browser-mcp.sh"]
     exclusive: true
     pool: browser
-    startupTimeoutMs: 120000
+    startupTimeoutMs: 180000
     idleTimeoutMs: 180000

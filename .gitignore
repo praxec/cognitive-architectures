@@ -23,3 +23,11 @@ Cargo.lock
 *.log
 scratch/
 tmp/
+
+# Node (flow.qa.explore's reproduction gate needs @playwright/test installed
+# in this repo when it's used as the app-under-test; keep the lockfile,
+# ignore the install + generated artifacts)
+node_modules/
+test-results/
+playwright-report/
+.praxec/
