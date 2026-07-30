@@ -4,6 +4,11 @@
 # for the agentic E2E discovery loop (flow.qa.explore). Reference copy: operators
 # paste this into their gateway config and grant it.
 #
+# The PORTABLE, zero-host-setup DEFAULT for the browser pool is
+# browser-playwright.yaml's scripts/browser-mcp.sh wrapper; this file is the
+# OPT-IN path when you specifically need Chrome DevTools diagnostics
+# (console/network/Lighthouse) against chrome, not chromium.
+#
 # EXCLUSIVE + POOLED. A chrome-devtools-mcp server has ONE global `select_page`
 # pointer per process, so two runs sharing a connection silently corrupt each
 # other (and any reproduction measurement taken through it). `exclusive: true`

@@ -1,0 +1,9 @@
+{
+  "name": "cog-arch-browser-qa-target",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Minimal package.json so flow.qa.explore's deterministic reproduction gate (npx playwright test) can run against this worktree per orchestrators/flow.qa.explore.yaml's stated requirement.",
+  "devDependencies": {
+    "@playwright/test": "^1.62.0"
+  }
+}

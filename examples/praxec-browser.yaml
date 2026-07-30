@@ -19,24 +19,34 @@ gateway:
 audit:
   sink: stderr
 
-# Exclusive + pooled: two Chrome DevTools server processes form the `browser`
+# Exclusive + pooled: two browser MCP server processes form the `browser`
 # pool. Many runs distribute across them; each run leases one for its lifetime.
+#
+# PORTABLE DEFAULT: launched via scripts/browser-mcp.sh (see
+# connections/browser-playwright.yaml for the full mechanism) rather than
+# `chrome-devtools-mcp`/system Chrome directly — that hunts a
+# system-installed Chrome that most Linux boxes/containers/WSL don't have,
+# so the server starts, accepts the lease, and every navigate then fails
+# silently. `command`/`args` resolve relative to the praxec PROCESS's cwd
+# (no config-relative interpolation for connections), so run `praxec` from
+# this repo's root (where this relative path resolves) — or swap in an
+# absolute path to your checkout.
 connections:
   browser_chrome_1:
     kind: mcp
-    command: npx
-    args: ["chrome-devtools-mcp@latest", "--isolated"]
+    command: sh
+    args: ["scripts/browser-mcp.sh"]
     exclusive: true
     pool: browser
-    startupTimeoutMs: 120000
+    startupTimeoutMs: 180000
     idleTimeoutMs: 180000
   browser_chrome_2:
     kind: mcp
-    command: npx
-    args: ["chrome-devtools-mcp@latest", "--isolated"]
+    command: sh
+    args: ["scripts/browser-mcp.sh"]
     exclusive: true
     pool: browser
-    startupTimeoutMs: 120000
+    startupTimeoutMs: 180000
     idleTimeoutMs: 180000
 
 workflows:
