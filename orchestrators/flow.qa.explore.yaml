@@ -2,6 +2,11 @@
 #
 # Agentic E2E browser-testing DISCOVERY loop (M1 vertical slice):
 #
+#   provisioning→ run.provision-playwright: OPT-IN (default off), idempotent
+#                 install of @playwright/test into repo_root when missing.
+#                 Default is a pass-through that keeps the loud
+#                 PLAYWRIGHT_TEST_MISSING precondition; the preflight gate below
+#                 stays the authority either way.
 #   preflight   → cap.verify.browser-preflight: THE mandatory FIRST gate —
 #                 deterministically confirms a browser is launchable and
 #                 responsive (hard, process-group-bounded timeout) and that
@@ -102,6 +107,14 @@
 #   - flow.qa.promote-finding additionally requires path-separable
 #     `src/**` and `tests/**`; colocated tests are refused outright.
 #
+# OPT-IN CONVENIENCE: pass `provision_playwright: true` to have the flow install
+# @playwright/test into repo_root itself (idempotently, once) instead of running
+# the one-time `npm i -D @playwright/test` by hand. It is DELIBERATELY off by
+# default — see the `provisioning` state's header for why a QA-discovery flow
+# should not silently mutate a repo it only tests. This does NOT lift the
+# Playwright-only limit above: it installs the runner this family already needs,
+# it does not add a cypress/vitest/.NET adapter.
+#
 # This limitation is DOCUMENTED RATHER THAN ABSTRACTED, deliberately. The
 # orchestrator YAML above is already framework-agnostic — only four
 # scripts-library bodies bind Playwright, and only in two spots each (the
@@ -151,6 +164,12 @@ workflows:
       # probe (script floors at 5). Bounded by a process-group watchdog,
       # not a bare `timeout` — see verify.browser.preflight's header.
       preflight_timeout_s: { type: integer, default: 20 }
+      # OPT-IN (default false). When true, an idempotent provisioning step
+      # installs @playwright/test into repo_root BEFORE the preflight gate if it
+      # is missing. Default keeps the loud PLAYWRIGHT_TEST_MISSING precondition —
+      # a QA-discovery flow should not silently mutate a repo it only tests. See
+      # the `provisioning` state header + run.provision-playwright.
+      provision_playwright: { type: boolean, default: false }
     outputs:
       findings:          { type: array }
       product_questions: { type: array }
@@ -187,6 +206,10 @@ workflows:
       preflight_status:  ""
       preflight_code:    null
       preflight_reason:  null
+      # Seeded (V24) so the opt-in provisioning step's output slots always
+      # exist, including when provisioning is disabled, skipped, or a no-op.
+      provision_status:  ""
+      provisioned:       false
     outcomes:
       - id: evidence_clean
         statement: >
@@ -205,8 +228,37 @@ workflows:
           what separates "we found no defects" from "we could not look":
           evidence_clean alone is satisfied by a run that evaluated nothing.
         check: "$.context.not_evaluated_count == 0"
-    initialState: preflight
+    initialState: provisioning
     states:
+
+      # OPT-IN provisioning (default DISABLED = pass-through). When
+      # provision_playwright is true AND @playwright/test is absent from
+      # repo_root, install it idempotently; otherwise a no-op. BEST-EFFORT:
+      # control always flows to the preflight gate next, which re-checks for
+      # real — so a disabled/skipped/failed provision still surfaces as an
+      # honest PLAYWRIGHT_TEST_MISSING rather than a silent pass. The preflight
+      # remains the authority; this state only removes the manual
+      # `npm i -D @playwright/test` step when the operator explicitly asks for
+      # it. The browser itself needs no provisioning here (browser-mcp.sh
+      # self-provisions Chromium) — this closes only the target-repo test runner.
+      provisioning:
+        goal: Optionally + idempotently install @playwright/test into repo_root (opt-in).
+        transitions:
+          provision:
+            target: preflight
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.provision-playwright
+              args:
+                - "$.run.repo_root"
+                - "$.workflow.input.provision_playwright"
+            # Bare slot names (the aggregating-state trap): a `$.context.*`
+            # prefix here writes a literally-named slot and leaves the real one
+            # unset.
+            output:
+              provision_status: "$.output.json.status"
+              provisioned:      "$.output.json.provisioned"
 
       # MANDATORY FIRST GATE (poka-yoke). Confirms a browser is actually
       # launchable/responsive and the target app has @playwright/test
