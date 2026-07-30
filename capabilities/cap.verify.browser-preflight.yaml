@@ -1,0 +1,81 @@
+# capabilities/cap.verify.browser-preflight.yaml
+#
+# THE mandatory FIRST gate for the browser-QA family (flow.qa.explore, and
+# transitively flow.qa.program which drives it): confirms a browser is
+# ACTUALLY launchable and responsive, and that the target app has
+# @playwright/test installed, BEFORE any browser-dependent step runs. Verb
+# `verify` is DETERMINISTIC (V6: kind script) — same category as
+# cap.verify.repro-rate, and for the same reason: this is a real
+# launch()+goto()+evaluate() round-trip computed IN CODE by
+# verify.browser.preflight, not an agent's self-report, wrapped in a hard,
+# process-group watchdog so the check itself can never be the thing that
+# hangs (see that script's header for the full mechanism — a plain
+# `timeout` was tried first and found NOT sufficient in dev testing).
+#
+# NAMING NOTE: this pack's V6 convention reserves `diagnose` for agent-
+# judged caps (kind: noop) and `verify` for deterministic ones (kind:
+# script/mcp) — see cap.diagnose.browser-probe / cap.diagnose.browser-
+# evidence (agent, noop) vs cap.verify.repro-rate (script) in this same
+# family. This cap is pure script, no agent, no judgment call, so it takes
+# the `verify` verb to match that established split rather than `diagnose`.
+#
+# WHY THIS EXISTS: flow.qa.explore leased a browser connection with no live
+# browser actually behind it and walked straight into browser-dependent
+# steps, hanging ~20 minutes before anyone noticed. Those steps are AGENT
+# delegates — if a leased MCP browser tool call blocks or errors in a way
+# the agent doesn't recognize, the agent's own reasoning loop (bounded by
+# auto_drive_max_seconds, e.g. 900s) is the only backstop, and that is
+# exactly the mechanism that already failed to catch the hang. This gate
+# makes the same discovery instant and code-certain instead: a standalone
+# launch via the identical portable mechanism the leased pool member uses
+# (scripts/browser-mcp.sh's managed Chromium), hard-bounded, BEFORE the
+# run trusts the lease to actually work.
+
+workflows:
+  cap.verify.browser-preflight:
+    verb: verify
+    lifecycle: experimental
+    description: >
+      Deterministically confirm a browser is launchable and responsive via
+      the portable managed-Chromium mechanism, and that the target app has
+      @playwright/test installed, within a hard process-group-bounded
+      timeout — the mandatory FIRST gate before any browser-dependent QA
+      step, so an absent/broken browser fails fast with an actionable
+      BROWSER_UNAVAILABLE / PLAYWRIGHT_TEST_MISSING reason instead of
+      hanging inside a leased-browser agent step.
+    snippet:
+      inputs:
+        # Target app repo root, checked for @playwright/test ("" skips
+        # that check — a browser-launch-only preflight).
+        repo_root: { type: string,  default: "" }
+        # Hard cap in seconds for the browser launch/navigate probe (script
+        # floors at 5; default 20). Enforced by a process-group watchdog,
+        # not a bare `timeout` — see verify.browser.preflight's header.
+        timeout_s: { type: integer, default: 20 }
+      outputs:
+        # "ok" | "unavailable" — the wrapping flow's gate branches on this.
+        preflight_status: { type: string }
+        # null | "BROWSER_UNAVAILABLE" | "PLAYWRIGHT_TEST_MISSING"
+        preflight_code:   { type: ["string", "null"] }
+        # null | a human-actionable diagnosis of what failed and why.
+        preflight_reason: { type: ["string", "null"] }
+    initialState: checking
+    states:
+      checking:
+        goal: Confirm the browser is launchable/responsive and @playwright/test is installed, hard-bounded.
+        transitions:
+          check:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.browser.preflight
+              treatNonZeroAsFailure: false
+              args:
+                - "$.workflow.input.repo_root"
+                - "$.workflow.input.timeout_s"
+            output:
+              preflight_status: "$.output.json.status"
+              preflight_code:   "$.output.json.code"
+              preflight_reason: "$.output.json.reason"
+      done: { terminal: true }

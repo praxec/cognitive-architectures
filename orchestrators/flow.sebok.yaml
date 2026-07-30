@@ -258,15 +258,19 @@ workflows:
               use:
                 inputs:
                   requirement: "$.context.design"
-                  # Pass BOTH explicitly — snippet-input defaults are NOT
-                  # merged into $.workflow.input for path resolution when a
+                  # Pass explicitly — snippet-input defaults are NOT merged
+                  # into $.workflow.input for path resolution when a
                   # sub-workflow is invoked via use.inputs (the
-                  # unresolved-arg-path gotcha).
+                  # unresolved-arg-path gotcha). min_tests is NOT passed:
+                  # mini-vee no longer declares it (its inner flow.change now
+                  # fixes min_tests=1 internally).
                   cargo_scope: ""
-                  min_tests:   "1"
                 outputs:
-                  "$.context.implementation":        result
-                  "$.context.tests_added":           tests_added
+                  # Build + verify now live INSIDE flow.change (via mini-vee);
+                  # only the verify verdict is consumed here — the
+                  # implementation_gate guard below is unchanged. mini-vee no
+                  # longer exposes `result` / `tests_added` (they were dead
+                  # captures: never read anywhere in this flow).
                   "$.context.implementation_verify": verify_report
 
       # Belt-and-braces: the mini-vee only reaches done on a passing verify,

@@ -31,6 +31,18 @@ workflows:
         # local repo from invented remotes. OPTIONAL so existing callers that
         # don't yet thread it stay contract-valid (V30); a coding entry flow
         # (flow.add-feature) passes it.
+        # Skills-as-data: craft/skill guidance the caller wants applied
+        # during THIS build (e.g. TDD discipline, atomic component design,
+        # React best-practices), composed straight into the agent's goal
+        # via the templating primitive (`{{ $.workflow.input.* }}`) — the
+        # frontier-model-aligned mechanism, since instructions travel with
+        # the task to the model. A workflow-state `scope.skills` list
+        # cannot reach a nested sub-mission's own agent state, which is
+        # what this replaces/supplements for a caller like flow.ui.optimal
+        # that invokes this cap as a sub-workflow. Default "" so existing
+        # callers (flow.add-feature, no `craft_guidance` passed) are
+        # unaffected — see the goal template's inert-when-blank phrasing.
+        craft_guidance: { type: string, default: "" }
       outputs:
         result:      { type: object }
         tests_added: { type: integer }
@@ -39,7 +51,10 @@ workflows:
     states:
       iterating:
         requires_file_write: true  # coding-evidence forcing function: success = real file writes
-        goal: Pick the next plan slice; execute one red-green-refactor cycle.
+        goal: >
+          Pick the next plan slice; execute one red-green-refactor cycle.
+          Craft guidance to apply while implementing (blank if none
+          supplied): {{ $.workflow.input.craft_guidance }}
         transitions:
           submit_result:
             target: done

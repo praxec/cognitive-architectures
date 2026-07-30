@@ -1,0 +1,99 @@
+# scripts-library/report.coverage-matrix.yaml
+#
+# DETERMINISTIC report emit for flow.behavioral-coverage's `reporting` state —
+# the anti-fake-success gate, same idiom as flow.audit.completeness's
+# `audit.completeness.report` (code recounts and writes the artifact; the
+# agent's own arithmetic is never trusted as the final word). Folds the
+# ORIGINAL primitive-contract inventory + the LAST coverage-gap diagnosis
+# (whatever remains uncovered when the completeness loop stopped, empty when
+# fully closed) + the atomicity verdict into ONE coverage matrix
+# (primitive × contract × covered|residual) and writes it to report_path.
+#
+# `dod_met` is the SINGLE boolean flow.behavioral-coverage's `coverage_reported`-
+# adjacent outcomes read: true iff the report was written AND atomicity holds.
+# Full-vs-partial coverage is NOT folded into dod_met — a residual gap is a
+# LEGITIMATE outcome of one bounded run (the DoD is "covered OR an explicit
+# documented gap"; this report IS the documentation) — so it is surfaced
+# instead as `uncovered_count` / `residual_gaps` for the operator to act on
+# (typically: re-run with a narrower coverage_scope over just the residual).
+#
+# Args (all JSON strings except the two paths):
+#   $1 INVENTORY_JSON       — the full enumerated inventory
+#   $2 RESIDUAL_JSON        — the uncovered set remaining at loop exit ([] = closed)
+#   $3 ATOMIC_PASSED        — "true"/"false"
+#   $4 ATOMIC_VIOLATIONS_JSON
+#   $5 COVERAGE_SCOPE       — the bounded scope this run covered
+#   $6 REPO_ROOT            — for the report header
+#   $7 REPORT_PATH          — where to write the YAML artifact
+# Emits JSON: { report_emitted, report_path, primitive_count, contract_count,
+#               covered_count, uncovered_count, residual_gaps, atomic_passed }
+version: "1.0.0"
+scripts:
+  audit.coverage-matrix:
+    verb: audit
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      INVENTORY="${1:-[]}"
+      RESIDUAL="${2:-[]}"
+      ATOMIC_PASSED="${3:-false}"
+      ATOMIC_VIOLATIONS="${4:-[]}"
+      SCOPE="${5:-}"
+      REPO_ROOT="${6:-.}"
+      REPORT_PATH="${7:-}"
+
+      [ -z "$INVENTORY" ] || [ "$INVENTORY" = "null" ] && INVENTORY="[]"
+      [ -z "$RESIDUAL" ] || [ "$RESIDUAL" = "null" ] && RESIDUAL="[]"
+      [ -z "$ATOMIC_VIOLATIONS" ] || [ "$ATOMIC_VIOLATIONS" = "null" ] && ATOMIC_VIOLATIONS="[]"
+
+      if [ -z "$REPORT_PATH" ]; then
+        printf '{"report_emitted":false,"report_path":"","primitive_count":0,"contract_count":0,"covered_count":0,"uncovered_count":0,"residual_gaps":[],"atomic_passed":%s,"error":"report_path is required"}\n' "$ATOMIC_PASSED"
+        exit 0
+      fi
+
+      primitive_count="$(printf '%s' "$INVENTORY" | jq 'length' 2>/dev/null || echo 0)"
+      contract_count="$(printf '%s' "$INVENTORY" | jq '[.[] | (.contracts // []) | length] | add // 0' 2>/dev/null || echo 0)"
+      residual_contract_count="$(printf '%s' "$RESIDUAL" | jq '[.[] | (.contracts // []) | length] | add // 0' 2>/dev/null || echo 0)"
+      covered_count=$(( contract_count - residual_contract_count ))
+      [ "$covered_count" -lt 0 ] && covered_count=0
+
+      dod_met="false"
+      [ "$ATOMIC_PASSED" = "true" ] && dod_met="true"
+
+      mkdir -p "$(dirname "$REPORT_PATH")" 2>/dev/null || true
+      {
+        printf 'schema: praxec.coverage-report/v1\n'
+        printf 'coverage_scope: %s\n' "$(printf '%s' "$SCOPE" | jq -Rs .)"
+        printf 'repo_root: %s\n' "$(printf '%s' "$REPO_ROOT" | jq -Rs .)"
+        printf 'generated_by: flow.behavioral-coverage\n'
+        printf 'primitive_count: %s\n' "$primitive_count"
+        printf 'contract_count: %s\n' "$contract_count"
+        printf 'covered_count: %s\n' "$covered_count"
+        printf 'uncovered_count: %s\n' "$residual_contract_count"
+        printf 'atomic_passed: %s\n' "$ATOMIC_PASSED"
+        printf 'dod_met: %s\n' "$dod_met"
+        printf 'inventory:\n'
+        printf '%s' "$INVENTORY" | yq -P '.' 2>/dev/null || printf '%s\n' "$INVENTORY"
+        printf 'residual_gaps:\n'
+        printf '%s' "$RESIDUAL" | yq -P '.' 2>/dev/null || printf '%s\n' "$RESIDUAL"
+        printf 'atomic_violations:\n'
+        printf '%s' "$ATOMIC_VIOLATIONS" | yq -P '.' 2>/dev/null || printf '%s\n' "$ATOMIC_VIOLATIONS"
+      } > "$REPORT_PATH" 2>/dev/null
+
+      report_emitted="false"
+      [ -s "$REPORT_PATH" ] && report_emitted="true"
+
+      jq -n \
+        --argjson emitted "$report_emitted" \
+        --arg path "$REPORT_PATH" \
+        --argjson pc "$primitive_count" \
+        --argjson cc "$contract_count" \
+        --argjson covered "$covered_count" \
+        --argjson uncovered "$residual_contract_count" \
+        --argjson residual "$RESIDUAL" \
+        --argjson atomic "$ATOMIC_PASSED" \
+        '{report_emitted: $emitted, report_path: $path, primitive_count: $pc,
+          contract_count: $cc, covered_count: $covered, uncovered_count: $uncovered,
+          residual_gaps: $residual, atomic_passed: $atomic, error: null}'

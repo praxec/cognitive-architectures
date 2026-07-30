@@ -38,6 +38,14 @@ scripts:
       [ -z "${msg// /}" ] && msg="praxec: automated verified slice"
       if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         emit false null null '[]' "$(jstr 'not a git work tree')"; fi
+      # Operate at the ACTUAL git root. FILES arrive repo-root-relative (git status
+      # --porcelain / inspect.changed-files emit them that way). When WORKDIR/repo_root
+      # is a NESTED SUBDIR of the git worktree (e.g. a monorepo's
+      # PresentationTier/ui.autopilot), the exists-check and `git add` would look under
+      # the subdir and DOUBLE-PREFIX the path -> "path does not exist" -> nothing commits.
+      # cd to the toplevel so repo-root-relative paths resolve. No-op when repo_root IS
+      # the git root.
+      cd "$(git rev-parse --show-toplevel)" 2>/dev/null || true
 
       branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
       case "$branch" in

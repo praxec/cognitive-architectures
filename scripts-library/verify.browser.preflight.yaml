@@ -1,0 +1,198 @@
+# scripts-library/verify.browser.preflight.yaml
+#
+# THE bounded browser-launchability gate. The dogfood failure this closes:
+# flow.qa.explore leased a browser connection with no live browser actually
+# behind it, and walked straight into the leased-browser survey/probe
+# states, which HUNG for ~20 minutes before anyone noticed. An agent
+# delegate's own tool-call budget (auto_drive_max_seconds) is NOT a
+# backstop here — that budget is exactly what let the hang run that long.
+# The only way to guarantee a check cannot itself hang is a hard, code-side
+# bound wrapping a real launch — not an agent's word, not a longer budget.
+#
+# NOT a plain `timeout N cmd`: verified in dev testing that a bare
+# `timeout` wrapping this launch can itself block WELL past its own
+# deadline (observed ~15s wall against a 5s bound) when Chromium's own
+# forked process tree (zygote/renderer/gpu) doesn't die synchronously with
+# the parent driver's SIGTERM, or a grandchild is left holding stdout/
+# stderr open — `$(timeout ...)` command substitution waits for EOF on
+# that pipe, not merely for `timeout`'s own child to exit. The bound here
+# instead (a) redirects to FILES, not a captured pipe, (b) runs the whole
+# probe via `setsid` so it (and any Chromium children it forks) share ONE
+# process group, and (c) `wait`s on the SPECIFIC tracked PID (which
+# returns the instant that process dies, never on pipe closure) while a
+# background watchdog kills the ENTIRE process group (negative PID —
+# SIGTERM then SIGKILL) if the deadline passes. Confirmed against a
+# deliberately-hung probe: the watchdog reaped the full tree (including
+# Chromium) within the bound, no orphaned process left running.
+#
+# WHY A STANDALONE LAUNCH, NOT A ROUND-TRIP THROUGH THE LEASED MCP
+# CONNECTION: calling an MCP tool requires an agent delegate (`tools:
+# ["{{ $.run.leased.browser }}"]`), and an agent's tool-call timeout is
+# governed by the same auto_drive_max_seconds budget that already failed to
+# catch the original hang. A deterministic `kind: script` cannot call an
+# MCP tool at all — but it CAN hard-bound a real
+# `chromium.launch()` + `page.goto()` + `page.evaluate()` round-trip via
+# the SAME portable mechanism scripts/browser-mcp.sh uses (Playwright's own
+# managed Chromium, resolved via `chromium.executablePath()`, never a
+# hand-globbed cache path). If that standalone launch fails, the leased
+# pool member — built from the identical mechanism — fails identically, so
+# this is a faithful proxy for "will the browser this run is about to
+# lease actually work", not a heuristic.
+#
+# SCOPE: this proves the DEFAULT portable path (local managed Chromium)
+# works. It does not preflight the opt-in split-host `--cdp-endpoint`
+# override (BROWSER_MCP_SKIP_LOCAL=1) — attaching to a remote/system
+# Chrome from a script would need that Chrome's address as an input this
+# gate does not yet take. It also does not guard against the MCP
+# connection's OWN spawn/handshake hanging (bounded separately by the
+# connection's startupTimeoutMs) — this gate is specifically for "the
+# server started and accepted the lease, but can't actually navigate",
+# which is the failure mode that actually occurred.
+#
+# Second, independent check: @playwright/test presence in the TARGET app
+# (`repo_root`). flow.qa.explore's own header warns that an uninstalled
+# playwright there is "a survey that maps nothing" — the reproduction gate
+# reports an honest not_evaluated floor for every probe, several states
+# later. Catching it HERE, before any browser step runs, turns a silent
+# floor into an immediate, actionable PLAYWRIGHT_TEST_MISSING.
+version: "1.0.0"
+scripts:
+  verify.browser.preflight:
+    verb: verify
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      REPO_ROOT="${1:-}"
+      TIMEOUT_S="${2:-20}"
+      
+      command -v jq >/dev/null 2>&1 || { printf '{"status":"unavailable","code":"BROWSER_UNAVAILABLE","reason":"jq is not installed"}\n'; exit 0; }
+      case "$TIMEOUT_S" in (''|*[!0-9]*) TIMEOUT_S=20 ;; esac
+      [ "$TIMEOUT_S" -lt 5 ] && TIMEOUT_S=5
+      
+      fail() { # $1=code $2=reason
+        jq -n --arg code "$1" --arg reason "$2" \
+          '{status: "unavailable", code: $code, reason: $reason}'
+        exit 0
+      }
+      
+      if [ -n "$REPO_ROOT" ]; then
+        [ -d "$REPO_ROOT" ] || fail PLAYWRIGHT_TEST_MISSING "repo_root '$REPO_ROOT' is not a directory"
+        [ -f "$REPO_ROOT/node_modules/@playwright/test/package.json" ] || fail PLAYWRIGHT_TEST_MISSING "install @playwright/test"
+      fi
+      
+      OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/praxec-browser-preflight-out.XXXXXX" 2>/dev/null)" \
+        || fail BROWSER_UNAVAILABLE "could not create a temp file for the launch probe"
+      ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/praxec-browser-preflight-err.XXXXXX" 2>/dev/null)" \
+        || { rm -f "$OUT_FILE"; fail BROWSER_UNAVAILABLE "could not create a temp file for the launch probe's stderr"; }
+      TIMEDOUT_FLAG="${OUT_FILE}.timedout"
+      trap 'rm -f "$OUT_FILE" "$ERR_FILE" "$TIMEDOUT_FLAG"' EXIT
+      
+      # ---- launch the probe in its OWN process group, watchdog-bounded ---------
+      # A plain `timeout N cmd` is NOT sufficient here: chromium forks its own
+      # process tree (zygote/renderer/gpu) under the node driver, and if the
+      # driver's SIGTERM handler tries a graceful browser shutdown, or a
+      # grandchild is orphaned holding stdout/stderr open, `$(timeout ... )`
+      # command substitution can block waiting for pipe EOF well past the
+      # nominal deadline (measured ~15s wall for a 5s bound in dev testing) --
+      # exactly the class of hang this gate exists to eliminate. `setsid` puts
+      # the whole tree in ONE new process group; the watchdog kills that GROUP
+      # (negative PID) directly, and we `wait` on the specific tracked PID
+      # (which returns the instant THAT process dies, never on pipe closure) so
+      # an orphaned grandchild cannot extend the wall-clock bound.
+      setsid npx --yes -p playwright -c 'node -e "
+      var pw;
+      try {
+        pw = require(\"playwright\");
+      } catch (e1) {
+        var path = require(\"path\");
+        var bins = (process.env.PATH || \"\").split(path.delimiter);
+        var npxBin = bins.find(function (p) {
+          return /_npx[\\\\\/]/.test(p) && p.endsWith(path.join(\"node_modules\", \".bin\"));
+        });
+        if (!npxBin) {
+          process.stdout.write(JSON.stringify({status: \"unavailable\", code: \"BROWSER_UNAVAILABLE\", reason: \"could not resolve playwright via require() and could not locate an npx temp package dir in PATH either\"}));
+          process.exit(0);
+        }
+        var nodeModules = path.dirname(npxBin);
+        pw = require(path.join(nodeModules, \"playwright\"));
+      }
+      var fs = require(\"fs\");
+      var exe;
+      try {
+        exe = pw.chromium.executablePath();
+      } catch (e) {
+        process.stdout.write(JSON.stringify({status: \"unavailable\", code: \"BROWSER_UNAVAILABLE\", reason: \"chromium.executablePath() threw: \" + (e && e.message ? e.message : String(e))}));
+        process.exit(0);
+      }
+      if (!exe || !fs.existsSync(exe)) {
+        process.stdout.write(JSON.stringify({status: \"unavailable\", code: \"BROWSER_UNAVAILABLE\", reason: \"resolved Chromium path is not present on disk: \" + (exe || \"<empty>\")}));
+        process.exit(0);
+      }
+      (async function () {
+        var browser;
+        try {
+          browser = await pw.chromium.launch({headless: true, executablePath: exe});
+          var page = await browser.newPage();
+          await page.goto(\"about:blank\");
+          var probe = await page.evaluate(function () { return 1 + 1; });
+          await browser.close();
+          if (probe !== 2) {
+            process.stdout.write(JSON.stringify({status: \"unavailable\", code: \"BROWSER_UNAVAILABLE\", reason: \"browser launched but did not respond correctly to a trivial evaluate()\"}));
+            return;
+          }
+        } catch (e) {
+          try { if (browser) { await browser.close(); } } catch (e2) {}
+          process.stdout.write(JSON.stringify({status: \"unavailable\", code: \"BROWSER_UNAVAILABLE\", reason: \"browser launch/navigate failed: \" + (e && e.message ? e.message : String(e))}));
+          return;
+        }
+        process.stdout.write(JSON.stringify({status: \"ok\", code: null, reason: null, executablePath: exe}));
+      })();
+      "' </dev/null >"$OUT_FILE" 2>"$ERR_FILE" &
+      CHILD_PID=$!
+
+      # The watchdog's OWN stdio must NEVER be a live copy of this script's
+      # stdout/stderr. If `kill "$WATCHDOG_PID"` (below) races a moment
+      # where its `sleep` has already forked as a real child, killing the
+      # subshell does not kill that already-running grandchild -- it is
+      # orphaned and keeps running for whatever remained of its sleep,
+      # STILL HOLDING any inherited fd open. A caller that captures this
+      # script's output via a pipe (bash `$(...)`, or praxec's own script
+      # executor, which pipes stdout/stderr) waits for EOF from EVERY
+      # holder of the write end -- so an orphaned sleep inheriting that
+      # pipe silently re-introduces the exact unbounded wait this gate
+      # exists to eliminate, even though THIS script's own logic finished
+      # in well under a second. Confirmed live: without this redirect, a
+      # cancelled (non-fired) watchdog still made the calling process's
+      # own `Command::output()` block for the full watchdog duration.
+      # Redirecting to /dev/null here means an orphan only ever holds
+      # /dev/null open, which blocks nobody.
+      (
+        sleep "$TIMEOUT_S"
+        touch "$TIMEDOUT_FLAG" 2>/dev/null
+        kill -TERM "-$CHILD_PID" 2>/dev/null
+        sleep 3
+        kill -KILL "-$CHILD_PID" 2>/dev/null
+      ) </dev/null >/dev/null 2>&1 &
+      WATCHDOG_PID=$!
+
+      wait "$CHILD_PID" 2>/dev/null
+      RC=$?
+      # Child finished (naturally or killed) -- the watchdog no longer needs to
+      # run; stop it so it cannot fire a stray kill at an unrelated later PID.
+      kill "$WATCHDOG_PID" 2>/dev/null
+      wait "$WATCHDOG_PID" 2>/dev/null
+
+      NODE_OUT="$(cat "$OUT_FILE" 2>/dev/null)"
+
+      if [ -f "$TIMEDOUT_FLAG" ]; then
+        fail BROWSER_UNAVAILABLE "browser launch/navigate did not respond within ${TIMEOUT_S}s (hard timeout -- no browser reachable)"
+      fi
+      
+      if ! printf '%s' "$NODE_OUT" | jq -e '.status' >/dev/null 2>&1; then
+        NODE_ERR="$(cat "$ERR_FILE" 2>/dev/null | tr '\n' ' ' | cut -c1-500)"
+        fail BROWSER_UNAVAILABLE "browser launch check produced no parseable result (exit ${RC}); stderr: ${NODE_ERR:-<empty>}"
+      fi
+      
+      printf '%s\n' "$NODE_OUT" | jq -c '{status: .status, code: (.code // null), reason: (.reason // null)}'

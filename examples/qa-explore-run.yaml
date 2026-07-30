@@ -109,28 +109,36 @@ store:
   kind: sqlite
   path: /home/mc/.local/share/praxec/qa-explore-run.db
 
-# The `browser` exclusive pool — connection shape from
-# examples/praxec-browser.yaml. Each member is ONE browser server process
-# (`exclusive: true` + `pool: browser`); two members = two concurrent runs.
-# Swap in @playwright/mcp members (connections/browser-playwright.yaml) or
-# split-host --browser-url args (connections/browser-chrome-devtools.yaml)
+# The `browser` exclusive pool — PORTABLE DEFAULT shape from
+# connections/browser-playwright.yaml. Each member is ONE browser server
+# process (`exclusive: true` + `pool: browser`); two members = two
+# concurrent runs. Launched via scripts/browser-mcp.sh, which bootstraps +
+# resolves Playwright's own managed Chromium OS-agnostically instead of
+# hunting a system-installed Chrome (chrome-devtools-mcp's default) or a
+# hardcoded remote Windows Chrome — see that script + connections/
+# browser-playwright.yaml for the full mechanism. Swap in split-host
+# --cdp-endpoint args (see browser-playwright.yaml's opt-in section) or
+# Chrome DevTools diagnostics (connections/browser-chrome-devtools.yaml)
 # without touching any flow YAML — topology lives here, not in the flows.
+# `command`/`args` resolve relative to the praxec PROCESS's cwd (no
+# config-relative interpolation for connections) — run `praxec` from this
+# repo's root, or swap in an absolute path to your checkout.
 connections:
   browser_chrome_1:
     kind: mcp
-    command: npx
-    args: ["chrome-devtools-mcp@latest", "--isolated"]
+    command: sh
+    args: ["scripts/browser-mcp.sh"]
     exclusive: true
     pool: browser
-    startupTimeoutMs: 120000
+    startupTimeoutMs: 180000
     idleTimeoutMs: 180000
   browser_chrome_2:
     kind: mcp
-    command: npx
-    args: ["chrome-devtools-mcp@latest", "--isolated"]
+    command: sh
+    args: ["scripts/browser-mcp.sh"]
     exclusive: true
     pool: browser
-    startupTimeoutMs: 120000
+    startupTimeoutMs: 180000
     idleTimeoutMs: 180000
 
 # The cognitive-architectures resource repo: flow.qa.explore + its caps,

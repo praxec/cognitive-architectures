@@ -2,12 +2,15 @@
 #
 # Shared MICRO-WATERFALL (the mini-Vee TDD atom, docs/sebok-flow-design.md):
 #
-#   sketching  → cap.plan.technical-design  (requirement → increment design sketch)
-#   building   → cap.implement.build-loop   (engine-OBSERVED failing-test →
-#                                            minimal-impl red/green loop + QA + commit)
-#   verifying  → cap.verify.rust            (independent recomposition check;
-#                                            canonical verifyOut)
-#   verify_gate→ tri-state gate on $.context.verify_report.status
+#   sketching → cap.plan.technical-design (requirement → increment design sketch)
+#   changing  → flow.change               (the reusable change atom: stack-
+#                                          appropriate build-loop + honest
+#                                          file-change measure + independent
+#                                          verify — build AND verify now live
+#                                          INSIDE the atom, not inlined here)
+#   change_gate → tri-state gate on $.context.verify_report.status (the atom's
+#                                          ws_verify verdict, mapped onto this
+#                                          flow's existing verify_report slot)
 #
 # This is the atomic decomposition unit of the commodity-model hypothesis: if a
 # commodity model can't drive a step, split the step — don't reach for a bigger
@@ -20,33 +23,48 @@
 # orchestrators/ (the design doc's `capabilities/_shared.mini-vee.yaml` naming
 # predates that rule).
 #
-# Requires (cognitive/*): cap.plan.technical-design, cap.implement.build-loop,
-# cap.verify.rust.
+# WRAPS THE REUSABLE CHANGE ATOM (orchestrators/flow.change.yaml, the SECOND
+# consumer after flow.implement.deliverable): mini-vee's deliverable is
+# `$.context.sketch`, a cap.plan.technical-design output — it does NOT carry a
+# `cargo_scope` key the way a cpm deliverable does. flow.change now accepts
+# cargo_scope as its OWN top-level input, decoupled from the deliverable
+# object, precisely so a consumer like this one can wrap it. backstop_cwd is
+# threaded as `$.run.repo_root` (mini-vee is rust/full-workspace, so the repo
+# root IS the correct cross-crate backstop); min_tests is NOT passed — the
+# atom fixes it to 1 internally (this flow's own prior default), so it is
+# dropped here as a no-op knob. The `result` / `tests_added` outputs are also
+# dropped: flow.change does not expose them, and a repo-wide check confirmed
+# they were dead captures in mini-vee's only consumer (flow.sebok).
+#
+# Requires (cognitive/*): cap.plan.technical-design, flow.change.
 
 workflows:
   flow.shared.mini-vee:
     lifecycle: experimental
     description: >
       Shared micro-waterfall (mini-Vee TDD atom): requirement → increment
-      design sketch → engine-enforced failing-test/minimal-impl build loop →
-      independent verify (canonical verifyOut) → tri-state gate. The atomic
-      unit both flow.sebok and the SDLC flows decompose implementation into.
+      design sketch → the reusable change atom (flow.change: stack-appropriate
+      build-loop + honest file-change measure + independent verify) → tri-state
+      gate. The atomic unit both flow.sebok and the SDLC flows decompose
+      implementation into.
     inputs:
       # The increment's requirement/spec object (what to build + why; ideally
       # carries acceptance criteria for the build-loop's end-of-plan review).
       requirement: { type: object, required: true }
-      # Threaded through to cap.implement.build-loop. Declared here AND passed
-      # explicitly below — a snippet-input default is NOT merged into
-      # `$.workflow.input` for path resolution when a sub-workflow is invoked
-      # via `use.inputs`, so the CALLER of this flow must also pass both.
+      # SCOPED inner build-loop narrowing, threaded straight through to
+      # flow.change's own cargo_scope input (declared there precisely so a
+      # deliverable without the key — this flow's design sketch — can still
+      # wrap the atom). "" (default) = full-workspace inner loop. Declared here
+      # AND passed explicitly below — a snippet-input default is NOT merged
+      # into `$.workflow.input` for path resolution when a sub-workflow is
+      # invoked via `use.inputs`, so the CALLER of this flow must also pass it.
       cargo_scope: { type: string, default: "" }
-      min_tests:   { type: string, default: "1" }
     # Top-level outputs (flows have no `snippet:`) — the terminal context slots
-    # a `kind: workflow` parent reads via `use.outputs`.
+    # a `kind: workflow` parent reads via `use.outputs`. `result` / `tests_added`
+    # are NOT exposed: flow.change (the new `changing` executor) does not emit
+    # them, and they were dead captures in the only consumer (flow.sebok).
     outputs:
       sketch:        { type: object }
-      result:        { type: object }
-      tests_added:   { type: integer }
       # Named verify_report (NOT `verify`): $.context.verify is an ENGINE-OWNED
       # slot key reserved for hop_slot-declared transitions, so a plain
       # kind:workflow verify invocation must land on a non-slot key.
@@ -56,12 +74,13 @@ workflows:
 
       # LEFT LEG (increment scale): sketch the increment's design from the
       # requirement — the trace record requirement → design-sketch. The sketch
-      # is the plan the build consumes (each mini-Vee artifact feeds the next).
+      # is the plan the change atom consumes (each mini-Vee artifact feeds the
+      # next).
       sketching:
         goal: Sketch the increment's technical design from the requirement.
         transitions:
           sketch:
-            target: building
+            target: changing
             actor: deterministic
             executor:
               kind: workflow
@@ -72,55 +91,41 @@ workflows:
                 outputs:
                   "$.context.sketch": design
 
-      # BOTTOM: failing test → minimal impl, ENGINE-OBSERVED (red must compile
-      # and fail; green = fmt+clippy+test; QA-reviewed; committed per slice).
-      # The build-loop iterates internally until the sketch's behaviors are
-      # built, so one mini-vee call covers a multi-slice increment.
-      building:
-        goal: Build the sketched increment to green via the structural TDD loop.
+      # BOTTOM + RIGHT LEG (increment scale), now the reusable change atom:
+      # stack-appropriate build (engine-observed failing-test → minimal-impl,
+      # ENGINE-OBSERVED red/green, QA-reviewed, committed per slice) → honest
+      # file-change measure → independent verify (canonical verifyOut) — all
+      # INSIDE flow.change. backstop_cwd = $.run.repo_root (mini-vee is
+      # rust/full-workspace; the repo root IS the correct cross-crate
+      # backstop). min_tests is NOT passed: flow.change fixes it to 1
+      # internally (this flow's own prior default), so a no-op knob would
+      # remain if it were kept. ws_verify maps onto this flow's existing
+      # verify_report output slot — its `.status` drives change_gate, same
+      # as the old verify_gate did.
+      changing:
+        goal: Build + verify the sketched increment via the reusable change atom.
         transitions:
-          build:
-            target: verifying
+          change:
+            target: change_gate
             actor: deterministic
             executor:
               kind: workflow
-              definitionId: cognitive/cap.implement.build-loop
+              definitionId: cognitive/flow.change
               use:
                 inputs:
-                  plan:      "$.context.sketch"
-                  # Pass BOTH explicitly — snippet-input defaults are NOT merged
-                  # into $.workflow.input for path resolution when invoked via
-                  # use.inputs (the unresolved-arg-path gotcha), so this flow
-                  # declares them as inputs and threads them through.
-                  cargo_scope: "$.workflow.input.cargo_scope"
-                  min_tests:   "$.workflow.input.min_tests"
+                  deliverable:  "$.context.sketch"
+                  backstop_cwd: "$.run.repo_root"
+                  cargo_scope:  "$.workflow.input.cargo_scope"
                 outputs:
-                  "$.context.result":      result
-                  "$.context.tests_added": tests_added
-
-      # RIGHT LEG (increment scale): INDEPENDENT recomposition check — rerun
-      # the workspace gate outside the build loop and capture the canonical
-      # verifyOut. This typed record is the increment's verification outcome
-      # (what a trace matrix would file against the requirement).
-      verifying:
-        goal: Independently verify the workspace (canonical verifyOut).
-        transitions:
-          verify:
-            target: verify_gate
-            actor: deterministic
-            executor:
-              kind: workflow
-              definitionId: cognitive/cap.verify.rust
-              use:
-                inputs:
-                  cwd: "$.run.repo_root"
-                outputs:
-                  "$.context.verify_report": verify
+                  "$.context.verify_report": ws_verify
 
       # Gate on the typed tri-state: `== 'pass'` is the ONLY positive arm; any
       # non-pass status (fail | not_evaluated) falls through the unguarded
-      # `abort` default — never silently treated as a pass.
-      verify_gate:
+      # `abort` default — never silently treated as a pass. Same shape as the
+      # old verify_gate; belt-and-braces, since flow.change ALSO fails
+      # internally on a no-op/verifier-fail (a failed sub-workflow errors the
+      # `changing` transition before this gate is ever reached in that case).
+      change_gate:
         transitions:
           advance:
             target: done

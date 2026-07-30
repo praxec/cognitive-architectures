@@ -1,0 +1,86 @@
+# capabilities/cap.diagnose.primitive-contracts.yaml
+#
+# PRIMITIVE-CONTRACT INVENTORY — the enumeration leaf of
+# flow.behavioral-coverage. Cognitive cap (verb `diagnose`, sibling of
+# cap.diagnose.behavioral-gaps): the agent driving the gateway READS the
+# target codebase under `coverage_scope` (full file reach — the scope
+# narrowing is the agent's OWN discipline, per the goal text, matching the
+# cap.diagnose.finding / cap.plan.test-charter precedent of full read reach +
+# prompt-bounded scope) and lists every PRIMITIVE in scope, and for each, its
+# distinct DESIRED behavioral CONTRACTS — the behaviors that each deserve
+# EXACTLY ONE atomic assertion downstream (one #[test], one assertion macro).
+#
+# This is enumeration ONLY — no test authoring, no gap analysis against
+# existing coverage (that is cap.diagnose.coverage-gaps, fed by this cap's
+# `inventory`). "Primitive" here is a unit of OWNED behavior (a function,
+# guard, executor kind, validation rule, state-machine invariant — whatever
+# the target repo's own vocabulary calls its atomic units); "contract" is one
+# assertable behavior of that primitive, phrased so a single Arrange-Act-Assert
+# test could pin it (never a vague "works correctly").
+#
+# Per the standing team practice this flow encodes: assert DESIRED behavior
+# for primitives WE own — do not merely transcribe whatever the code happens
+# to do today. A contract may describe behavior the code does not yet satisfy
+# (destined to become a red `#[ignore = "RED: <gap>"]` test downstream); that
+# is a legitimate, EXPECTED inventory entry, not an error.
+
+workflows:
+  cap.diagnose.primitive-contracts:
+    verb: diagnose
+    lifecycle: experimental
+    description: >
+      Read the target repo under coverage_scope and enumerate every primitive
+      in scope plus its distinct desired behavioral contracts (one assertion
+      each) — the inventory the coverage-gap diagnosis and red-first authoring
+      steps consume. Enumeration only: no gap analysis, no test authoring.
+    snippet:
+      inputs:
+        # Module/crate/glob bounding this run (repo-agnostic — the caller
+        # names the concrete slice; a repo-wide inventory is repeated bounded
+        # runs, never one unbounded pass).
+        coverage_scope: { type: string, required: true }
+      outputs:
+        # [{ primitive, kind, location, contracts: [{ contract, rationale }] }]
+        inventory:      { type: array }
+        primitive_count: { type: integer }
+        contract_count:  { type: integer }
+    # Full read reach over the target repo (cap.diagnose.finding / cap.plan.test-
+    # charter precedent) — coverage_scope is a PROMPT bound, not a tool-ACL
+    # bound, since it may name a glob/module the coarse file: tool root can't
+    # express directly.
+    tools: ["file:{{ $.run.repo_root }}"]
+    initialState: enumerating
+    states:
+      enumerating:
+        goal: >
+          Read the code under coverage_scope ($.workflow.input.coverage_scope,
+          relative to the repo root) and build the PRIMITIVE INVENTORY: every
+          primitive (function / guard / executor kind / validation rule /
+          state invariant — use the repo's own vocabulary) in that scope, and
+          for each, its distinct desired behavioral contracts. Each contract
+          must be phrased so ONE Arrange-Act-Assert test could pin it — never
+          a compound "handles X and Y correctly" (split it into two
+          contracts). Include a contract even when you believe the current
+          code does NOT yet satisfy it — that is a legitimate red-first
+          candidate, not an omission. Do not read or propose changes outside
+          coverage_scope. Submit `inventory` (array of
+          { primitive, kind, location, contracts: [{ contract, rationale }] }),
+          `primitive_count`, and `contract_count` (sum of all contracts
+          across all primitives — verify your own arithmetic).
+        transitions:
+          submit_inventory:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [inventory, primitive_count, contract_count]
+              properties:
+                inventory:       { type: array }
+                primitive_count: { type: integer, minimum: 0 }
+                contract_count:  { type: integer, minimum: 0 }
+            executor: { kind: noop }
+            output:
+              inventory:       "$.arguments.inventory"
+              primitive_count: "$.arguments.primitive_count"
+              contract_count:  "$.arguments.contract_count"
+      done: { terminal: true }

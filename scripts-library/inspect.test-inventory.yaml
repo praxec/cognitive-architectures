@@ -1,0 +1,69 @@
+# scripts-library/inspect.test-inventory.yaml
+#
+# DETERMINISTIC existing-test enumerator for flow.behavioral-coverage's
+# baseline measure. The agent that DIAGNOSES coverage gaps
+# (cap.diagnose.coverage-gaps) has no file tools — it works from CODE-
+# GATHERED facts, same split as inspect.repo (SPEC: deterministic code
+# gathers facts, the LLM judges/enumerates from them, never the other way
+# round). This script lists every already-authored `#[test]` /
+# `#[tokio::test]` function under a scope, by NAME only (no assertion
+# content) — cheap, static, language-aware for Rust.
+#
+# Reuses the exact brace-tracking `awk` technique proven in
+# verify.test.tdd-verdict's atomic scan (same repo, same idiom) but for
+# NAME EXTRACTION rather than assertion counting — so a fn's test name is
+# read the same way whether this script or that one walks the file.
+#
+# Args:
+#   $1 REPO_ROOT     — repo to scan (also the cwd)
+#   $2 SCOPE         — repo-relative path/glob to bound the scan; empty ⇒
+#                      whole repo (bounded runs should always pass a scope)
+# Emits JSON: { tests: [{file, test_name}], test_count } on stdout.
+version: "1.0.0"
+scripts:
+  inspect.test-inventory:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      REPO="${1:-${REPO_PATH:-.}}"
+      SCOPE="${2:-}"
+      if [ ! -d "$REPO" ]; then printf '{"tests":[],"test_count":0,"error":"repo not found: %s"}\n' "$REPO"; exit 0; fi
+      cd "$REPO" || { printf '{"tests":[],"test_count":0,"error":"cannot cd"}\n'; exit 0; }
+
+      TARGET="."
+      if [ -n "${SCOPE// /}" ] && [ -e "$SCOPE" ]; then TARGET="$SCOPE"; fi
+
+      files="$(
+        { command -v rg >/dev/null 2>&1 \
+            && rg -l --type rust --glob '!target/**' -e '#\[(tokio::)?test\]' "$TARGET" \
+            || grep -rl --include='*.rs' --exclude-dir=target -e '#\[test\]' -e '#\[tokio::test\]' "$TARGET"; } 2>/dev/null
+      )"
+
+      _lines="$(
+        printf '%s\n' "$files" | while IFS= read -r f; do
+          [ -n "$f" ] && [ -f "$f" ] || continue
+          awk -v FN="$f" '
+            {
+              line=$0; sub(/\/\/.*$/, "", line);
+              if (line ~ /#\[[ \t]*(tokio::)?test[ \t]*\]/) { pending=1; next; }
+              if (pending && line ~ /fn[ \t]+[A-Za-z0-9_]+/) {
+                name=line; sub(/^.*fn[ \t]+/, "", name); sub(/[^A-Za-z0-9_].*$/, "", name);
+                printf "{\"file\":\"%s\",\"test_name\":\"%s\"}\n", FN, name;
+                pending=0;
+              }
+            }
+          ' "$f"
+        done
+      )"
+
+      if [ -n "$_lines" ]; then
+        tests_json="[$(printf '%s' "$_lines" | paste -sd, -)]"
+      else
+        tests_json="[]"
+      fi
+      test_count="$(printf '%s' "$tests_json" | jq 'length' 2>/dev/null || echo 0)"
+      jq -n --argjson tests "$tests_json" --argjson n "$test_count" \
+        '{tests: $tests, test_count: $n, error: null}'

@@ -2,6 +2,18 @@
 #
 # Agentic E2E browser-testing DISCOVERY loop (M1 vertical slice):
 #
+#   preflight   → cap.verify.browser-preflight: THE mandatory FIRST gate —
+#                 deterministically confirms a browser is launchable and
+#                 responsive (hard, process-group-bounded timeout) and that
+#                 the target app has @playwright/test installed, BEFORE
+#                 chartering or any browser-dependent step runs. Closes a
+#                 real dogfood failure: this flow once leased a browser
+#                 connection with no live browser behind it and hung ~20
+#                 minutes inside the survey step before anyone noticed.
+#   preflight_gate → unavailable (BROWSER_UNAVAILABLE / PLAYWRIGHT_TEST_
+#                 MISSING) aborts loudly with the reason in
+#                 $.context.preflight_reason; only a confirmed-ok browser
+#                 proceeds to chartering.
 #   chartering  → cap.plan.test-charter: mission → bounded, citable charter
 #                 (in/out of scope, invariants with sources, budget).
 #   surveying   → cap.research.ui-surface: leased-browser delegate maps the
@@ -62,12 +74,13 @@
 # satisfied by a run that evaluated NOTHING, so "no defects found" and
 # "could not look" need two different scalars to be told apart.
 #
-# Requires (cognitive/*): cap.plan.test-charter, cap.research.ui-surface,
-# cap.diagnose.browser-probe, cap.diagnose.browser-evidence,
-# cap.verify.repro-rate, cap.diagnose.finding; scripts
-# verify.browser.repro-rate + audit.findings.aggregate; skills
-# plan.test.charter + diagnose.browser.finding; a gateway config with a
-# `browser` exclusive pool + auto_drive (see examples/qa-explore-run.yaml).
+# Requires (cognitive/*): cap.verify.browser-preflight, cap.plan.test-charter,
+# cap.research.ui-surface, cap.diagnose.browser-probe,
+# cap.diagnose.browser-evidence, cap.verify.repro-rate, cap.diagnose.finding;
+# scripts verify.browser.preflight + verify.browser.repro-rate +
+# audit.findings.aggregate; skills plan.test.charter +
+# diagnose.browser.finding; a gateway config with a `browser` exclusive pool
+# + auto_drive (see examples/qa-explore-run.yaml).
 #
 # A4 FOLLOW-UP: probes live under `<repo_root>/.praxec/qa-artifacts/`
 # because `$.run.artifacts_dir` is not yet an engine scope.
@@ -134,6 +147,10 @@ workflows:
       # they are the same thread of session state and splitting it is how
       # you get a survey that logs in and a replay that does not.
       storage_state: { type: string, default: "" }
+      # Hard cap in seconds for the preflight's browser launch/navigate
+      # probe (script floors at 5). Bounded by a process-group watchdog,
+      # not a bare `timeout` — see verify.browser.preflight's header.
+      preflight_timeout_s: { type: integer, default: 20 }
     outputs:
       findings:          { type: array }
       product_questions: { type: array }
@@ -142,6 +159,10 @@ workflows:
       qa_report:         { type: object }
       unevidenced_count: { type: integer }
       not_evaluated_count: { type: integer }
+      # null unless the run aborted at the preflight gate — then the
+      # actionable BROWSER_UNAVAILABLE / PLAYWRIGHT_TEST_MISSING diagnosis.
+      preflight_code:    { type: ["string", "null"] }
+      preflight_reason:  { type: ["string", "null"] }
     # Seed EVERY declared output (V24): the gates can short-circuit past
     # the writers, and the `failed` terminal must still resolve them.
     initialContext:
@@ -160,6 +181,12 @@ workflows:
       # survey step's contract breaks; "" is not a legal enum member, so
       # the gate's unguarded default catches it.
       auth_state:        ""
+      # Seeded so the FIRST gate (preflight_gate) has a value to branch on
+      # even if the preflight cap's own contract breaks; "" is not "ok" or
+      # "unavailable", so the gate's unguarded default catches it.
+      preflight_status:  ""
+      preflight_code:    null
+      preflight_reason:  null
     outcomes:
       - id: evidence_clean
         statement: >
@@ -178,8 +205,64 @@ workflows:
           what separates "we found no defects" from "we could not look":
           evidence_clean alone is satisfied by a run that evaluated nothing.
         check: "$.context.not_evaluated_count == 0"
-    initialState: chartering
+    initialState: preflight
     states:
+
+      # MANDATORY FIRST GATE (poka-yoke). Confirms a browser is actually
+      # launchable/responsive and the target app has @playwright/test
+      # installed, hard-bounded, BEFORE chartering or any browser-dependent
+      # step runs. This flow used to lease a browser connection with no
+      # live browser behind it and hang ~20 minutes inside the survey step;
+      # this gate makes that failure instant and code-certain
+      # (BROWSER_UNAVAILABLE / PLAYWRIGHT_TEST_MISSING) instead. No browser
+      # lease is touched here — cap.verify.browser-preflight is a
+      # standalone deterministic script probe (see its header for why a
+      # round-trip through the leased MCP connection would not be
+      # hard-boundable the same way).
+      preflight:
+        goal: Confirm the browser is launchable and @playwright/test is installed, hard-bounded.
+        transitions:
+          check:
+            target: preflight_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.browser-preflight
+              use:
+                inputs:
+                  repo_root: "$.run.repo_root"
+                  timeout_s: "$.workflow.input.preflight_timeout_s"
+                outputs:
+                  "$.context.preflight_status": preflight_status
+                  "$.context.preflight_code":   preflight_code
+                  "$.context.preflight_reason": preflight_reason
+
+      # Split gate state (guards run BEFORE executors) — same 3-arm shape
+      # as auth_gate/probe_gate/repro_gate below. Unguarded DEFAULT is the
+      # poka-yoke: any unrecognized preflight_status (a broken cap
+      # contract) routes to `failed`, never onward into chartering or any
+      # browser-dependent step.
+      preflight_gate:
+        transitions:
+          browser_ready:
+            target: chartering
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.preflight_status == 'ok'" }
+          # Explicit, not a fallthrough: BROWSER_UNAVAILABLE /
+          # PLAYWRIGHT_TEST_MISSING are DIAGNOSED states with an actionable
+          # fix (install/start a browser; `npm install @playwright/test`),
+          # not an unexpected contract break.
+          browser_unavailable:
+            target: failed
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.preflight_status == 'unavailable'" }
+          # Unguarded DEFAULT (lowest precedence): a null/absent/unexpected
+          # preflight_status means the preflight cap's contract broke.
+          unexpected:
+            target: failed
+            actor: deterministic
 
       # Mission → bounded, citable charter (no browser; file-read only).
       chartering:

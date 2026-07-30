@@ -119,6 +119,7 @@ workflows:
       # ── RED ── WRITE-ONLY: the next failing test + the MINIMAL signature stubs
       # needed for it to COMPILE. No real logic — the verdict step proves it fails.
       red_test:
+        requires_file_write: true  # coding-evidence forcing function: success = real file writes
         goal: >
           RED step. Write or update EXACTLY ONE test for the next behavior in
           `plan`, with ONE atomic declarative behavioral assertion (Arrange-Act-
@@ -246,6 +247,7 @@ workflows:
 
       # ── GREEN ── Write the MINIMUM code to make the failing test pass.
       green_code:
+        requires_file_write: true  # coding-evidence forcing function: success = real file writes
         goal: >
           GREEN step. Write the MINIMUM implementation that makes the failing
           test pass — replace the stubs with real behavior, laser-focused on the

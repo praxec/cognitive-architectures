@@ -61,6 +61,13 @@
 # the pool per V31 and never re-acquires). flow.qa.promote-finding does not
 # lease (its playwright replays launch their own browsers).
 #
+# BROWSER PREFLIGHT: inherited, not re-wired here. flow.qa.explore's OWN
+# initialState is now `preflight` (cap.verify.browser-preflight) — since
+# this program's `exploring` state calls flow.qa.explore as its very first
+# transition, the mandatory browser-launchable/@playwright-test-present
+# gate already runs before any browser-dependent step, with no separate
+# preflight state needed in this driver.
+#
 # NO CYCLE: the reference graph is flow.qa.program → {flow.qa.explore,
 # flow.qa.promote-finding, cap.inspect.next-finding}; none of the three
 # references the program (a DAG — the loop is a state back-edge, not a

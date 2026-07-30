@@ -1,0 +1,767 @@
+# orchestrators/flow.change.yaml
+#
+# THE REUSABLE CHANGE ATOM — the common plan→execute→verify + honest
+# definition-of-done envelope that every org mutation flow composes. It is the
+# EXTRACTION of flow.implement.deliverable's envelope, MINUS that consumer's
+# cpm-planner tail (marking_complete) and its plan/deliverable/caller inputs.
+# Consumers WRAP this atom and add their own completion effect:
+#   flow.implement.deliverable = flow.change + cpm `plan.mark_status`
+#   flow.refactor.god-file      = flow.change (fixing) after the StructureOS move
+#   a bugfix / feature slice     = flow.change with its own acceptance criteria
+#
+# STAGES (states):
+#   baselining      → snapshot repo HEAD (honest-progress baseline).
+#   detecting_stack → resolve the stack (deliverable.stack, else repo sniff) —
+#                     EARLY, so it drives both the BUILD and VERIFY gates.
+#   build_gate      → route to the SELECTED builder. `build_mode` (input,
+#                     default "") is checked FIRST, ahead of the stack arms:
+#                       build_mode=='tdd' → cap.implement.tdd-loop (the
+#                                        red-green-refactor loop; a -max ts
+#                                        flow's builder)
+#                       build_mode=='scope-bounded' → cap.implement.scope-bounded
+#                                        (the scoped-edit builder wave-3 flows
+#                                        like flow.bugfix-from-error-log build
+#                                        with — refuses out-of-scope writes)
+#                     "" (default, unchanged stack routing) falls through to:
+#                       ts             → flow.implement.ts-slice (agent → scoped
+#                                        tsc/vitest verdict → commit)
+#                       rust|dotnet|*  → cap.implement.build-loop (the existing
+#                                        cargo build-loop, UNCHANGED)
+#   building[_ts|_tdd|_scope] → run the chosen builder on the deliverable,
+#                     via a `kind: workflow` sub-mission.
+#   measuring_impl  → count files changed since the baseline (real evidence).
+#   implemented_decision → zero files changed ⇒ `failed` (no silent no-op).
+#   stack_gate      → route to the SELECTED verifier. `verify_mode` (input,
+#                     default "") is checked FIRST, ahead of the stack arms:
+#                       verify_mode=='regression' → cap.verify.regression-tests
+#                                        (the workspace test-suite re-run a
+#                                        bugfix/debug flow verifies a fix with;
+#                                        its {ok} verdict is mapped onto the
+#                                        canonical {status} shape below)
+#                     "" (default, unchanged stack routing) falls through to:
+#                       ts     → cap.verify.ts     (npm ci + tsc + vite build)
+#                       rust   → cap.verify.rust   (cargo fmt + clippy + test)
+#                       dotnet → cap.verify.dotnet (dotnet build + test)
+#                     an undetected stack ⇒ `failed` (never a disguised pass).
+#   verify_{ts,rust,dotnet,regression[_decision]} → the selected verifier →
+#                     verified_decision.
+#   react_gate…     → (ts arm, opt-in) diff-scoped React anti-pattern gate.
+#   done            → terminal success (BOTH DoD outcomes met).
+#
+# THE HONEST DEFINITION OF DONE (top-level `outcomes:`) keys on BOTH real file
+# changes AND the verifier passing — the DoD HANDOFF a consumer reads. A verifier
+# passing on an UNCHANGED repo (cargo/tsc/vite all do) can no longer disguise a
+# no-op as success. The success path to `done` requires impl_files_changed >= 1
+# (implemented_decision) AND ws_verify.status == 'pass' (verified_decision), so
+# reaching `done` ⟺ the DoD is met; every other path routes to `failed`.
+#
+# THE DoD-EVIDENCE OUTPUTS (`outputs:` below) are what a `kind: workflow` parent
+# reads via `use.outputs` to drive its own completion effect: `base_commit`,
+# `impl_files_changed`, and the `ws_verify` verdict. Flows have no `snippet:`;
+# a top-level `outputs:` block names the terminal context slots the parent may
+# bind (V11-relaxed nestable sub-flow — same mechanism flow.derisk/flow.loom use).
+#
+# SCOPED-VS-BARRIER (docs/plan-types.develop-vs-execute.md): `verify_scope`
+# (input, default "") lets a caller narrow the ts/dotnet arms to the affected
+# test(s)/project instead of the full suite/solution. DEFAULT "" = UNCHANGED
+# full backstop. rust is unchanged either way (cap.verify.rust has no scope
+# input by design) — verify_rust stays the full cross-crate backstop.
+#
+# REACT GATE (ts arm, opt-in — docs/react-antipatterns.build-loop-wiring.md):
+# when `react_review` is true and the ts verifier passed, `react_gate` reviews
+# THIS change's own changed React files (cap.review.react-antipatterns,
+# diff-scoped, runtime oracle disabled) and fails on a new correctness-class
+# anti-pattern BEFORE `done`. Every non-ts / opt-out / no-React-files path is a
+# single no-op hop to `done` — byte-for-byte the prior behavior.
+#
+# This is a FLOW (not a capability): capabilities are composition leaves
+# (SPEC §3/§4.1, V6/V10) — only flows may invoke other workflows via
+# `kind: workflow`. It reuses the EXACT builders/verifiers deliverable used
+# (cap.implement.build-loop, flow.implement.ts-slice, inspect.git.progress,
+# cap.verify.ts|rust|dotnet, cap.review.react-antipatterns) — nothing reinvented.
+# No cpm-planner connection is required (that lives in the consumer's tail).
+#
+# CAPABILITY-MODE OVERRIDES (`build_mode` / `verify_mode`, both optional,
+# default ""): SEVERAL org flows need a DIFFERENT builder/verifier than the
+# stack-derived default this atom hard-codes above — e.g. the -max ts flows
+# build via the TDD loop (cap.implement.tdd-loop) instead of
+# flow.implement.ts-slice, wave-3 bugfix/debug flows build via the
+# scope-bounded edit builder (cap.implement.scope-bounded, build_mode==
+# 'scope-bounded'), and a bugfix/debug flow verifies via the regression-test
+# suite (cap.verify.regression-tests) instead of the stack-appropriate
+# verifier. A prior spike proved `definitionId` is NOT templatable (and it
+# stays literal on purpose — it's load-time-validated), so selection is
+# STATIC ENUM ROUTING to pre-declared arms with real validated
+# definitionIds, never a templated `definitionId`. Both inputs default to ""
+# — the UNGUARDED stack-routing arms stay intact and are evaluated exactly
+# as before, so a caller that passes NEITHER (every existing consumer:
+# flow.implement.deliverable, flow.shared.mini-vee) gets BYTE-IDENTICAL
+# behavior to pre-this-change. The guarded override arms are always ordered
+# FIRST in their gate (build_mode's tdd/scope-bounded arms ahead of the
+# stack arms in build_gate; verify_mode ahead of the stack arms in
+# stack_gate) so the enum check short-circuits before stack detection would
+# otherwise apply. `build_skills` (optional, default "") is a SEPARATE,
+# ADDITIVE input — not a mode selector — that passes craft/skill guidance
+# text through to the TDD builder only (see cap.implement.tdd-loop's own
+# craft_guidance input); it is inert unless build_mode=='tdd'.
+
+workflows:
+  flow.change:
+    lifecycle: experimental
+    description: >
+      The reusable change atom: plan→execute→verify a stack-appropriate change
+      and prove an honest definition-of-done (real files changed AND the
+      verifier passed). Consumers wrap it and add their own completion effect
+      (e.g. cpm mark_status). Emits base_commit / impl_files_changed / ws_verify
+      as the DoD-evidence handoff.
+    inputs:
+      # The change spec — passed straight through as the build-loop `plan`
+      # (goal + deliverables/steps + acceptance_criteria + owned_files/stack).
+      deliverable:    { type: object, required: true }
+      # CROSS-CRATE BACKSTOP surface (see verify_rust). REQUIRED (not defaulted):
+      # a path default in `inputs:` is not merged into `$.workflow.input` for
+      # path resolution, so a defaulted-but-unpassed value is an unresolved-arg
+      # permanent error, not a silent fallback. Pass the repo root for the
+      # always-correct whole-tree gate, or narrow it to the crate(s) that
+      # reverse-depend on the touched one. It MUST be a SUPERSET of the inner
+      # loop's `cargo_scope` surface, or the backstop cannot see the breakage
+      # it exists to catch. Also re-roots the child build-loop (repoRoot override
+      # in `building`) so a multi-repo change writes into the RIGHT repo.
+      backstop_cwd:   { type: string, required: true }
+      # SCOPED inner build-loop narrowing, DECOUPLED from the deliverable object
+      # (top-level input, not deliverable.cargo_scope): a consumer whose
+      # deliverable doesn't carry a cargo_scope key (e.g. mini-vee's design
+      # sketch, a cap.plan.technical-design output) can still wrap this atom.
+      # "" (default) = full-workspace inner loop (the tdd-verdict script
+      # defaults to --workspace). Threaded to `building` below; full-workspace
+      # correctness is still enforced by verify_rust before `done` regardless.
+      cargo_scope:    { type: string, default: "" }
+      # OPTIONAL per-slice narrowing for the ts/dotnet verify arms. "" (default)
+      # = unchanged full backstop. Declared with a default so callers that don't
+      # narrow (the common case) don't need to pass it.
+      verify_scope:   { type: string, default: "" }
+      # OPT-IN diff-scoped React anti-pattern gate on the TS arm only. false
+      # (default) = OFF: every existing caller gets the exact prior behavior
+      # (no gate; ts pass → done). true = after cap.verify.ts passes, review
+      # THIS change's own changed React files and FAIL on a new correctness-class
+      # finding, before `done`.
+      react_review:   { type: boolean, default: false }
+      # BUILDER capability-mode override (see header). "" (default) = the
+      # existing stack routing in build_gate (ts / rust|dotnet|*), UNCHANGED.
+      # "tdd" routes the build to cap.implement.tdd-loop instead — the
+      # red-green-refactor loop a -max ts flow wants as its builder. No other
+      # value is a legal arm (an unrecognized string falls through the
+      # unguarded stack-routing default, same as "").
+      build_mode:     { type: string, default: "" }
+      # VERIFIER capability-mode override (see header). "" (default) = the
+      # existing stack routing in stack_gate (ts | rust | dotnet), UNCHANGED.
+      # "regression" routes verify to cap.verify.regression-tests instead —
+      # the workspace test-suite re-run a bugfix/debug flow verifies a fix
+      # with. No other value is a legal arm (falls through to stack routing).
+      verify_mode:    { type: string, default: "" }
+      # OPTIONAL diagnosis evidence for the regression verifier
+      # (cap.verify.regression-tests requires both, no default there — see
+      # its header). Decoupled top-level inputs (same pattern as cargo_scope /
+      # verify_scope): a caller whose deliverable doesn't carry this shape can
+      # still wrap the atom. Defaults are inert {} / [] — only read when
+      # verify_mode=='regression'; every other path never touches them.
+      defect_location: { type: object, default: {} }
+      repro_steps:     { type: array,  default: [] }
+      # SKILLS-AS-DATA passthrough (part b — see cap.implement.tdd-loop's own
+      # `craft_guidance` input, cherry-picked from a prior branch): craft/skill
+      # guidance text threaded into the TDD builder's agent goal (build_mode==
+      # 'tdd' only). "" (default) ⇒ tdd-loop's craft_guidance is "" ⇒ its goal
+      # template renders the guidance line blank — INERT, byte-identical to
+      # before this input existed. No other build arm reads build_skills.
+      build_skills:    { type: string, default: "" }
+    # DoD-EVIDENCE HANDOFF (flows have no `snippet:`) — these name the terminal
+    # context slots a `kind: workflow` parent reads via `use.outputs` to drive
+    # its own completion. Populated by baselining / measuring_impl / verify_*.
+    outputs:
+      base_commit:        { type: string }
+      impl_files_changed: { type: integer }
+      ws_verify:          { type: object }
+    # base_commit / impl_files_changed seed the HONEST completion evidence (see
+    # baselining / measuring_impl). ws_verify is seeded so an early terminal read
+    # resolves; it is overwritten by the chosen verifier. React-gate slots are
+    # seeded so a guard never hits GUARD_UNSET_SLOT on a path that skips the gate
+    # (non-ts stack / react_review off); impl_react_* are overwritten by
+    # measuring_impl; the gate reads the flat count.
+    initialContext:
+      base_commit: ""
+      impl_files_changed: 0
+      ws_verify: { status: "" }
+      impl_react_files: []
+      impl_react_files_count: 0
+      react_findings: []
+      react_gate_pass: false
+      react_gate_reason: ""
+      # Regression-verify decision gate slot (verify_mode=='regression' only —
+      # see verify_regression/verify_regression_decision). Seeded so a guard
+      # never hits GUARD_UNSET_SLOT; the only path that reaches
+      # verify_regression_decision's guard always sets this first.
+      regression_ok: false
+    # HONEST definition of done (deterministic `met` flags): a change is only
+    # done when BOTH real files changed AND the stack-appropriate verifier passed
+    # on them — NOT a value that is true regardless of what the build did. A
+    # verifier passing on an UNCHANGED repo (cargo/tsc/vite all do) can no longer
+    # disguise a no-op as success (fail-fast / no fail-open).
+    outcomes:
+      - id: implement_changed_files
+        statement: >
+          The change produced real file changes (committed slices or on-disk
+          work), not a no-op.
+        check: "$.context.impl_files_changed >= 1"
+      - id: workspace_verified
+        statement: >
+          The stack-appropriate verifier (ts | rust | dotnet) passed. Full
+          workspace/solution when verify_scope is "" (the default); scoped to
+          the change's affected test(s)/project when the caller opted into the
+          scoped path (ts/dotnet only). A scoped pass here is NOT a plan's final
+          word for a barrier-owning caller: that driver still owes the ONE
+          full-suite barrier at plan close.
+        check: "$.context.ws_verify.status == 'pass'"
+    initialState: baselining
+    states:
+
+      # HONEST-EVIDENCE BASELINE: record HEAD before the build so real progress
+      # (committed slices + on-disk changes) can be measured deterministically
+      # after it. Without a baseline, "did anything change" is unknowable and a
+      # no-op change can ride a green verifier to a false complete.
+      baselining:
+        goal: Snapshot repo HEAD before changing (baseline for honest progress).
+        transitions:
+          snapshot:
+            target: detecting_stack
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.git.progress
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.run.repo_root"
+                - ""   # empty base ⇒ snapshot mode → returns current HEAD
+            output:
+              base_commit: "$.output.json.head"
+
+      # STACK DETECTION (deterministic; code decides, the gate routes): resolve
+      # the change's stack from deliverable.stack, else by sniffing the repo
+      # filesystem. Runs EARLY (right after baselining) so it drives BOTH the
+      # BUILD gate (which builder to run) AND the later VERIFY gate (which
+      # verifier). The filesystem sniff is safe here: the repo (Cargo.toml /
+      # package.json / *.csproj) already exists before the build.
+      detecting_stack:
+        goal: Detect the change's stack (deliverable.stack, else repo filesystem).
+        transitions:
+          detect:
+            target: build_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.stack
+              args:
+                - "$.workflow.input.deliverable"
+                - "$.run.repo_root"
+            output:
+              stack: "$.output.json.stack"
+
+      # ── BUILD-PHASE GATE ── route the change to the SELECTED builder.
+      # `build_mode` (capability-mode override, see header) is checked FIRST,
+      # ahead of stack routing: build_mode=='tdd' takes the new
+      # building_tdd → cap.implement.tdd-loop arm, and build_mode==
+      # 'scope-bounded' takes building_scope → cap.implement.scope-bounded,
+      # both regardless of stack. Backward-compat is the invariant for
+      # build_mode=="" (the default): EVERY non-ts stack (rust, dotnet, and
+      # any undetected/unknown) falls to `building` — the EXACT
+      # cap.implement.build-loop (cargo) path, byte-for-byte. ONLY a `ts`
+      # change takes the stack arm (building_ts → flow.implement.ts-slice).
+      #
+      # MUTUAL EXCLUSION (the engine requires EXACTLY ONE guarded transition
+      # viable per state — an overlap is an `ambiguous deterministic
+      # transition` runtime error, no first-match/priority ordering): the
+      # three build_mode values ("", "tdd", "scope-bounded") and the two
+      # stack values (ts, non-ts) that matter here are pairwise disjoint by
+      # construction —
+      #   build_tdd    fires iff build_mode == 'tdd'
+      #   build_scope  fires iff build_mode == 'scope-bounded'
+      #   build_ts     fires iff stack == 'ts' AND build_mode NOT IN {tdd, scope-bounded}
+      #   build_default (unguarded) fires iff none of the above — i.e.
+      #                 build_mode == "" AND stack != 'ts'
+      # so for every (build_mode, stack) pair exactly one arm's guard set is
+      # fully satisfied. With build_mode=="" (the default) both exclusions on
+      # build_ts are vacuously true, so default routing is byte-identical to
+      # before this change.
+      build_gate:
+        transitions:
+          # An explicit build_mode opt-in wins over stack-derived routing.
+          build_tdd:
+            target: building_tdd
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.workflow.input.build_mode == 'tdd'" } ]
+          # NEW arm (this change): scope-bounded builder override — the
+          # scoped-edit path wave-3 flows (bugfix/debug) build with. Ordered
+          # alongside build_tdd, ahead of the stack arm, same reasoning.
+          build_scope:
+            target: building_scope
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.workflow.input.build_mode == 'scope-bounded'" } ]
+          build_ts:
+            target: building_ts
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.stack == 'ts'" }
+              - { kind: expr, expr: "$.workflow.input.build_mode != 'tdd'" }
+              # NEW exclusion (this change): without it, a ts deliverable with
+              # build_mode=='scope-bounded' would make BOTH build_scope and
+              # build_ts viable ⇒ ambiguous deterministic transition.
+              - { kind: expr, expr: "$.workflow.input.build_mode != 'scope-bounded'" }
+          # Unguarded default — build_mode=="" AND stack != 'ts' → the
+          # existing cargo build-loop, unchanged.
+          build_default:
+            target: building
+            actor: deterministic
+
+      # Run the build-loop as a child mission; capture its result on completion.
+      building:
+        goal: Build the change to green via the recoverable build-loop.
+        transitions:
+          build:
+            target: measuring_impl
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.build-loop
+              # Re-root the child build-loop to THIS change's repo. Without it the
+              # child inherits the parent run's $.run.repo_root and writes/commits
+              # into the WRONG repo in a multi-repo program (wrong-repo
+              # corruption). backstop_cwd is the change's declared repo root (a
+              # required input, and already the cwd for verify_rust/verify_dotnet).
+              repoRoot: "$.workflow.input.backstop_cwd"
+              use:
+                inputs:
+                  plan:      "$.workflow.input.deliverable"
+                  # SCOPED inner loop: cargo_scope is this atom's OWN top-level
+                  # input (decoupled from the deliverable object — see the
+                  # header input comment) so a single-crate slice tests only its
+                  # crate (fast RED/GREEN), and a consumer whose deliverable
+                  # doesn't carry the key can still wrap the atom. MUST be
+                  # passed explicitly — snippet-input defaults are NOT merged
+                  # into $.workflow.input for path resolution. "" ⇒ the
+                  # tdd-verdict script defaults to --workspace. Full-workspace
+                  # correctness is enforced by verify_rust below BEFORE `done`.
+                  cargo_scope: "$.workflow.input.cargo_scope"
+                  # Coverage floor — MUST be passed explicitly (snippet-input
+                  # defaults don't merge). "1": a TDD build must add ≥1 test.
+                  min_tests: "1"
+                outputs:
+                  "$.context.result": result
+
+      # ── TS BUILD ARM ── build the change via the TypeScript/React slice loop
+      # (agent → scoped tsc/vitest verdict → commit), re-rooted to THIS change's
+      # repo (repoRoot override — same as `building`). Targets measuring_impl,
+      # identical to `building`, so the honest file-change measure + verify +
+      # react gate flow is unchanged.
+      building_ts:
+        goal: Build the ts change via the TypeScript/React slice loop.
+        transitions:
+          build:
+            target: measuring_impl
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.implement.ts-slice
+              repoRoot: "$.workflow.input.backstop_cwd"
+              # flow→flow: no `use.outputs` — flow.implement.ts-slice declares no
+              # top-level outputs (measuring_impl reads real progress from git,
+              # same as `building`).
+              use:
+                inputs:
+                  plan: "$.workflow.input.deliverable"
+                  # Thread verify_scope as an explicit scope override; "" (default)
+                  # ⇒ the slice derives per-slice scope from deliverable.owned_files.
+                  scope_override: "$.workflow.input.verify_scope"
+
+      # ── TDD BUILD-MODE ARM (build_mode=='tdd') ── build the change via the
+      # red-green-refactor loop (cap.implement.tdd-loop) instead of the
+      # stack-derived builder — the -max ts flows' builder. Re-rooted to
+      # THIS change's repo (repoRoot override — same reasoning as `building` /
+      # `building_ts`: without it the child inherits the parent run's
+      # $.run.repo_root and could write into the WRONG repo in a multi-repo
+      # program). Targets measuring_impl, identical to the other two build
+      # arms, so the honest file-change measure + verify + react gate flow is
+      # unchanged. `plan` / `scope_paths` both thread the deliverable — the
+      # same convention the atom's existing consumer of this cap
+      # (flow.add-feature) uses; the cap's own `scope_paths` input is
+      # optional (default []) so this is contract-valid either way. Captures
+      # `result` into the SAME `$.context.result` slot `building` uses — the
+      # two arms are mutually exclusive per run (build_mode routing), so
+      # reusing the slot is safe (same idiom as `ws_verify` reused across the
+      # verify_* arms below).
+      building_tdd:
+        goal: Build the change via the TDD red-green-refactor loop (build_mode == 'tdd').
+        transitions:
+          build:
+            target: measuring_impl
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.tdd-loop
+              repoRoot: "$.workflow.input.backstop_cwd"
+              use:
+                inputs:
+                  plan:        "$.workflow.input.deliverable"
+                  scope_paths: "$.workflow.input.deliverable"
+                  # Skills-as-data passthrough (see header + this atom's
+                  # `build_skills` input): "" (default) ⇒ the cap's own
+                  # craft_guidance default ⇒ inert blank guidance line —
+                  # byte-identical to before build_skills existed.
+                  craft_guidance: "$.workflow.input.build_skills"
+                outputs:
+                  "$.context.result": result
+
+      # ── SCOPE-BOUNDED BUILD-MODE ARM (build_mode=='scope-bounded') ── build
+      # the change via the scoped-edit builder (cap.implement.scope-bounded)
+      # instead of the stack-derived builder — the builder wave-3 flows
+      # (bugfix/debug, e.g. flow.bugfix-from-error-log's `implementing` state)
+      # use: it refuses out-of-scope writes and reports an under-scoped
+      # deliverable honestly rather than inventing a parallel API. Re-rooted
+      # to THIS change's repo (repoRoot override — same reasoning as the
+      # other build arms). `plan` / `scope_paths` both thread the deliverable
+      # — the SAME convention flow.bugfix-from-error-log's own `implementing`
+      # state uses (both bound to its fix_plan; the cap's `scope_paths` is
+      # required, so it must resolve to something usable as scope). Targets
+      # measuring_impl, identical to the other build arms, so the honest
+      # file-change measure + verify + react gate flow is unchanged. Captures
+      # `result` into the SAME `$.context.result` slot the other build arms
+      # use — mutually exclusive per run (build_mode routing), so reusing the
+      # slot is safe (same idiom as `ws_verify` reused across verify_* below).
+      building_scope:
+        goal: Build the change via the scope-bounded edit builder (build_mode == 'scope-bounded').
+        transitions:
+          build:
+            target: measuring_impl
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.implement.scope-bounded
+              repoRoot: "$.workflow.input.backstop_cwd"
+              use:
+                inputs:
+                  plan:        "$.workflow.input.deliverable"
+                  scope_paths: "$.workflow.input.deliverable"
+                outputs:
+                  "$.context.result": result
+
+      # HONEST-EVIDENCE MEASURE: count files changed since the baseline
+      # (committed slices ∪ on-disk work). This is the "real files changed" half
+      # of the definition of done — the verifier passing is the other half.
+      measuring_impl:
+        goal: Measure real file changes since the baseline (honest change evidence).
+        transitions:
+          measure:
+            target: implemented_decision
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.git.progress
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.run.repo_root"
+                - "$.context.base_commit"
+            output:
+              impl_files_changed: "$.output.json.files_changed"
+              # Diff-scope for the React gate: this change's own changed React
+              # source files (+ a flat count the gate guards on).
+              impl_react_files: "$.output.json.react_files"
+              impl_react_files_count: "$.output.json.react_files_count"
+
+      # FAILED / EMPTY CHANGE GUARD: the build-loop always resolves structurally
+      # (it converges OR parks at a human who signs off), so it NEVER propagates
+      # a failure signal — a human-escalated no-op returns an empty result. Gate
+      # on real evidence instead: zero files changed ⇒ nothing was built ⇒
+      # `failed` (never a silent complete). Exhaustive: changed | not-changed.
+      implemented_decision:
+        transitions:
+          proceed:
+            target: stack_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.impl_files_changed >= 1" }
+          empty_implement:
+            target: failed
+            actor: deterministic
+
+      # Route to the SELECTED verifier (exhaustive: regression | ts | rust |
+      # dotnet | default). `verify_mode` (capability-mode override, see
+      # header) is checked FIRST, ahead of stack routing: verify_mode==
+      # 'regression' takes the new verify_regression → cap.verify.
+      # regression-tests arm regardless of stack. Backward-compat is the
+      # invariant for verify_mode=="" (the default): the existing
+      # ts | rust | dotnet routing is unchanged, and an undetected stack still
+      # cannot be honestly verified → `failed` (never done) — the
+      # never-disguised-pass poka-yoke, at the routing layer.
+      stack_gate:
+        transitions:
+          # An explicit verify_mode opt-in wins over stack-derived routing. The
+          # engine requires EXACTLY ONE guarded transition to be viable per state
+          # (no first-match/priority ordering — an overlap is an `ambiguous
+          # deterministic transition` error), so the verify_mode arm and the stack
+          # arms must be MUTUALLY EXCLUSIVE: each stack arm carries a
+          # `verify_mode != 'regression'` exclusion so a regression override takes
+          # ONLY verify_regression regardless of stack. With verify_mode=="" (the
+          # default) each exclusion is vacuously true → ts|rust|dotnet routing is
+          # byte-identical to before.
+          regression:
+            target: verify_regression
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.workflow.input.verify_mode == 'regression'" } ]
+          ts:
+            target: verify_ts
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.stack == 'ts'" }
+              - { kind: expr, expr: "$.workflow.input.verify_mode != 'regression'" }
+          rust:
+            target: verify_rust
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.stack == 'rust'" }
+              - { kind: expr, expr: "$.workflow.input.verify_mode != 'regression'" }
+          dotnet:
+            target: verify_dotnet
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.stack == 'dotnet'" }
+              - { kind: expr, expr: "$.workflow.input.verify_mode != 'regression'" }
+          unknown_stack:
+            target: failed
+            actor: deterministic
+
+      # ── REGRESSION VERIFY-MODE ARM (verify_mode=='regression') ── run the
+      # workspace test-suite re-run (cap.verify.regression-tests) instead of
+      # the stack-appropriate verifier — the verify a bugfix/debug flow wants.
+      # defect_location/repro_steps are this atom's own decoupled optional
+      # inputs (see header); "" (default {} / []) is inert for a caller that
+      # has no diagnosis evidence to thread. `scope` reuses the SAME
+      # verify_scope input the ts/dotnet arms narrow with (its "" default is
+      # the unchanged full-workspace run — see the cap's own header). The cap
+      # emits `{ok, tests_added}` — NOT the canonical verifyOut `{status}`
+      # shape the DoD reads — so this arm captures the raw verdict and hands
+      # off to verify_regression_decision to map it explicitly.
+      verify_regression:
+        goal: >
+          Regression-test verify before `done` (verify_mode == 'regression') —
+          the same workspace suite a bugfix/debug flow verifies its fix with.
+        transitions:
+          verify:
+            target: verify_regression_decision
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.regression-tests
+              use:
+                inputs:
+                  defect_location: "$.workflow.input.defect_location"
+                  repro_steps:     "$.workflow.input.repro_steps"
+                  scope:           "$.workflow.input.verify_scope"
+                outputs:
+                  "$.context.regression_ok":          ok
+                  "$.context.regression_tests_added": tests_added
+
+      # MAP the regression cap's `{ok: boolean}` verdict onto the canonical
+      # `ws_verify.status` shape verified_decision (and the top-level DoD
+      # outcome) reads — `use.outputs` is a straight-copy bind-by-name (no
+      # conditional operator), so the {ok}→{status} translation is done here
+      # via two guarded `kind: noop` transitions instead, each writing the
+      # literal shape with the `set` mapping operator. Exhaustive: pass | fail
+      # (unguarded default) — never a silent third state.
+      verify_regression_decision:
+        transitions:
+          pass:
+            target: verified_decision
+            actor: deterministic
+            guards: [ { kind: expr, expr: "$.context.regression_ok == true" } ]
+            executor: { kind: noop }
+            output:
+              ws_verify: { set: { status: "pass" } }
+          # Unguarded default — regression_ok == false.
+          fail:
+            target: verified_decision
+            actor: deterministic
+            executor: { kind: noop }
+            output:
+              ws_verify: { set: { status: "fail" } }
+
+      # TS/Vite verify. cwd = repo_path (the package.json root) — threaded
+      # explicitly so there is no unresolved `$.workflow.input.cwd`. `scope` =
+      # verify_scope: "" (the default) runs the FULL npm ci + tsc + vite build;
+      # a caller that opted in gets the fast scoped-lint + affected-test(s) path.
+      verify_ts:
+        goal: >
+          TypeScript/Vite verify before `done` — full barrier when verify_scope
+          is empty, scoped lint + affected test(s) otherwise.
+        transitions:
+          verify:
+            target: verified_decision
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.ts
+              use:
+                inputs:
+                  cwd:   "$.run.repo_root"
+                  scope: "$.workflow.input.verify_scope"
+                outputs:
+                  "$.context.ws_verify": verify
+
+      # CROSS-CRATE CORRECTNESS BACKSTOP (the "milestone" build): the inner loop
+      # verified the change's OWN crate; scoped `-p crate` can miss
+      # reverse-dependency breakage. Run ONE full `cargo test --workspace`
+      # (+ fmt + clippy) here (cwd = backstop_cwd) before `done`. UNCHANGED by
+      # verify_scope: cap.verify.rust has no scope input (rust deliberately left
+      # out of that pass); a rust cohort that wants the barrier-once model should
+      # run through flow.cohort.compiled-stack, which already implements it.
+      verify_rust:
+        goal: Full-workspace rust verify (cross-crate backstop) before `done`.
+        transitions:
+          verify:
+            target: verified_decision
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.rust
+              use:
+                inputs:
+                  cwd: "$.workflow.input.backstop_cwd"
+                outputs:
+                  "$.context.ws_verify": verify
+
+      # .NET verify. cwd = backstop_cwd (the composition-root / whole-solution
+      # surface the caller declared). `scope` = verify_scope: "" (default) runs
+      # the full dotnet build + test over backstop_cwd; a caller that opted in
+      # narrows to a project path or test filter fragment instead.
+      verify_dotnet:
+        goal: >
+          .NET verify before `done` — full backstop when verify_scope is empty,
+          scoped project/filter otherwise.
+        transitions:
+          verify:
+            target: verified_decision
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.dotnet
+              use:
+                inputs:
+                  cwd:   "$.workflow.input.backstop_cwd"
+                  scope: "$.workflow.input.verify_scope"
+                outputs:
+                  "$.context.ws_verify": verify
+
+      # Branch on the chosen verifier's status (exhaustive: pass | anything else).
+      # `pass` no longer goes straight to `done` — it routes through react_gate,
+      # which for every NON-ts / opt-out path is a single no-op hop to `done`
+      # (byte-for-byte the prior outcome).
+      verified_decision:
+        transitions:
+          pass:
+            target: react_gate
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.ws_verify.status == 'pass'" }
+          fail:
+            target: failed
+            actor: deterministic
+
+      # ── DIFF-SCOPED REACT ANTI-PATTERN GATE (ts arm, opt-in) ─────────────
+      # Runs the React review ONLY when ALL hold: the stack is ts, the caller
+      # opted in (react_review), and this change actually changed React source
+      # (impl_react_files_count > 0). Any miss → skip cleanly to `done` (the
+      # HONEST "nothing to review" path — never a fabricated pass or finding).
+      # rust/dotnet changes always take skip.
+      react_gate:
+        transitions:
+          run_review:
+            target: reviewing_react
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.stack == 'ts'" }
+              - { kind: expr, expr: "$.workflow.input.react_review == true" }
+              - { kind: expr, expr: "$.context.impl_react_files_count > 0" }
+          # Unguarded default — non-ts, opt-out, or no React files changed.
+          skip:
+            target: done
+            actor: deterministic
+
+      # Scoped review of THIS change's changed React files only. The
+      # react_profile object literal carries scope_files (the diff), disables the
+      # runtime oracle (oracle_command "none" — never run the whole test suite
+      # per slice), and supplies suppressions/extra_rules so every nested
+      # arg-path cap.review dereferences resolves (its own header's poka-yoke).
+      reviewing_react:
+        goal: Review this change's own changed React files for new anti-patterns.
+        transitions:
+          review:
+            target: react_gating
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.review.react-antipatterns
+              use:
+                inputs:
+                  react_profile:
+                    oracle_command: "none"
+                    suppressions: []
+                    extra_rules: []
+                    scope_files: "$.context.impl_react_files"
+                outputs:
+                  "$.context.react_findings": findings
+
+      # Deterministic pass/fail on the ADJUDICATED findings (correctness-class
+      # blocks; maintainability/performance never fail a build). Flat gate_pass
+      # scalar for the guard (GUARD_UNSET_SLOT poka-yoke).
+      react_gating:
+        goal: Fold the adjudicated React findings into a pass/fail gate.
+        transitions:
+          gate:
+            target: react_review_verdict
+            actor: deterministic
+            executor:
+              kind: script
+              subject: verify.react.review-gate
+              args:
+                - "$.context.react_findings"
+            output:
+              react_gate_pass:   "$.output.json.gate_pass"
+              react_gate_reason: "$.output.json.reason"
+
+      react_review_verdict:
+        transitions:
+          clean:
+            target: done
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.react_gate_pass == true" }
+          # Unguarded default — a blocking correctness finding: fail the change
+          # (NOT done). $.context.react_gate_reason carries why.
+          blocked:
+            target: failed
+            actor: deterministic
+
+      # Terminal success — reached ONLY via the full DoD path (impl_files_changed
+      # >= 1 AND ws_verify.status == 'pass', React gate clean/skipped). A parent
+      # reads base_commit / impl_files_changed / ws_verify (outputs above) here.
+      done:
+        terminal: true
+        outcome: success
+
+      # Reached from any of: an EMPTY change (zero files changed —
+      # implemented_decision), an UNDETECTED stack (stack_gate), a verifier
+      # REJECTION (verified_decision), or a blocking React finding
+      # (react_review_verdict). Fail loud (outcome: failure): a `kind: workflow`
+      # parent sees the sub-workflow fail and its own transition errors (the
+      # consumer's completion effect never runs). This is the change atom's honest
+      # failure contract — no-op ⇒ failed, verifier-fail ⇒ failed.
+      failed:
+        terminal: true
+        outcome: failure
