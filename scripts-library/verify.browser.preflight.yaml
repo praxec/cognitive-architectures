@@ -79,7 +79,7 @@ scripts:
       
       if [ -n "$REPO_ROOT" ]; then
         [ -d "$REPO_ROOT" ] || fail PLAYWRIGHT_TEST_MISSING "repo_root '$REPO_ROOT' is not a directory"
-        [ -f "$REPO_ROOT/node_modules/@playwright/test/package.json" ] || fail PLAYWRIGHT_TEST_MISSING "install @playwright/test"
+        [ -f "$REPO_ROOT/node_modules/@playwright/test/package.json" ] || fail PLAYWRIGHT_TEST_MISSING "install @playwright/test (or re-run flow.qa.explore with provision_playwright: true)"
       fi
       
       OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/praxec-browser-preflight-out.XXXXXX" 2>/dev/null)" \

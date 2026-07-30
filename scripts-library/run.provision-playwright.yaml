@@ -1,0 +1,83 @@
+# scripts-library/run.provision-playwright.yaml
+#
+# OPT-IN, idempotent @playwright/test provisioner for flow.qa.explore's target
+# repo. This is the ergonomic escape hatch for the flow's one genuine per-app
+# precondition: the reproduction gate runs `npx playwright test` FROM repo_root,
+# which only resolves where @playwright/test is installed.
+#
+# DELIBERATELY NOT the default. flow.qa.explore's preflight gate stays the
+# authority: with provisioning DISABLED (the default) a missing dependency is a
+# loud, actionable PLAYWRIGHT_TEST_MISSING — a QA-*discovery* flow should not
+# silently mutate a repo it is only meant to test (guessing the package manager,
+# the workspace root, or a version that conflicts with the app's own pin). This
+# script only acts when the operator EXPLICITLY opts in via
+# `provision_playwright: true`, and even then it is:
+#   - IDEMPOTENT: a no-op when @playwright/test is already present, so re-runs
+#     and already-provisioned repos cost nothing;
+#   - BEST-EFFORT: it never hard-fails the flow. Whatever happens here, control
+#     returns to the preflight gate, which re-checks presence for real. A failed
+#     install therefore still surfaces as PLAYWRIGHT_TEST_MISSING, never as a
+#     silent pass.
+#
+# The BROWSER itself needs no provisioning here — scripts/browser-mcp.sh already
+# self-provisions Playwright-managed Chromium OS-agnostically. This script closes
+# only the target-repo test-runner dependency, and only on request.
+version: "1.0.0"
+scripts:
+  run.provision-playwright:
+    verb: run
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+      REPO_ROOT="${1:-}"
+      ENABLED="${2:-false}"
+
+      emit() { # $1=provisioned(true|false) $2=status $3=detail
+        if command -v jq >/dev/null 2>&1; then
+          jq -n --argjson prov "$1" --arg status "$2" --arg detail "$3" \
+            '{provisioned: $prov, status: $status, detail: $detail}'
+        else
+          printf '{"provisioned":%s,"status":"%s","detail":"%s"}\n' "$1" "$2" "$3"
+        fi
+        exit 0
+      }
+
+      # No target, nothing to do — the preflight gate will report the real state.
+      [ -n "$REPO_ROOT" ] && [ -d "$REPO_ROOT" ] \
+        || emit false skipped "no repo_root to provision"
+
+      # Idempotent: already present -> no-op regardless of the flag.
+      [ -f "$REPO_ROOT/node_modules/@playwright/test/package.json" ] \
+        && emit false present "@playwright/test already installed"
+
+      # Opt-in only: default (disabled) leaves the loud precondition intact.
+      case "$ENABLED" in
+        true|TRUE|True|1) ;;
+        *) emit false disabled "provision_playwright not enabled; preflight will fail loud (PLAYWRIGHT_TEST_MISSING) if it is missing" ;;
+      esac
+
+      cd "$REPO_ROOT" 2>/dev/null || emit false skipped "cannot enter repo_root '$REPO_ROOT'"
+
+      # Detect the package manager by its lockfile; default to npm (which the
+      # rest of this family already assumes via `npx playwright test`).
+      if [ -f pnpm-lock.yaml ]; then
+        INSTALL="pnpm add -D @playwright/test"
+      elif [ -f yarn.lock ]; then
+        INSTALL="yarn add -D @playwright/test"
+      else
+        INSTALL="npm install --no-audit --no-fund -D @playwright/test"
+      fi
+
+      LOG="$(mktemp "${TMPDIR:-/tmp}/praxec-provision-pw.XXXXXX" 2>/dev/null)" || LOG=/dev/null
+      if $INSTALL >"$LOG" 2>&1; then
+        rm -f "$LOG" 2>/dev/null
+        emit true installed "installed @playwright/test via: $INSTALL"
+      else
+        TAIL="$(tail -c 300 "$LOG" 2>/dev/null | tr '\n' ' ')"
+        rm -f "$LOG" 2>/dev/null
+        # Best-effort: do NOT fail the flow — hand back to the preflight gate,
+        # which will re-check and report PLAYWRIGHT_TEST_MISSING if still absent.
+        emit false install_failed "'$INSTALL' failed; preflight will confirm. tail: ${TAIL:-<none>}"
+      fi
