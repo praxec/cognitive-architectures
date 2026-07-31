@@ -1,0 +1,174 @@
+# scripts-library/run.github.issue-upsert.yaml
+#
+# Idempotent create-or-update of a ticket on the board — THE dedup poka-yoke's
+# enforcement half (docs/design-ticket-lifecycle-workflows.md "Dedup
+# fingerprint"). Given a rendered title/body (the body MUST already carry
+# the `<!-- qa-fingerprint: <hash> -->` marker — see inspect.ticket.render-body)
+# this script:
+#   1. extracts the fingerprint from the body and searches for an existing
+#      issue carrying it (same query search.github.issue-search runs,
+#      inlined here — mirrors run.git.push-pr's own inline
+#      `gh pr list --head` existence check rather than shelling out to a
+#      sibling script);
+#   2. branches create (no match) / update (open match: adds a
+#      re-occurrence comment, reuses the number) / reopen (closed match:
+#      reopens + comments, reuses the number) — never a second issue for
+#      the same fingerprint;
+#   3. adds the issue to the project (`addProjectV2ItemById`) and sets
+#      Status/Priority/Size by NAME, resolved to field/option ids from the
+#      caller-supplied `resolved` object (inspect.github.resolve-project's
+#      output — ids are never hard-coded here either).
+#
+# Field/option resolution is NAME -> id (not id args) so callers (e.g.
+# cap.coordinate.ticket-upsert) thread the whole `resolved` object through
+# unchanged rather than exploding into 6+ positional id args; this script
+# is where the severity->Priority/Size NAME mapping (computed upstream by
+# render-body) actually becomes a GraphQL option id. An unresolvable name
+# is reported in `error` but never aborts the upsert (fail-soft per field —
+# the issue/project-item still gets created).
+#
+# Verb `run`: a mutating action (create/update GitHub state), matching
+# run.git.push-pr / run.git.commit-slice's shape — NOT `coordinate` (that
+# verb does not exist in the scripts-library's closed twelve; SPEC §22.3).
+#
+# Args (POSITIONAL, JSON envelope, exit 0 always — every failure is DATA):
+#   $1 / REPO_OWNER     — repo owner login (required)
+#   $2 / REPO_NAME      — repo name (required)
+#   $3 / RESOLVED_JSON  — {projectId, fields:{Name:{fieldId,options:{...}}}}
+#                         from inspect.github.resolve-project (required)
+#   $4 / TITLE          — issue title (required)
+#   $5 / BODY           — issue body; MUST contain the qa-fingerprint marker
+#                         for dedup to engage (required)
+#   $6 / LABELS_CSV     — comma-separated label names ("" = none)
+#   $7 / STATUS_NAME    — Status option name, e.g. "Found" ("" = skip)
+#   $8 / PRIORITY_NAME  — Priority option name, e.g. "P1" ("" = skip)
+#   $9 / SIZE_NAME      — Size option name, e.g. "M" ("" = skip)
+# Emits: {number, url, itemId, action: created|updated|reopened|null, error}
+# read at $.output.json.*. `error` may be a non-fatal note (e.g. one field
+# failed to resolve) even when number/url/itemId are populated.
+version: "1.0.0"
+scripts:
+  run.github.issue-upsert:
+    verb: run
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      OWNER="${1:-${REPO_OWNER:-}}"
+      NAME="${2:-${REPO_NAME:-}}"
+      # NOTE: nested `${X:-${Y:-{}}}` corrupts bash's brace-matching (the
+      # literal `{}` default reads as closing the OUTER group early) — set
+      # a plain empty default, then backfill "{}" afterward.
+      RESOLVED="${3:-${RESOLVED_JSON:-}}"
+      [ -z "$RESOLVED" ] && RESOLVED='{}'
+      TITLE="${4:-${TITLE:-}}"
+      BODY="${5:-${BODY:-}}"
+      LABELS="${6:-${LABELS_CSV:-}}"
+      STATUS_NAME="${7:-${STATUS_NAME:-}}"
+      PRIORITY_NAME="${8:-${PRIORITY_NAME:-}}"
+      SIZE_NAME="${9:-${SIZE_NAME:-}}"
+
+      jstr() { printf '%s' "${1:-}" | jq -Rs . 2>/dev/null || printf '""'; }
+      fail() { jq -n --arg e "${1:-unknown error}" \
+                 '{number: null, url: "", itemId: null, action: null, error: $e}'; exit 0; }
+
+      [ -z "${OWNER// /}" ] && fail "empty repo owner"
+      [ -z "${NAME// /}" ]  && fail "empty repo name"
+      [ -z "${TITLE// /}" ] && fail "empty title"
+      command -v gh >/dev/null 2>&1 || fail "gh CLI not on PATH"
+      command -v jq >/dev/null 2>&1 || fail "jq not on PATH"
+      printf '%s' "$RESOLVED" | jq -e 'type == "object" and (.projectId? // null) != null' >/dev/null 2>&1 \
+        || fail "resolved project object missing projectId — call resolve-project first"
+      PROJECT_ID="$(printf '%s' "$RESOLVED" | jq -r '.projectId')"
+
+      REPO="$OWNER/$NAME"
+      NOTES=""
+      note() { NOTES="${NOTES}${NOTES:+; }$1"; }
+
+      # ---- 1. dedup lookup by fingerprint marker (inline; same query as
+      # search.github.issue-search) ----
+      FP="$(printf '%s' "$BODY" | grep -oE 'qa-fingerprint: [0-9a-f]{64}' | head -1 | awk '{print $2}')"
+      MATCH_NUM=""
+      MATCH_STATE=""
+      if [ -n "$FP" ]; then
+        q="repo:${REPO} in:body \"qa-fingerprint: ${FP}\""
+        search_raw="$(gh api graphql -f query='
+          query($q:String!){ search(query:$q, type:ISSUE, first:1){ nodes{ ... on Issue{ number state url } } } }
+        ' -f q="$q" 2>&1)" || { note "dedup search failed: $(printf '%s' "$search_raw" | tail -1)"; search_raw=""; }
+        if [ -n "$search_raw" ]; then
+          MATCH_NUM="$(printf '%s' "$search_raw" | jq -r '.data.search.nodes[0].number // empty' 2>/dev/null)"
+          MATCH_STATE="$(printf '%s' "$search_raw" | jq -r '.data.search.nodes[0].state // empty' 2>/dev/null)"
+        fi
+      fi
+
+      # ---- 2. create / update / reopen ----
+      ACTION=""
+      ISSUE_NUM=""
+      ISSUE_URL=""
+      if [ -n "$MATCH_NUM" ] && [ "$MATCH_STATE" = "OPEN" ]; then
+        ACTION="updated"
+        ISSUE_NUM="$MATCH_NUM"
+        gh issue comment "$ISSUE_NUM" --repo "$REPO" \
+          --body "Re-detected (same fingerprint) at $(date -u +%FT%TZ)." >/dev/null 2>&1 \
+          || note "re-occurrence comment failed"
+      elif [ -n "$MATCH_NUM" ] && [ "$MATCH_STATE" = "CLOSED" ]; then
+        ACTION="reopened"
+        ISSUE_NUM="$MATCH_NUM"
+        gh issue reopen "$ISSUE_NUM" --repo "$REPO" \
+          --comment "Reopened — recurred (same fingerprint) at $(date -u +%FT%TZ)." >/dev/null 2>&1 \
+          || note "reopen failed"
+      else
+        ACTION="created"
+        create_args=(issue create --repo "$REPO" --title "$TITLE" --body "$BODY")
+        [ -n "${LABELS// /}" ] && create_args+=(--label "$LABELS")
+        create_out="$(gh "${create_args[@]}" 2>&1)" || fail "gh issue create failed: $(printf '%s' "$create_out" | tail -1)"
+        ISSUE_URL="$(printf '%s' "$create_out" | tail -1)"
+        ISSUE_NUM="$(printf '%s' "$ISSUE_URL" | grep -oE '[0-9]+$' || true)"
+        [ -z "$ISSUE_NUM" ] && fail "issue created but number not parseable from: $ISSUE_URL"
+      fi
+
+      # ISSUE_URL may still be empty on the update/reopen branches — fetch
+      # canonical url + the GraphQL node id (needed for addProjectV2ItemById)
+      # in one call.
+      view_raw="$(gh issue view "$ISSUE_NUM" --repo "$REPO" --json id,url 2>&1)" \
+        || fail "gh issue view failed: $(printf '%s' "$view_raw" | tail -1)"
+      CONTENT_ID="$(printf '%s' "$view_raw" | jq -r '.id // empty')"
+      ISSUE_URL="$(printf '%s' "$view_raw" | jq -r '.url // empty')"
+      [ -z "$CONTENT_ID" ] && fail "could not resolve issue node id for #$ISSUE_NUM"
+
+      # ---- 3. add to project + set fields ----
+      add_raw="$(gh api graphql -f query='
+        mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p, contentId:$c}){ item{ id } } }
+      ' -f p="$PROJECT_ID" -f c="$CONTENT_ID" 2>&1)" \
+        || { note "addProjectV2ItemById failed: $(printf '%s' "$add_raw" | tail -1)"; add_raw=""; }
+      ITEM_ID="$(printf '%s' "$add_raw" | jq -r '.data.addProjectV2ItemById.item.id // empty' 2>/dev/null)"
+
+      set_field() {
+        # $1=field label (Status/Priority/Size) $2=option name
+        local field="$1" optname="$2" fid oid mres
+        [ -z "${optname// /}" ] && return 0
+        [ -z "$ITEM_ID" ] && { note "$field skipped: no project item id"; return 0; }
+        fid="$(printf '%s' "$RESOLVED" | jq -r --arg f "$field" '.fields[$f].fieldId // empty')"
+        oid="$(printf '%s' "$RESOLVED" | jq -r --arg f "$field" --arg o "$optname" '.fields[$f].options[$o] // empty')"
+        if [ -z "$fid" ] || [ -z "$oid" ]; then
+          note "$field option '$optname' not resolvable from resolved project fields"
+          return 0
+        fi
+        mres="$(gh api graphql -f query='
+          mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){
+            updateProjectV2ItemFieldValue(input:{projectId:$p, itemId:$i, fieldId:$f, value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }
+        ' -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$fid" -f o="$oid" 2>&1)" \
+          || note "$field update failed: $(printf '%s' "$mres" | tail -1)"
+      }
+      set_field "Status"   "$STATUS_NAME"
+      set_field "Priority" "$PRIORITY_NAME"
+      set_field "Size"     "$SIZE_NAME"
+
+      jq -n --argjson number "${ISSUE_NUM:-null}" --arg url "$ISSUE_URL" \
+            --arg itemId "${ITEM_ID:-}" --arg action "$ACTION" --arg error "$NOTES" \
+        '{ number: $number, url: $url,
+           itemId: (if ($itemId | length) > 0 then $itemId else null end),
+           action: $action,
+           error: (if ($error | length) > 0 then $error else null end) }'

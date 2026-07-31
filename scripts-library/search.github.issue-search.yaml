@@ -1,0 +1,50 @@
+# scripts-library/search.github.issue-search.yaml
+#
+# Dedup lookup for the ticket-lifecycle flow family: does an issue already
+# carry this fingerprint marker (`<!-- qa-fingerprint: <hash> -->` in its
+# body)? Read-only GitHub code/issue search — the poka-yoke's detection
+# half (docs/design-ticket-lifecycle-workflows.md "Dedup fingerprint").
+# `search(type:ISSUE)` covers OPEN and CLOSED issues in one query, so a
+# recurred defect on a closed ticket is found too (the caller — issue-upsert
+# — decides create/update/reopen from `.match.state`).
+#
+# Verb `search`: matches the closed-twelve script verb for this exact
+# shape (GitHub's own API is literally named `search`).
+#
+# Args (POSITIONAL, JSON envelope, exit 0 always):
+#   $1 / REPO_OWNER  — repo owner login (required)
+#   $2 / REPO_NAME   — repo name (required)
+#   $3 / FINGERPRINT — 64-hex sha256 fingerprint to look up (required)
+# Emits: {match: {number,state,url} | null, error} read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  search.github.issue-search:
+    verb: search
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      OWNER="${1:-${REPO_OWNER:-}}"
+      NAME="${2:-${REPO_NAME:-}}"
+      FP="${3:-${FINGERPRINT:-}}"
+
+      fail() { jq -n --arg e "$1" '{match: null, error: $e}'; exit 0; }
+
+      [ -z "${OWNER// /}" ] && fail "empty repo owner"
+      [ -z "${NAME// /}" ]  && fail "empty repo name"
+      [ -z "${FP// /}" ]    && fail "empty fingerprint"
+      command -v gh >/dev/null 2>&1 || fail "gh CLI not on PATH"
+      command -v jq >/dev/null 2>&1 || fail "jq not on PATH"
+
+      q="repo:${OWNER}/${NAME} in:body \"qa-fingerprint: ${FP}\""
+      raw="$(gh api graphql -f query='
+        query($q:String!){ search(query:$q, type:ISSUE, first:1){ nodes{ ... on Issue{ number state url } } } }
+      ' -f q="$q" 2>&1)" \
+        || fail "gh api graphql failed: $(printf '%s' "$raw" | tail -1)"
+
+      printf '%s' "$raw" | jq -e '.data.search != null' >/dev/null 2>&1 \
+        || fail "malformed search response"
+
+      printf '%s' "$raw" | jq '{ match: (.data.search.nodes[0] // null), error: null }'
