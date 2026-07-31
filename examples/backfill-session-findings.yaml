@@ -1,0 +1,142 @@
+# examples/backfill-session-findings.yaml
+#
+# Gateway config that DRIVES cognitive/flow.findings-to-tickets to back-fill
+# a small slice of PRIOR-SESSION findings — the plan Task 5 back-fill
+# vehicle. Source: the target repo's own hands-on QA record,
+# `Docs/superpowers/specs/2026-07-31-deep-qa-findings.md` ("Sales CRM
+# cluster" BLOCKERS B1/B3/B4), converted into the {finding, enrichment}
+# shape flow.findings-to-tickets/cap.run.ticket-upsert consume — real
+# defects, real Expected-behavior citations, not placeholder data.
+#
+# Unlike qa-promote-run.yaml / qa-explore-run.yaml, this run needs NO
+# `agents:`/`models_yaml` binding and NO browser pool: flow.findings-to-
+# tickets and every cap it calls (cap.run.ticket-upsert) are fully
+# deterministic `kind: script` chains — no agent state anywhere in this
+# flow's graph. `_writableRepos` still needs at least one entry (the
+# engine will not start a run without one) even though none of these
+# scripts touch the local filesystem — every mutation here is `gh api
+# graphql` against the operator's own GitHub auth.
+#
+# BACKFILL DATA-HONESTY NOTE: these three findings were captured by a
+# human-driven, Playwright-assisted hands-on QA pass (one deterministic
+# repro each), not by the automated flow.qa.explore probe-replay gate —
+# so `reproduction.attempts/successfulAttempts` (2/2) and `probe_ref`
+# below characterize that manual verification, not a literal replayable
+# Playwright spec on disk. cap.diagnose.finding's own inputSchema
+# (`successfulAttempts >= 2`) is NOT re-validated on this path — that gate
+# only fires for LIVE agent submissions through cap.diagnose.finding
+# itself; a back-fill converts already-adjudicated historical findings
+# directly into the Finding shape and skips that cap entirely (by design
+# — see docs/design-ticket-lifecycle-workflows.md "Components").
+# `probe_ref`/`expectedSource.reference` cite the doc section that IS the
+# reproduction record for these three.
+#
+# Validate:
+#   praxec check --config examples/backfill-session-findings.yaml
+#
+# Drive (no human gates, no model binding required):
+#   praxec orchestrate --config examples/backfill-session-findings.yaml \
+#     --definition cognitive/flow.findings-to-tickets \
+#     --input '{
+#       "project": {"owner": "outboundlabs", "number": 3},
+#       "repo": {"owner": "outboundlabs", "name": "autopilot-beta"},
+#       "findings": [
+#         {
+#           "finding": {
+#             "id": "deep-qa-2026-07-31-B1",
+#             "title": "contact-lists — Create List always 409 (entitlement limit:null treated as exceeded cap)",
+#             "severity": "critical",
+#             "observed": "POST /crm-lists with a valid name returns 409 RequiresContactSales even at 0 lists on a funded org; the activeLists entitlement limit:null is treated as an exceeded cap.",
+#             "expected": "POST /crm-lists with a valid name succeeds (201) when no active-list cap is configured — limit:null means unlimited, not zero.",
+#             "expectedSource": {"kind": "spec", "reference": "Docs/superpowers/specs/2026-07-31-deep-qa-findings.md#b1-contact-lists-create-list-always-409"},
+#             "reproduction": {"attempts": 2, "successfulAttempts": 2, "deterministic": true},
+#             "probe_ref": "Docs/superpowers/specs/2026-07-31-deep-qa-findings.md#sales-crm-cluster-blockers",
+#             "evidence": {"traceRef": "", "screenshotRef": "", "consoleErrors": [], "failedRequests": ["POST /crm-lists -> 409 RequiresContactSales"]}
+#           },
+#           "enrichment": {
+#             "area": "Sales CRM / Contact Lists",
+#             "persona": "Sales",
+#             "route": "/crm/contact-lists",
+#             "assertionSketch": "as Sales, on a funded org with 0 active contact lists and no active-list cap configured, POST /crm-lists with a valid name -> expect 201 Created, not 409 RequiresContactSales",
+#             "affectedFiles": ["LogicTier/Calculate/Authorization — activeLists entitlement limit:null handling"],
+#             "layer": "backend",
+#             "suggestedFix": "Treat entitlement limit:null as unlimited (no cap), not as an already-exceeded cap, in the activeLists entitlement check.",
+#             "size": "S"
+#           }
+#         },
+#         {
+#           "finding": {
+#             "id": "deep-qa-2026-07-31-B3",
+#             "title": "opportunities — Edit/Delete broken: row actions send the positional row index as opportunityId, not the GUID",
+#             "severity": "critical",
+#             "observed": "Row actions on the Opportunities list send the positional ROW INDEX (e.g. \"1\") as opportunityId instead of the entity real GUID, so DELETE /crm-opportunities/1 400s and crashes the list. The Edit panel also shows literal \"NaN\" in the Value/Probability fields.",
+#             "expected": "Row actions bind the opportunity real id (GUID); numeric inputs (Value/Probability) format correctly from the loaded record.",
+#             "expectedSource": {"kind": "spec", "reference": "Docs/superpowers/specs/2026-07-31-deep-qa-findings.md#b3-opportunities-editdelete-broken"},
+#             "reproduction": {"attempts": 2, "successfulAttempts": 2, "deterministic": true},
+#             "probe_ref": "Docs/superpowers/specs/2026-07-31-deep-qa-findings.md#sales-crm-cluster-blockers",
+#             "evidence": {"traceRef": "", "screenshotRef": "", "consoleErrors": ["NaN rendered in Value/Probability fields"], "failedRequests": ["DELETE /crm-opportunities/1 -> 400"]}
+#           },
+#           "enrichment": {
+#             "area": "Sales CRM / Opportunities",
+#             "persona": "Sales",
+#             "route": "/crm/opportunities",
+#             "assertionSketch": "as Sales, open the Opportunities list and click Edit/Delete on a row -> expect the request to use the opportunity real GUID id (never the row positional index), and the Edit panel Value/Probability fields to render the record real numeric values (never NaN)",
+#             "affectedFiles": ["PresentationTier/ui.autopilot/src/_components/tools/ManageOpportunities — row-action id binding + numeric field formatting"],
+#             "layer": "fe",
+#             "suggestedFix": "Bind row actions to the opportunity id field (not the array index); format Value/Probability from the loaded record before rendering into the edit form.",
+#             "size": "S"
+#           }
+#         },
+#         {
+#           "finding": {
+#             "id": "deep-qa-2026-07-31-B4",
+#             "title": "manage-custom-fields — Create broken for all 3 entity types: valid GUID rejected as malformed",
+#             "severity": "critical",
+#             "observed": "Creating a custom field schema for any of the 3 entity types fails with \"The input string '<valid-guid>' was not in a correct format\" — a syntactically valid GUID is rejected. The tool is 100% non-functional for creation.",
+#             "expected": "Creating a schema with a valid name and field persists (201) and appears in the list.",
+#             "expectedSource": {"kind": "spec", "reference": "Docs/superpowers/specs/2026-07-31-deep-qa-findings.md#b4-manage-custom-fields-create-100-broken"},
+#             "reproduction": {"attempts": 2, "successfulAttempts": 2, "deterministic": true},
+#             "probe_ref": "Docs/superpowers/specs/2026-07-31-deep-qa-findings.md#sales-crm-cluster-blockers",
+#             "evidence": {"traceRef": "", "screenshotRef": "", "consoleErrors": ["FormatException: The input string '<valid-guid>' was not in a correct format"], "failedRequests": ["POST manage-custom-fields create -> GUID parse error"]}
+#           },
+#           "enrichment": {
+#             "area": "Sales CRM / Manage Custom Fields",
+#             "persona": "Sales",
+#             "route": "/crm/manage-custom-fields",
+#             "assertionSketch": "as Sales, create a custom field schema with a valid name and field on any of the 3 entity types -> expect 201 Created and the schema appears in the list, never a GUID-format exception on a syntactically valid GUID",
+#             "affectedFiles": ["LogicTier/Orchestrate — custom field schema create handler, GUID parsing"],
+#             "layer": "backend",
+#             "suggestedFix": "Locate the GUID parse call in the create-schema path and fix the format/parse mismatch (likely Guid.Parse vs Guid.TryParse, or a wrong string representation being passed).",
+#             "size": "M"
+#           }
+#         }
+#       ]
+#     }'
+#
+# Re-running this SAME input is the dedup proof (plan Task 5 Step 3): the
+# qa-fingerprint computed from repo|area|route|normalized(title) is
+# identical across runs, so a second drive returns `action: updated` for
+# all three (no duplicate issues), not `action: created`.
+
+version: "1.0.0"
+
+praxec:
+  # No filesystem work happens in this run (every mutation is `gh api
+  # graphql`) but the engine still requires at least one writable repo to
+  # start a run.
+  _writableRepos:
+    - root: "."
+      push: false
+
+audit:
+  sink: stderr
+
+store:
+  kind: sqlite
+  path: /home/mc/.local/share/praxec/backfill-session-findings.db
+
+# The cognitive-architectures resource repo: flow.findings-to-tickets +
+# cap.run.ticket-upsert + the inspect.github.*/inspect.ticket.*/
+# run.github.* scripts it composes.
+repos:
+  - path: ..
