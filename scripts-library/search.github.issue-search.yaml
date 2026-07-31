@@ -38,13 +38,26 @@ scripts:
       command -v gh >/dev/null 2>&1 || fail "gh CLI not on PATH"
       command -v jq >/dev/null 2>&1 || fail "jq not on PATH"
 
-      q="repo:${OWNER}/${NAME} in:body \"qa-fingerprint: ${FP}\""
+      # Dedup via a LABEL-FILTERED issue list + fingerprint grep, NOT the
+      # search() API. search() is index-lagged: an issue created seconds ago
+      # is not yet findable, so a rapid re-run (or a retried pass) duplicates.
+      # Every sweep ticket carries the `qa-ticket` label, so listing those
+      # issues (open + closed) and grepping their bodies is immediately
+      # consistent. Bounded at first:100 (the QA backlog); paginate if it grows.
       raw="$(gh api graphql -f query='
-        query($q:String!){ search(query:$q, type:ISSUE, first:1){ nodes{ ... on Issue{ number state url } } } }
-      ' -f q="$q" 2>&1)" \
+        query($o:String!,$n:String!){ repository(owner:$o, name:$n){
+          issues(first:100, labels:["qa-ticket"], states:[OPEN,CLOSED],
+                 orderBy:{field:CREATED_AT, direction:DESC}){
+            nodes{ number state url body } } } }
+      ' -f o="$OWNER" -f n="$NAME" 2>&1)" \
         || fail "gh api graphql failed: $(printf '%s' "$raw" | tail -1)"
 
-      printf '%s' "$raw" | jq -e '.data.search != null' >/dev/null 2>&1 \
-        || fail "malformed search response"
+      printf '%s' "$raw" | jq -e '.data.repository.issues != null' >/dev/null 2>&1 \
+        || fail "malformed issues response"
 
-      printf '%s' "$raw" | jq '{ match: (.data.search.nodes[0] // null), error: null }'
+      printf '%s' "$raw" | jq --arg fp "$FP" '{
+        match: ([.data.repository.issues.nodes[]
+                 | select(.body != null and (.body | contains("qa-fingerprint: " + $fp)))
+                 | {number, state, url}][0] // null),
+        error: null
+      }'

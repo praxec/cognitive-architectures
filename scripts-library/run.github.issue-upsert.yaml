@@ -93,13 +93,21 @@ scripts:
       MATCH_NUM=""
       MATCH_STATE=""
       if [ -n "$FP" ]; then
-        q="repo:${REPO} in:body \"qa-fingerprint: ${FP}\""
+        # Label-filtered list + fingerprint grep (immediately consistent);
+        # search() is index-lagged and duplicates on rapid re-runs. Matches
+        # search.github.issue-search exactly.
         search_raw="$(gh api graphql -f query='
-          query($q:String!){ search(query:$q, type:ISSUE, first:1){ nodes{ ... on Issue{ number state url } } } }
-        ' -f q="$q" 2>&1)" || { note "dedup search failed: $(printf '%s' "$search_raw" | tail -1)"; search_raw=""; }
+          query($o:String!,$n:String!){ repository(owner:$o, name:$n){
+            issues(first:100, labels:["qa-ticket"], states:[OPEN,CLOSED],
+                   orderBy:{field:CREATED_AT, direction:DESC}){
+              nodes{ number state url body } } } }
+        ' -f o="$OWNER" -f n="$NAME" 2>&1)" || { note "dedup search failed: $(printf '%s' "$search_raw" | tail -1)"; search_raw=""; }
         if [ -n "$search_raw" ]; then
-          MATCH_NUM="$(printf '%s' "$search_raw" | jq -r '.data.search.nodes[0].number // empty' 2>/dev/null)"
-          MATCH_STATE="$(printf '%s' "$search_raw" | jq -r '.data.search.nodes[0].state // empty' 2>/dev/null)"
+          _m="$(printf '%s' "$search_raw" | jq -c --arg fp "$FP" '[.data.repository.issues.nodes[] | select(.body != null and (.body | contains("qa-fingerprint: " + $fp)))][0] // empty' 2>/dev/null)"
+          if [ -n "$_m" ]; then
+            MATCH_NUM="$(printf '%s' "$_m" | jq -r '.number // empty')"
+            MATCH_STATE="$(printf '%s' "$_m" | jq -r '.state // empty')"
+          fi
         fi
       fi
 
@@ -116,11 +124,31 @@ scripts:
       elif [ -n "$MATCH_NUM" ] && [ "$MATCH_STATE" = "CLOSED" ]; then
         ACTION="reopened"
         ISSUE_NUM="$MATCH_NUM"
-        gh issue reopen "$ISSUE_NUM" --repo "$REPO" \
-          --comment "Reopened — recurred (same fingerprint) at $(date -u +%FT%TZ)." >/dev/null 2>&1 \
+        # REST PATCH (older gh's `gh issue reopen` has no --comment and may be
+        # absent); comment separately via `gh issue comment` (present since 2.x).
+        gh api -X PATCH "repos/$REPO/issues/$ISSUE_NUM" -f state=open >/dev/null 2>&1 \
           || note "reopen failed"
+        gh issue comment "$ISSUE_NUM" --repo "$REPO" \
+          --body "Reopened — recurred (same fingerprint) at $(date -u +%FT%TZ)." >/dev/null 2>&1 \
+          || note "reopen comment failed"
       else
         ACTION="created"
+        # Ensure every label exists before create — the sweep derives area-<slug>
+        # labels per finding, so they cannot be pre-provisioned; `gh label create`
+        # is idempotent-enough here (a no-op error when the label already exists is
+        # swallowed). Without this, `gh issue create --label` hard-fails on the first
+        # unknown label and no issue is filed.
+        if [ -n "${LABELS// /}" ]; then
+          IFS=',' read -ra _lbls <<< "$LABELS"
+          for _l in "${_lbls[@]}"; do
+            _l="$(printf '%s' "$_l" | sed 's/^ *//;s/ *$//')"
+            [ -z "$_l" ] && continue
+            # REST API (not `gh label`, which is absent on older gh, e.g. 2.4.0).
+            # Idempotent: a 422 "already_exists" is swallowed.
+            gh api -X POST "repos/$REPO/labels" -f name="$_l" -f color=BFD4F2 \
+              -f description="auto-created by ticket-lifecycle sweep" >/dev/null 2>&1 || true
+          done
+        fi
         create_args=(issue create --repo "$REPO" --title "$TITLE" --body "$BODY")
         [ -n "${LABELS// /}" ] && create_args+=(--label "$LABELS")
         create_out="$(gh "${create_args[@]}" 2>&1)" || fail "gh issue create failed: $(printf '%s' "$create_out" | tail -1)"

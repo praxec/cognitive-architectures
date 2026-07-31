@@ -63,7 +63,12 @@ scripts:
       NOTES=""
       note() { NOTES="${NOTES}${NOTES:+; }$1"; }
 
-      close_out="$(gh issue close "$NUM" --repo "$REPO" --comment "$COMMENT" 2>&1)" \
+      # Post the evidence comment FIRST (the paper trail must survive even if
+      # the close mutation is retried), then close via REST PATCH — older gh's
+      # `gh issue close` has no `--comment` flag (e.g. 2.4.0) and rejects it.
+      gh issue comment "$NUM" --repo "$REPO" --body "$COMMENT" >/dev/null 2>&1 \
+        || note "evidence comment failed"
+      close_out="$(gh api -X PATCH "repos/$REPO/issues/$NUM" -f state=closed 2>&1)" \
         || fail "gh issue close failed: $(printf '%s' "$close_out" | tail -1)"
 
       ITEM_ID=""
