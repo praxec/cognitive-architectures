@@ -1,0 +1,134 @@
+# capabilities/cap.diagnose.ticket-disposition.yaml
+#
+# THE evidence-gate cap of flow.tickets-triage-cleanup
+# (docs/design-ticket-lifecycle-workflows.md "Evidence-gated close"):
+# given one project item (inspect.github.project-enumerate shape), decide
+# keep | close_fixed | close_stale | needs_human. Cognitive cap (verb
+# `diagnose`, V6: noop + actor: agent), SENIOR tier (`affinity: review` —
+# adjudication, producer != evaluator) — mirrors cap.diagnose.finding
+# exactly.
+#
+# THE POKA-YOKE (mirrors cap.diagnose.finding's mandatory closed-enum
+# expectedSource): `close_fixed` is UNREPRESENTABLE without a citable
+# `evidence` object — `kind` in the closed enum {merged_pr, code_ref} and
+# a non-empty `reference`. "I think this is fixed" has no legal
+# close_fixed shape; it MUST route to `needs_human` instead. Every other
+# disposition (keep/close_stale/needs_human) allows `evidence: null` — the
+# schema's `if/then` makes the requirement conditional on the disposition,
+# not blanket-required (a stale/kept item has no "proof" to cite).
+#
+# Tools: `file:{{ $.run.repo_root }}` (confirm a cited file:line exists)
+# PLUS read-only `gh` (confirm a cited PR number is actually merged) — the
+# agent must be ABLE to verify before it cites, not just assert.
+
+workflows:
+  cap.diagnose.ticket-disposition:
+    verb: diagnose
+    lifecycle: experimental
+    description: >
+      Adjudicate one Projects-v2 item into keep | close_fixed |
+      close_stale | needs_human. close_fixed is schema-gated: it requires
+      a citable evidence object (a merged PR number or a file:line
+      reference) the agent has actually verified with its file/gh tools;
+      anything it cannot prove routes to needs_human, never a guessed
+      close.
+    snippet:
+      inputs:
+        # inspect.github.project-enumerate item shape: {number, title,
+        # state, url, repo, status, ageDays, linkedPRs}.
+        item: { type: object, required: true }
+      outputs:
+        disposition: { type: string }
+        evidence:    { type: object }
+        rationale:   { type: string }
+        # Echoes the input item back out alongside the verdict. Purely
+        # mechanical (not part of the agent's submission — see `output:`
+        # below, sourced from $.workflow.input, not $.arguments): the
+        # caller (flow.tickets-triage-cleanup) fans this cap out in
+        # PARALLEL over every board item and needs each branch's result
+        # self-contained ({item, disposition, evidence, rationale}) to zip
+        # verdicts back to their source items without a second lookup.
+        item:        { type: object }
+    # No `skills:` entry: none of the shipped skills fit ticket-disposition
+    # verification (diagnose.browser.finding is browser-observation
+    # adjudication; diagnose.codebase.search assumes a codebase_graph
+    # toolset this cap doesn't use). Several existing diagnose caps
+    # (coverage-gaps, primitive-contracts, browser-evidence, browser-probe)
+    # also ship without one — `skills:` is optional per SPEC.
+    initialState: disposing
+    states:
+      disposing:
+        # SENIOR reviewer tier: closing a ticket is judgment, not production.
+        affinity: review
+        goal: >
+          Decide the disposition of ONE board item ($.workflow.input.item:
+          number, title, state, repo, status, ageDays, linkedPRs). Read the
+          issue and its linked PRs with your tools before deciding —
+          never from the title alone.
+
+          - `close_fixed`: the defect is verifiably fixed. You MUST cite
+            evidence you have actually confirmed: either a merged PR
+            (`linkedPRs` entry you verified is merged via `gh pr view`, or
+            any other PR you can confirm addresses this issue and is
+            merged) or a `code_ref` (a file:line in the current repo,
+            read with your file tools, that demonstrably implements the
+            fix). If you cannot verify one of these, do NOT choose
+            close_fixed — choose needs_human instead.
+          - `close_stale`: the item no longer applies (duplicate,
+            won't-fix, superseded) — state why in `rationale`; no
+            evidence object required.
+          - `keep`: still open, still relevant, no action this pass.
+          - `needs_human`: you cannot confidently verify a fix or a
+            stale/duplicate classification. This is the SAFE default when
+            unsure — never force close_fixed to make the queue shorter.
+
+          Submit `disposition`, `evidence` (required shape only for
+          close_fixed — omit or null otherwise), and `rationale`.
+        # Read-only verification: file tools over the target repo (confirm
+        # a cited code_ref exists) plus the operator's own `gh` auth
+        # (confirm a cited PR is actually merged). No write tools — this
+        # state adjudicates, it does not close anything itself (the flow's
+        # `applying` state does that deterministically, gated on this
+        # output).
+        tools: ["file:{{ $.run.repo_root }}", "gh"]
+        transitions:
+          submit_disposition:
+            target: done
+            actor: agent
+            inputSchema:
+              type: object
+              required: [disposition, rationale]
+              properties:
+                disposition:
+                  type: string
+                  enum: [keep, close_fixed, close_stale, needs_human]
+                rationale: { type: string, minLength: 1 }
+                evidence:
+                  type: [object, "null"]
+                  default: null
+                  properties:
+                    kind:      { type: string, enum: [merged_pr, code_ref] }
+                    reference: { type: string, minLength: 1 }
+                  required: [kind, reference]
+                  additionalProperties: false
+              # The poka-yoke: close_fixed without a well-formed evidence
+              # object is not a representable submission.
+              if:
+                properties: { disposition: { const: close_fixed } }
+              then:
+                required: [disposition, rationale, evidence]
+                properties:
+                  evidence:
+                    type: object
+                    properties:
+                      kind:      { type: string, enum: [merged_pr, code_ref] }
+                      reference: { type: string, minLength: 1 }
+                    required: [kind, reference]
+                    additionalProperties: false
+            executor: { kind: noop }
+            output:
+              disposition: "$.arguments.disposition"
+              evidence:    "$.arguments.evidence"
+              rationale:   "$.arguments.rationale"
+              item:        "$.workflow.input.item"
+      done: { terminal: true }

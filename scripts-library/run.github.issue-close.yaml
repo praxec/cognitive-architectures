@@ -1,0 +1,108 @@
+# scripts-library/run.github.issue-close.yaml
+#
+# Evidence-gated close for flow.tickets-triage-cleanup: closes the issue
+# with a comment (the disposition cap's cited evidence — merged PR or
+# file:line) and sets the board's Status field (default target "Killed").
+# This script does NOT decide whether to close — cap.diagnose.ticket-
+# disposition already made that call, gated by its inputSchema so
+# `close_fixed` is unrepresentable without a citable `evidence` object;
+# this script is the deterministic APPLY step. "Cleared" means closed on
+# the board (design doc): closing the issue without also setting Status is
+# an incomplete clear, so both happen in one script (never leaves the item
+# issue-closed but still Hunting/Found on the board).
+#
+# `addProjectV2ItemById` is idempotent (GitHub returns the existing item
+# for content already on the project) — reused here instead of requiring
+# the caller to thread a separate project-item id, exactly like
+# run.github.issue-upsert.
+#
+# Verb `run`: a mutating action, matching run.github.issue-upsert /
+# run.git.push-pr — no `coordinate` verb exists in the scripts-library's
+# closed twelve (SPEC §22.3).
+#
+# Args (POSITIONAL, JSON envelope, exit 0 always):
+#   $1 / REPO_OWNER    — repo owner login (required)
+#   $2 / REPO_NAME     — repo name (required)
+#   $3 / NUMBER        — issue number (required)
+#   $4 / COMMENT       — the evidence comment posted on close (required —
+#                        the evidence-gate poka-yoke's paper trail)
+#   $5 / RESOLVED_JSON — {projectId, fields:{...}} from
+#                        inspect.github.resolve-project (required)
+#   $6 / STATUS_NAME   — Status option name to set, e.g. "Killed"
+#                        ("" = close the issue but leave Status untouched)
+# Emits: {closed: bool, itemId: string|null, error: string|null}
+# read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  run.github.issue-close:
+    verb: run
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      OWNER="${1:-${REPO_OWNER:-}}"
+      NAME="${2:-${REPO_NAME:-}}"
+      NUM="${3:-${NUMBER:-}}"
+      COMMENT="${4:-${COMMENT:-}}"
+      RESOLVED="${5:-}"
+      [ -z "$RESOLVED" ] && RESOLVED='{}'
+      STATUS_NAME="${6:-${STATUS_NAME:-}}"
+
+      fail() { jq -n --arg e "${1:-unknown error}" '{closed: false, itemId: null, error: $e}'; exit 0; }
+
+      [ -z "${OWNER// /}" ] && fail "empty repo owner"
+      [ -z "${NAME// /}" ]  && fail "empty repo name"
+      [ -z "${NUM// /}" ]   && fail "empty issue number"
+      [ -z "${COMMENT// /}" ] && fail "empty evidence comment — refuse to close without a paper trail"
+      command -v gh >/dev/null 2>&1 || fail "gh CLI not on PATH"
+      command -v jq >/dev/null 2>&1 || fail "jq not on PATH"
+
+      REPO="$OWNER/$NAME"
+      NOTES=""
+      note() { NOTES="${NOTES}${NOTES:+; }$1"; }
+
+      close_out="$(gh issue close "$NUM" --repo "$REPO" --comment "$COMMENT" 2>&1)" \
+        || fail "gh issue close failed: $(printf '%s' "$close_out" | tail -1)"
+
+      ITEM_ID=""
+      PROJECT_ID="$(printf '%s' "$RESOLVED" | jq -r '.projectId // empty')"
+      if [ -n "$PROJECT_ID" ]; then
+        view_raw="$(gh issue view "$NUM" --repo "$REPO" --json id 2>&1)"
+        CONTENT_ID="$(printf '%s' "$view_raw" | jq -r '.id // empty' 2>/dev/null)"
+        if [ -n "$CONTENT_ID" ]; then
+          add_raw="$(gh api graphql -f query='
+            mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p, contentId:$c}){ item{ id } } }
+          ' -f p="$PROJECT_ID" -f c="$CONTENT_ID" 2>&1)" \
+            || note "addProjectV2ItemById failed: $(printf '%s' "$add_raw" | tail -1)"
+          ITEM_ID="$(printf '%s' "$add_raw" | jq -r '.data.addProjectV2ItemById.item.id // empty' 2>/dev/null)"
+        else
+          note "could not resolve issue node id for #$NUM"
+        fi
+      else
+        note "resolved project object missing projectId — Status not set"
+      fi
+
+      if [ -n "${STATUS_NAME// /}" ]; then
+        if [ -n "$ITEM_ID" ]; then
+          fid="$(printf '%s' "$RESOLVED" | jq -r '.fields.Status.fieldId // empty')"
+          oid="$(printf '%s' "$RESOLVED" | jq -r --arg o "$STATUS_NAME" '.fields.Status.options[$o] // empty')"
+          if [ -n "$fid" ] && [ -n "$oid" ]; then
+            set_raw="$(gh api graphql -f query='
+              mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){
+                updateProjectV2ItemFieldValue(input:{projectId:$p, itemId:$i, fieldId:$f, value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }
+            ' -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$fid" -f o="$oid" 2>&1)" \
+              || note "Status update failed: $(printf '%s' "$set_raw" | tail -1)"
+          else
+            note "Status option '$STATUS_NAME' not resolvable from resolved project fields"
+          fi
+        else
+          note "Status not set: no project item id"
+        fi
+      fi
+
+      jq -n --arg itemId "$ITEM_ID" --arg error "$NOTES" \
+        '{ closed: true,
+           itemId: (if ($itemId | length) > 0 then $itemId else null end),
+           error: (if ($error | length) > 0 then $error else null end) }'

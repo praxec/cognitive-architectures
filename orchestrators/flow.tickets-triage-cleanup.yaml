@@ -1,0 +1,183 @@
+# orchestrators/flow.tickets-triage-cleanup.yaml
+#
+# The CLEANUP / VERIFY pass of the ticket-lifecycle flow family
+# (docs/design-ticket-lifecycle-workflows.md "Operating loop"): sweep
+# every item on the board, adjudicate each (cap.diagnose.ticket-
+# disposition, in parallel), and deterministically close ONLY the
+# evidence-backed close_fixed items — never a guessed close. "Cleared"
+# means closed on the board: closing applies BOTH the issue-close AND the
+# project Status field (design doc "Cleared = closed on the board") — a
+# merged-but-still-open ticket is not a clean disposition, it is left in
+# `closable` for a human to notice if the close mutation itself fails
+# (surfaced in `close_results[].error`, never swallowed).
+#
+# `dry_run` (default true) is the STRUCTURAL safety valve for this task's
+# no-GitHub-writes authoring constraint AND for normal operator use: with
+# dry_run:true the flow enumerates, disposes, and partitions exactly as it
+# would live, but the `applying` fan-out never runs — the classification
+# (closable/needs_human/kept/stale) is fully visible without a single
+# mutation. Flip to false to actually close.
+#
+# State-machine shape mirrors flow.triage-issue.yaml (classify -> route ->
+# gate -> apply). Fan-out shape (`kind: parallel`, dynamic `for_each`,
+# `kind: workflow` branches, `join: all`, `on_branch_failure: continue` —
+# one bad item's adjudication or close must not sink the whole sweep) is
+# the SPEC §24 pattern demonstrated in workflows/parallel-review.yaml.
+
+workflows:
+  flow.tickets-triage-cleanup:
+    description: |
+      Enumerate every item on a Projects-v2 board, adjudicate each one's
+      disposition in parallel (keep/close_fixed/close_stale/needs_human,
+      evidence-gated), and deterministically close + set Status=Killed
+      only for evidence-backed close_fixed items. dry_run:true (default)
+      classifies without mutating; dry_run:false applies the closes.
+    inputs:
+      # ProjectV2 target — never hard-coded downstream.
+      project: { type: object, default: { owner: outboundlabs, number: 3 } }
+      # Issue repo target for the close mutation.
+      repo:    { type: object, default: { owner: outboundlabs, name: autopilot-beta } }
+      # Status option name applied to every item this pass closes.
+      closeStatusName: { type: string, default: "Killed" }
+      # Safety valve: classify only (no mutation) until explicitly false.
+      dry_run: { type: boolean, default: true }
+    initialState: enumerating
+    states:
+
+      enumerating:
+        goal: List every item currently on the board.
+        transitions:
+          enumerate:
+            target: resolving
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.github.project-enumerate
+              args:
+                - "$.workflow.input.project.owner"
+                - "$.workflow.input.project.number"
+            output:
+              items:           "$.output.json.items"
+              enumerate_error: "$.output.json.error"
+
+      resolving:
+        goal: Resolve the board's field/option ids (needed to set Status on close).
+        transitions:
+          resolve:
+            target: disposing
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.github.resolve-project
+              args:
+                - "$.workflow.input.project.owner"
+                - "$.workflow.input.project.number"
+            output:
+              resolved:       "$.output.json"
+              resolve_error:  "$.output.json.error"
+
+      # Fan out ONE cap.diagnose.ticket-disposition per item, in parallel.
+      # on_branch_failure: continue — one item's adjudication failing must
+      # not abort the whole sweep; it simply won't appear in `dispositions`
+      # (visible as a shortfall against $.context.items' count).
+      disposing:
+        goal: Adjudicate every item's disposition in parallel.
+        transitions:
+          dispose:
+            target: partitioning
+            actor: deterministic
+            executor:
+              kind: parallel
+              branches:
+                for_each: "$.context.items"
+                do:
+                  kind: workflow
+                  definitionId: cap.diagnose.ticket-disposition
+                  input:
+                    item: "$.branch.value"
+              join: all
+              max_concurrency: 4
+              on_branch_failure: continue
+              total_timeout_ms: 600000
+            output:
+              # Each branch's output is the FULL {item, disposition,
+              # evidence, rationale} record (the cap echoes its own input
+              # item back out) — no separate zip step needed.
+              dispositions: "$.output.branches[*].output"
+
+      # DETERMINISTIC partition (code, not the agent's say-so) — the
+      # independent evidence recount lives here (see
+      # inspect.ticket.partition-dispositions.yaml).
+      partitioning:
+        goal: Deterministically partition verdicts into closable vs. collected.
+        transitions:
+          partition:
+            target: applying_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.ticket.partition-dispositions
+              args:
+                - "$.context.dispositions"
+            output:
+              closable:         "$.output.json.closable"
+              needs_human:      "$.output.json.needs_human"
+              kept:             "$.output.json.kept"
+              stale:            "$.output.json.stale"
+              partition_error:  "$.output.json.error"
+
+      # Split gate: guards run BEFORE executors, so branching on dry_run
+      # needs its own state (same shape as flow.qa.promote-finding's
+      # separability_gate).
+      applying_gate:
+        transitions:
+          apply_live:
+            target: applying
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.dry_run == false" }
+          skip_dry_run:
+            target: done
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.dry_run == true" }
+            executor: { kind: noop }
+            output:
+              closed: { set: [] }
+
+      # Only reached when dry_run:false. Fans `run.github.issue-close` out
+      # over EXACTLY `closable` (already evidence-validated twice: once by
+      # the disposition cap's schema, once by the partition script's
+      # independent recount) — never over the full item list.
+      applying:
+        goal: Close + set Status=Killed for every evidence-backed closable item.
+        transitions:
+          apply:
+            target: done
+            actor: deterministic
+            executor:
+              kind: parallel
+              branches:
+                for_each: "$.context.closable"
+                do:
+                  kind: script
+                  subject: run.github.issue-close
+                  args:
+                    - "$.workflow.input.repo.owner"
+                    - "$.workflow.input.repo.name"
+                    - "$.branch.value.item.number"
+                    - "$.branch.value.rationale"
+                    - "$.context.resolved"
+                    - "$.workflow.input.closeStatusName"
+              join: all
+              on_branch_failure: continue
+            output:
+              close_results: "$.output.branches[*].output"
+              # The headline `closed` is the deterministic decision (every
+              # evidence-backed candidate); per-item mutation failures are
+              # NOT swallowed — they surface in close_results[].error for
+              # the next sweep to catch (the design doc's VERIFY pass:
+              # merged-but-still-open reopens to Hunting on regression).
+              closed: "$.context.closable"
+
+      done: { terminal: true }
