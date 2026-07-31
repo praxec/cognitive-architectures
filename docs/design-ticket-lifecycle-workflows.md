@@ -166,6 +166,11 @@ Once implemented, this is the repeating program, run against the live board unti
         (loop-until-dry: dedup guarantees "new" is real, not re-filed)
 ```
 
+**"Cleared" means closed on the board.** An item is done only when its issue is closed AND its
+project Status = Killed/Done — the board is the common work list, so a merged fix PR that leaves the
+ticket open is not yet cleared. The VERIFY pass reconciles merged fixes to closed+Killed and reopens
+(Status→Hunting) anything that regressed.
+
 First execution target: drive the **current backlog to 100% cleared + verified** — the 12 existing
 items plus the back-filled session findings — then begin the sweep→clear→verify iteration. The dedup
 fingerprint is what makes "sweeps stopped producing findings" a trustworthy convergence signal rather
