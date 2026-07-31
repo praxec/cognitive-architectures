@@ -1,0 +1,233 @@
+# orchestrators/flow.fix-ticket-batch-item.yaml
+#
+# ADDITION BEYOND THE PLAN'S LITERAL TASK 6 FILE LIST (documented, not
+# silent — same rationale as the Task 4/5 small-script additions, scaled
+# up to a small orchestrator this time): flow.fix-ticket-batch needs
+# "per-ticket red->green as SMALL ATOMIC COMMITS ON ONE BRANCH" (the plan's
+# own words) fanned out over a batch. The engine's fan-out primitive
+# (`kind: parallel`, `for_each`) only spawns `kind: workflow` branches by
+# definitionId — it cannot inline a bespoke multi-state chain per branch —
+# so the per-ticket read->red->fix->green->commit chain has to be its own
+# top-level workflow. This is EXACTLY flow.fix-from-ticket's chain minus
+# the PR-open tail (the batch parent opens ONE PR for the whole branch,
+# not one per ticket) plus a commit-slice tail (small atomic commit per
+# ticket, not a separate PR). Reuses the identical caps at the identical
+# wiring — cap.run.ticket-read, cap.implement.regression-test,
+# cap.verify.test-red, cap.implement.fix-under-scope, cap.verify.repro-rate
+# — no reimplementation.
+#
+# Echoes `issue_number` back out in its own output (same "self-contained
+# per-branch result" move as cap.diagnose.ticket-disposition echoing
+# `item`) so the batch parent's fan-out result zips straight to
+# inspect.ticket.rollup-batch-fixes without a second lookup.
+
+workflows:
+  flow.fix-ticket-batch-item:
+    description: |
+      Fix ONE ticket within a batch: read its fix context, mark it
+      Hunting, red-proof a regression test, fix under src/ only,
+      deterministically verify green, and commit the slice on the
+      CURRENT branch (the batch parent owns branch/PR lifecycle — this
+      flow never pushes and never opens a PR).
+    inputs:
+      repo:         { type: object,  default: { owner: outboundlabs, name: autopilot-beta } }
+      project:      { type: object,  default: { owner: outboundlabs, number: 3 } }
+      issue_number: { type: integer, required: true }
+      charter:      { type: object, default: { src_glob: "src/**", test_glob: "tests/**" } }
+    outputs:
+      issue_number: { type: integer }
+      ok:           { type: boolean }
+      test_path:    { type: string }
+      fix_summary:  { type: object }
+      committed_sha: { type: string }
+      error:        { type: string }
+    # V24: every declared output written on every path. `ok` starts false
+    # (honest floor — only the committing success edge flips it); the
+    # rest default to their empty shapes.
+    initialContext:
+      ok:            false
+      test_path:     ""
+      fix_summary:   {}
+      committed_sha: ""
+      error:         ""
+      issue_number:  "$.workflow.input.issue_number"
+    initialState: reading
+    states:
+
+      reading:
+        goal: Fetch and parse the ticket's fix context.
+        transitions:
+          read:
+            target: resolving
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.run.ticket-read
+              use:
+                inputs:
+                  repo:   "$.context.repo"
+                  number: "$.workflow.input.issue_number"
+                outputs:
+                  "$.context.layer":    layer
+                  "$.context.finding":  finding
+                  "$.context.pr_title": prTitle
+
+      resolving:
+        goal: Resolve the board's field/option ids.
+        transitions:
+          resolve:
+            target: marking_in_progress
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.github.resolve-project
+              args:
+                - "$.workflow.input.project.owner"
+                - "$.workflow.input.project.number"
+            output:
+              resolved: "$.output.json"
+
+      marking_in_progress:
+        goal: Mark the ticket Hunting on the board while the fix is in flight.
+        transitions:
+          mark:
+            target: writing_red
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.github.issue-set-status
+              args:
+                - "$.workflow.input.repo.owner"
+                - "$.workflow.input.repo.name"
+                - "$.workflow.input.issue_number"
+                - "$.context.resolved"
+                - "Hunting"
+            output:
+              status_error: "$.output.json.error"
+
+      writing_red:
+        goal: Write one failing regression test from the ticket's assertion sketch.
+        transitions:
+          write:
+            target: proving_red
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.implement.regression-test
+              use:
+                inputs:
+                  finding:       "$.context.finding"
+                  charter:       "$.workflow.input.charter"
+                  layer:         "$.context.layer"
+                  justification: "layer taken from the ticket's own Layer field"
+                outputs:
+                  "$.context.test_path": test_path
+
+      proving_red:
+        goal: Prove the new test fails NOW on an assertion (real red).
+        transitions:
+          prove:
+            target: red_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.verify.test-red
+              use:
+                inputs:
+                  test_path:  "$.context.test_path"
+                  finding_id: "$.context.finding.id"
+                outputs:
+                  "$.context.red_reason": red_reason
+                  "$.context.red_proof":  red_report
+                  "$.context.replay_obs": replay_obs
+
+      red_gate:
+        transitions:
+          red:
+            target: fixing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.red_reason == 'assertion_failed'" }
+          not_red:
+            target: failed
+            actor: deterministic
+
+      fixing:
+        goal: Fix the defect under src/ so the red-proved test goes green.
+        transitions:
+          fix:
+            target: verifying
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.implement.fix-under-scope
+              use:
+                inputs:
+                  finding:   "$.context.finding"
+                  test_path: "$.context.test_path"
+                  red_proof: "$.context.red_proof"
+                outputs:
+                  "$.context.fix_summary": fix_summary
+
+      verifying:
+        goal: Deterministically verify the fix makes the test pass.
+        transitions:
+          verify:
+            target: green_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.verify.repro-rate
+              use:
+                inputs:
+                  observations: "$.context.replay_obs"
+                  attempts:     2
+                outputs:
+                  "$.context.green_count": reproduced_count
+
+      green_gate:
+        transitions:
+          green:
+            target: committing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.green_count == 1" }
+          not_green:
+            target: failed
+            actor: deterministic
+
+      # Small atomic commit for THIS ticket only, on the shared batch
+      # branch the parent already ensured. FILES="" -> run.git.commit-
+      # slice derives the changed-file set from git itself (the fixer's
+      # actual writes, not a self-report). MESSAGE reuses pr_title ("Fix:
+      # <ticket title>") — already composed with the real title by
+      # inspect.github.issue-read, no concatenation needed here.
+      committing:
+        goal: Commit this ticket's fix as one small atomic slice.
+        transitions:
+          commit:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.commit-slice
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.context.pr_title"
+                - ""
+                - "cognitive/flow.fix-ticket-batch-item"
+            output:
+              ok:            "$.output.json.committed"
+              committed_sha: "$.output.json.sha"
+              error:         "$.output.json.error"
+
+      # `issue_number` is written via `initialContext:` (a dynamic
+      # `$.workflow.input.*` reference, not just a literal — confirmed by
+      # `praxec check`) rather than by any transition, so it is present on
+      # every path to either terminal state without a per-edge writer.
+      done:
+        terminal: true
+
+      failed:
+        terminal: true
+        outcome: failure

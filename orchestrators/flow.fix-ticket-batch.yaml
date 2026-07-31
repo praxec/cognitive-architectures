@@ -1,0 +1,187 @@
+# orchestrators/flow.fix-ticket-batch.yaml
+#
+# The BATCH fix side of the ticket-lifecycle flow family
+# (docs/design-ticket-lifecycle-workflows.md): "20-30 fixes / chunky-CI
+# PR, small-commits" realised as an orchestrator — a coherent set of
+# tickets fixed as small atomic commits on ONE branch, then ONE PR
+# (`Fixes #a, #b, ...`) instead of N separate PRs.
+#
+# SCOPING DECISION (documented, not silent): the plan describes selection
+# as "{filter (label/priority/area), size} -> query open tickets ->
+# coherent batch". inspect.github.project-enumerate (Task 1) exposes
+# Status but not Priority/Size/Labels — extending it to filter on those
+# is real scope beyond this task's 4 named files. This flow instead takes
+# an explicit `issue_numbers` array as the batch (the plan's own
+# selection criteria — label/priority/area/size — are exactly what an
+# operator or a future project-enumerate extension would use to PRODUCE
+# that array; this flow is deliberately the "given a coherent batch, fix
+# it" half, not the selection half).
+#
+# SEQUENTIAL, not parallel: every ticket in the batch edits the SAME
+# working tree on the SAME branch — true parallel fan-out would race.
+# `kind: parallel` + `max_concurrency: 1` is the engine's documented way
+# to force strictly-sequential fan-out (SPEC §24) while still getting
+# per-branch result isolation and `on_branch_failure: continue` (one bad
+# ticket must not sink the batch — it just won't be in the PR's Fixes
+# list).
+#
+# Reuses run.git.branch-ensure / run.git.push-pr (the SAME git primitives
+# flow.check-in uses) for the shared-branch lifecycle — NOT
+# cap.coordinate.pr-open (which assumes an MCP create_pr call with no
+# branch-push step; this batch has real local commits that must be pushed
+# FIRST, which is exactly what run.git.push-pr does).
+
+workflows:
+  flow.fix-ticket-batch:
+    description: |
+      Fix a coherent batch of tickets as small atomic commits on ONE
+      shared branch (sequential — one working tree), then push + open ONE
+      PR listing every ticket that actually went green (Fixes #a, #b,
+      ...). A ticket that fails red-proof or the fix never gets a commit
+      and is reported in `failed`, not silently dropped.
+    inputs:
+      repo:          { type: object, default: { owner: outboundlabs, name: autopilot-beta } }
+      project:       { type: object, default: { owner: outboundlabs, number: 3 } }
+      issue_numbers: { type: array,  required: true }
+      charter:       { type: object, default: { src_glob: "src/**", test_glob: "tests/**" } }
+      # The ONE shared branch every ticket's fix commits onto.
+      batch_branch:  { type: string, required: true }
+      base_ref:      { type: string, default: "main" }
+    outputs:
+      succeeded: { type: array }
+      failed:    { type: array }
+      pr_url:    { type: string }
+      pr_number: { type: integer }
+    # V24: seed every declared output not written on every path.
+    initialContext:
+      pr_url:    ""
+      pr_number: 0
+      succeeded: []
+      failed:    []
+    initialState: branching
+    states:
+
+      # Branch-first discipline (same primitive flow.check-in uses):
+      # never on the default branch, reuse an existing batch branch on
+      # re-entry, create off base_ref otherwise.
+      branching:
+        goal: Ensure the shared batch branch exists.
+        transitions:
+          ensure:
+            target: branch_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.branch-ensure
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.context.batch_branch"
+                - "$.context.base_ref"
+            output:
+              on_branch:    "$.output.json.on_branch"
+              branch_error: "$.output.json.error"
+
+      branch_gate:
+        transitions:
+          proceed:
+            target: fixing_batch
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.on_branch == true" }
+          # Default (V23) — not a repo, or branch create/checkout failed.
+          halt:
+            target: failed
+            actor: deterministic
+
+      # Fan out ONE flow.fix-ticket-batch-item per ticket, FORCED
+      # SEQUENTIAL (max_concurrency: 1 — same working tree/branch).
+      # on_branch_failure: continue — one ticket's red-proof or fix
+      # failing must not abort the rest of the batch.
+      fixing_batch:
+        goal: Fix every ticket sequentially on the shared branch.
+        transitions:
+          fix_all:
+            target: aggregating
+            actor: deterministic
+            executor:
+              kind: parallel
+              branches:
+                for_each: "$.context.issue_numbers"
+                do:
+                  kind: workflow
+                  definitionId: cognitive/flow.fix-ticket-batch-item
+                  input:
+                    repo:         "$.context.repo"
+                    project:      "$.context.project"
+                    issue_number: "$.branch.value"
+                    charter:      "$.context.charter"
+              join: all
+              max_concurrency: 1
+              on_branch_failure: continue
+              total_timeout_ms: 1800000
+            output:
+              item_results: "$.output.branches[*].output"
+
+      # DETERMINISTIC partition + PR text composition (code, not the
+      # agent's say-so) — see inspect.ticket.rollup-batch-fixes.yaml.
+      aggregating:
+        goal: Partition succeeded/failed and compose the batch PR title/body.
+        transitions:
+          aggregate:
+            target: rollup_gate
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.ticket.rollup-batch-fixes
+              args:
+                - "$.context.item_results"
+            output:
+              succeeded:      "$.output.json.succeeded"
+              failed:         "$.output.json.failed"
+              succeededCount: "$.output.json.succeededCount"
+              pr_title:       "$.output.json.prTitle"
+              pr_body:        "$.output.json.prBody"
+              rollup_error:   "$.output.json.error"
+
+      # Never push/open an empty-handed PR — if EVERY ticket in the batch
+      # failed its red-proof or fix, there is nothing to integrate.
+      rollup_gate:
+        transitions:
+          has_commits:
+            target: pushing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.succeededCount > 0" }
+          # Default (V23) — nothing succeeded: report failed[], no PR.
+          nothing_to_ship:
+            target: done
+            actor: deterministic
+
+      # Push the batch branch + open (or reuse) the PR — the SAME
+      # idempotent primitive flow.check-in uses.
+      pushing:
+        goal: Push the batch branch and open the combined PR.
+        transitions:
+          push:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.git.push-pr
+              workingDirectory: "$.run.repo_root"
+              args:
+                - "$.context.batch_branch"
+                - "$.context.base_ref"
+                - "$.context.pr_title"
+                - "$.context.pr_body"
+            output:
+              pr_url:    "$.output.json.pr_url"
+              pr_number: "$.output.json.pr_number"
+              push_error: "$.output.json.error"
+
+      done:
+        terminal: true
+
+      failed:
+        terminal: true
+        outcome: failure
