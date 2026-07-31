@@ -1,0 +1,49 @@
+# capabilities/cap.run.enrich-explore-findings.yaml
+#
+# ADDITION BEYOND THE PLAN'S LITERAL TASK 7 FILE LIST (documented, not
+# silent): wraps inspect.ticket.enrich-explore-findings so its `pairs`
+# output can be consumed by a LATER state's `use.inputs` in
+# flow.qa.explore-and-file. Exact same reason cap.run.fix-scope exists
+# (its own header comment): "a flow's slot table (V13) only recognizes
+# slots written by `inputs:` or a child workflow's `use.outputs` — NOT by
+# a transition `output:` block" (SPEC §7.3) — confirmed here the hard way:
+# `praxec check` raised UNREACHABLE_SLOT for `$.context.pairs` when
+# flow.qa.explore-and-file's `filing` state tried to read a bare
+# `kind: script` transition's `output:` slot via `use.inputs`. Wrapping
+# the script in this snippet-typed cap and calling it via `kind: workflow`
+# registers the slot properly.
+
+workflows:
+  cap.run.enrich-explore-findings:
+    verb: run
+    lifecycle: experimental
+    description: >
+      Bridge flow.qa.explore's bare Finding array into the {finding,
+      enrichment} pairs flow.findings-to-tickets consumes, with honest
+      placeholders for the fix-context fields the discovery loop's schema
+      doesn't carry.
+    snippet:
+      inputs:
+        findings: { type: array,  required: true }
+        mission:  { type: string, required: true }
+      outputs:
+        pairs: { type: array }
+        count: { type: integer }
+    initialState: ready
+    states:
+      ready:
+        goal: Derive {finding, enrichment} pairs from the discovery loop's findings.
+        transitions:
+          derive:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.ticket.enrich-explore-findings
+              args:
+                - "$.workflow.input.findings"
+                - "$.workflow.input.mission"
+            output:
+              pairs: "$.output.json.pairs"
+              count: "$.output.json.count"
+      done: { terminal: true }

@@ -34,6 +34,16 @@ workflows:
       repo:     { type: object, default: { owner: outboundlabs, name: autopilot-beta } }
       # Status option name for a newly-filed (or reopened) ticket.
       defaultStatusName: { type: string, default: "Found" }
+    # Top-level outputs (flows have no `snippet:`) — terminal context
+    # slots a `kind: workflow` parent (flow.qa.explore-and-file) reads via
+    # `use.outputs`. All 4 are written on the flow's one linear path to
+    # its one terminal state (`done`, via `aggregating`), so no
+    # initialContext seeding is needed (V24).
+    outputs:
+      filed:   { type: array }
+      updated: { type: array }
+      failed:  { type: array }
+      rollup:  { type: object }
     initialState: filing
     states:
 

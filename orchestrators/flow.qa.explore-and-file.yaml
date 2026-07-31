@@ -1,0 +1,110 @@
+# orchestrators/flow.qa.explore-and-file.yaml
+#
+# The RESEARCH -> TICKET retrofit (Task 7): run flow.qa.explore unchanged,
+# then pipe its `findings` into flow.findings-to-tickets. Keeps
+# flow.qa.explore PURE (ticketing stays opt-in, reusable by any
+# finding-emitting research flow — design doc "flow.qa.explore stays
+# pure; ticketing is an opt-in tail"); this flow is the tail.
+#
+# Sub-workflow chaining pattern (`kind: workflow`, `use.inputs`/
+# `use.outputs`) mirrored from flow.qa.program.yaml's own
+# `cognitive/flow.qa.explore` call.
+#
+# SHAPE BRIDGE: flow.qa.explore's Finding (cap.diagnose.finding schema)
+# carries no area/route/persona/layer/assertionSketch/affectedFiles/
+# suggestedFix — those are ticket-specific fix-context fields outside the
+# discovery loop's schema. `enriching` bridges the two shapes with HONEST
+# placeholders (never a fabricated guess) — see
+# inspect.ticket.enrich-explore-findings.yaml.
+
+workflows:
+  flow.qa.explore-and-file:
+    description: |
+      Run flow.qa.explore, then file/update ONE deduplicated ticket per
+      discovered Finding via flow.findings-to-tickets. qa.explore's own
+      inputs/behavior are unchanged; ticketing is purely additive.
+    inputs:
+      # Passed straight through to flow.qa.explore.
+      mission:       { type: string,  required: true }
+      app_url:       { type: string,  required: true }
+      attempts:      { type: integer, default: 5 }
+      storage_state: { type: string,  default: "" }
+      # Ticket-filing target — never hard-coded downstream.
+      project:       { type: object, default: { owner: outboundlabs, number: 3 } }
+      repo:          { type: object, default: { owner: outboundlabs, name: autopilot-beta } }
+      defaultStatusName: { type: string, default: "Found" }
+    outputs:
+      filed:     { type: array }
+      updated:   { type: array }
+      failed:    { type: array }
+      rollup:    { type: object }
+      qa_report: { type: object }
+    initialState: exploring
+    states:
+
+      # Discovery: flow.qa.explore, entirely unchanged.
+      exploring:
+        goal: Run the discovery loop; land its findings channel in context.
+        transitions:
+          explore:
+            target: enriching
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.qa.explore
+              use:
+                inputs:
+                  mission:       "$.workflow.input.mission"
+                  app_url:       "$.workflow.input.app_url"
+                  attempts:      "$.workflow.input.attempts"
+                  storage_state: "$.workflow.input.storage_state"
+                outputs:
+                  "$.context.findings":  findings
+                  "$.context.qa_report": qa_report
+
+      # DETERMINISTIC shape bridge (code, not the agent's say-so) — see
+      # cap.run.enrich-explore-findings.yaml / inspect.ticket.enrich-
+      # explore-findings.yaml. Called via `kind: workflow` (not a bare
+      # `kind: script`) so `pairs` registers in the flow's V13 slot table
+      # for the `filing` state's `use.inputs` read below — a bare script
+      # transition's `output:` does not (confirmed by `praxec check`
+      # UNREACHABLE_SLOT; same reason cap.run.fix-scope exists).
+      enriching:
+        goal: Bridge discovery Findings into {finding, enrichment} pairs.
+        transitions:
+          enrich:
+            target: filing
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.run.enrich-explore-findings
+              use:
+                inputs:
+                  findings: "$.context.findings"
+                  mission:  "$.workflow.input.mission"
+                outputs:
+                  "$.context.pairs": pairs
+
+      filing:
+        goal: File or update a deduplicated ticket per discovered finding.
+        transitions:
+          file:
+            target: done
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/flow.findings-to-tickets
+              use:
+                inputs:
+                  findings:          "$.context.pairs"
+                  project:           "$.workflow.input.project"
+                  repo:              "$.workflow.input.repo"
+                  defaultStatusName: "$.workflow.input.defaultStatusName"
+                outputs:
+                  "$.context.filed":   filed
+                  "$.context.updated": updated
+                  "$.context.failed":  failed
+                  "$.context.rollup":  rollup
+
+      done:
+        terminal: true
