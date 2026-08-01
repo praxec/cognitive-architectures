@@ -1,0 +1,73 @@
+# scripts-library/inspect.github.project-enumerate.yaml
+#
+# Read-only ProjectV2 item listing for flow.tickets-triage-cleanup: every
+# item on the board, its issue state, its Status single-select VALUE (not
+# id — human-readable, matched against the disposition cap's verdicts),
+# repo, age, and any PRs the issue's `closingIssuesReferences` side already
+# links (closedByPullRequestsReferences — populated once a PR's body says
+# "Fixes #N" and that PR is merged/closed).
+#
+# ageDays and linkedPRs are computed IN CODE (jq), never left for an agent
+# to eyeball off `createdAt` — "deterministic tools over LLM math" (same
+# stance as audit.findings.aggregate / inspect.deliverable-route).
+#
+# Verb `inspect`: read-only derivation.
+#
+# Args (POSITIONAL, JSON envelope, exit 0 always):
+#   $1 / PROJECT_OWNER  — org login (required)
+#   $2 / PROJECT_NUMBER — ProjectV2 number (required)
+# Emits: {items: [{number,title,state,url,repo,status,ageDays,linkedPRs}], error}
+# read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  inspect.github.project-enumerate:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      OWNER="${1:-${PROJECT_OWNER:-}}"
+      NUMBER="${2:-${PROJECT_NUMBER:-}}"
+
+      fail() { jq -n --arg e "$1" '{items: [], error: $e}'; exit 0; }
+
+      [ -z "${OWNER// /}" ]  && fail "empty project owner"
+      [ -z "${NUMBER// /}" ] && fail "empty project number"
+      command -v gh >/dev/null 2>&1 || fail "gh CLI not on PATH"
+      command -v jq >/dev/null 2>&1 || fail "jq not on PATH"
+
+      raw="$(gh api graphql -f query='
+        query($o:String!,$n:Int!){ organization(login:$o){ projectV2(number:$n){
+          items(first:50){ nodes{
+            id
+            content{ __typename ... on Issue{
+              number title state url createdAt
+              repository{ nameWithOwner }
+              closedByPullRequestsReferences(first:5){ nodes{ number state } } } }
+            fieldValues(first:20){ nodes{ __typename
+              ... on ProjectV2ItemFieldSingleSelectValue{ name field{ ... on ProjectV2FieldCommon{ name } } } } } } } } } }
+      ' -f o="$OWNER" -F n="$NUMBER" 2>&1)" \
+        || fail "gh api graphql failed: $(printf '%s' "$raw" | tail -1)"
+
+      printf '%s' "$raw" | jq -e '.data.organization.projectV2 != null' >/dev/null 2>&1 \
+        || fail "project not found for org=$OWNER number=$NUMBER"
+
+      printf '%s' "$raw" | jq '
+        { items: (.data.organization.projectV2.items.nodes
+            | map(select(.content != null and .content.__typename == "Issue"))
+            | map(
+                (.content) as $c
+                | (.fieldValues.nodes
+                    | map(select(.__typename=="ProjectV2ItemFieldSingleSelectValue"))
+                    | map({(.field.name): .name}) | add // {}) as $fv
+                | { number:    $c.number,
+                    title:     $c.title,
+                    state:     $c.state,
+                    url:       $c.url,
+                    repo:      $c.repository.nameWithOwner,
+                    status:    ($fv.Status // null),
+                    ageDays:   ((now - ($c.createdAt | fromdateiso8601)) / 86400 | floor),
+                    linkedPRs: ($c.closedByPullRequestsReferences.nodes | map(.number)) } )),
+          error: null }'

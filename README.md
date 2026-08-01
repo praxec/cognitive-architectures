@@ -150,11 +150,23 @@ the two-tier model exists to enable.
 | `flow.pressure-test.use-cases` | Decision-gating via falsification | Design + use cases to falsify |
 | `flow.loom` | Full elicit → design → plan → execute program | Intent brief |
 
+**Ticket-lifecycle family** (GitHub Projects-v2 backlog — Finding → ticket
+→ fix → verified-close; see `docs/design-ticket-lifecycle-workflows.md`):
+
+| Orchestrator | Lifecycle | Trigger |
+|---|---|---|
+| `flow.findings-to-tickets` | File/update ONE deduplicated ticket per Finding (fingerprint dedup), in parallel | `{finding, enrichment}[]` batch |
+| `flow.qa.explore-and-file` | `flow.qa.explore` (unchanged) piped straight into `flow.findings-to-tickets` | Mission + app URL |
+| `flow.tickets-triage-cleanup` | Sweep every board item, adjudicate disposition in parallel, deterministically close only evidence-backed `close_fixed` items | Project target (`dry_run` default true) |
+| `flow.fix-from-ticket` | One ticket → red-proved regression test → scope-bounded fix → verified green → `Fixes #N` PR | Issue number |
+| `flow.fix-ticket-batch` | A coherent batch of tickets fixed as small atomic commits on ONE branch → ONE PR (`Fixes #a, #b, ...`) | Issue numbers + shared branch |
+
 Reusable sub-flows (nested by the above via `kind: workflow`, V11 relaxed):
 `flow.derisk` (elicit → design → FMECA), `flow.harden.fmeca-converge`
 (FMECA → mitigate → re-FMECA convergence loop),
-`flow.implement.deliverable`, and `flow.execute-cohorts` (cpm-planner
-cohort driver).
+`flow.implement.deliverable`, `flow.execute-cohorts` (cpm-planner
+cohort driver), and `flow.fix-ticket-batch-item` (the per-ticket
+red→green→commit chain `flow.fix-ticket-batch` fans out sequentially).
 
 The repo manifest exposes `capabilities/`, `orchestrators/`, `skills/`,
 and `scripts-library/` — the gateway's capability, flow, skill, and

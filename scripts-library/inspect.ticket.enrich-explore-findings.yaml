@@ -1,0 +1,68 @@
+# scripts-library/inspect.ticket.enrich-explore-findings.yaml
+#
+# ADDITION BEYOND THE PLAN'S LITERAL TASK 7 FILE LIST (documented, not
+# silent — same rationale as every prior small-utility addition in this
+# task family): flow.qa.explore-and-file pipes flow.qa.explore's
+# `findings` straight into flow.findings-to-tickets, but the two flows
+# use DIFFERENT shapes — flow.qa.explore's Finding (cap.diagnose.finding
+# schema: id/title/severity/observed/expected/expectedSource/
+# reproduction/probe_ref/evidence) carries NO area/route/persona/layer/
+# assertionSketch/affectedFiles/suggestedFix at all (those are ticket-
+# specific fix-context fields, not part of the discovery-loop schema).
+# flow.findings-to-tickets/inspect.ticket.render-body need
+# {finding, enrichment} pairs. This script bridges the two shapes with
+# HONEST placeholders, never a fabricated guess:
+#   - area  <- the run's `mission` (shared across every finding in one
+#     exploration pass — the closest available "what was this run about")
+#   - assertionSketch <- mechanically composed from observed/expected
+#     ("Given: <observed> | Expect: <expected>") — not an authored test
+#     plan, a literal recomposition of data already on the Finding
+#   - route/persona/layer/affectedFiles/suggestedFix <- left EMPTY
+#     ("" / []), rendered as "—" by render-body — nobody has determined
+#     them yet; a filed ticket with honest blanks is correct, a filed
+#     ticket with an invented layer/route is not
+#
+# Verb `inspect`: pure derivation, no I/O.
+#
+# Args (POSITIONAL, JSON envelope, exit 0 always):
+#   $1 / FINDINGS_JSON — flow.qa.explore's `findings` array (required)
+#   $2 / MISSION       — the exploration run's mission string (required)
+# Emits: {pairs: [{finding, enrichment}], count, error} read at
+# $.output.json.* — `pairs` is exactly flow.findings-to-tickets' `findings`
+# input shape.
+version: "1.0.0"
+scripts:
+  inspect.ticket.enrich-explore-findings:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      FINDINGS="${1:-[]}"
+      MISSION="${2:-${MISSION:-}}"
+
+      fail() { jq -n --arg e "$1" '{pairs: [], count: 0, error: $e}'; exit 0; }
+
+      command -v jq >/dev/null 2>&1 || fail "jq not on PATH"
+      printf '%s' "$FINDINGS" | jq -e 'type == "array"' >/dev/null 2>&1 \
+        || fail "findings is not a JSON array"
+
+      printf '%s' "$FINDINGS" | jq --arg mission "$MISSION" '
+        {
+          pairs: (map({
+            finding: .,
+            enrichment: {
+              area:            $mission,
+              persona:         "",
+              route:           "",
+              assertionSketch: ("Given: " + (.observed // "") + " | Expect: " + (.expected // "")),
+              affectedFiles:   [],
+              layer:           "",
+              suggestedFix:    ""
+            }
+          })),
+          count: length,
+          error: null
+        }'

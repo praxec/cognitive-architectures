@@ -1,0 +1,70 @@
+# capabilities/cap.run.ticket-read.yaml
+#
+# Fetch + parse a filed ticket for flow.fix-from-ticket: a thin, fully
+# deterministic wrapper (`kind: script` chain, no agent judgment) around
+# inspect.github.issue-read.
+#
+# NAMING DEVIATION FROM THE PLAN, same rationale as cap.run.ticket-upsert
+# (Task 3): the plan names this `cap.coordinate.ticket-read`, but V6 hard-
+# requires verb `coordinate` capabilities to have an MCP primary executor
+# and this cap's substrate is `gh api graphql` via scripts, not an MCP
+# connector. `cap.run.fix-scope` is the pack's precedent for this exact
+# shape (deterministic single-script wrapper, verb `run`).
+
+workflows:
+  cap.run.ticket-read:
+    verb: run
+    lifecycle: experimental
+    description: >
+      Fetch a filed ticket by issue number and parse its fix-context
+      sections (area, red->green assertion sketch, affected files, layer,
+      severity) out of the body inspect.ticket.render-body wrote — the
+      exact inverse of that schema.
+    snippet:
+      inputs:
+        # Issue repo (never hard-coded downstream).
+        repo:   { type: object, default: { owner: outboundlabs, name: autopilot-beta } }
+        number: { type: integer, required: true }
+      outputs:
+        title:           { type: string }
+        area:            { type: string }
+        assertionSketch: { type: string }
+        affectedFiles:   { type: array }
+        layer:           { type: string }
+        severity:        { type: string }
+        body:            { type: string }
+        # cap.diagnose.finding-SHAPED reconstruction (id/title/severity/
+        # observed/expected/expectedSource/probe_ref) — feeds straight
+        # into cap.implement.regression-test without a second reshape.
+        finding:         { type: object }
+        # Pre-composed for cap.coordinate.pr-open (prBody carries the
+        # "Fixes #<N>" GitHub auto-close marker).
+        prTitle:         { type: string }
+        prBody:          { type: string }
+    initialState: reading
+    states:
+      reading:
+        goal: Fetch and parse the ticket's fix-context sections.
+        transitions:
+          read:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.github.issue-read
+              args:
+                - "$.workflow.input.repo.owner"
+                - "$.workflow.input.repo.name"
+                - "$.workflow.input.number"
+            output:
+              title:           "$.output.json.title"
+              area:            "$.output.json.area"
+              assertionSketch: "$.output.json.assertionSketch"
+              affectedFiles:   "$.output.json.affectedFiles"
+              layer:           "$.output.json.layer"
+              severity:        "$.output.json.severity"
+              body:            "$.output.json.body"
+              finding:         "$.output.json.finding"
+              prTitle:         "$.output.json.prTitle"
+              prBody:          "$.output.json.prBody"
+      done: { terminal: true }

@@ -1,0 +1,161 @@
+# scripts-library/inspect.ticket.render-body.yaml
+#
+# Renders a Finding (cap.diagnose.finding shape) + a fix-context enrichment
+# into the ticket body schema (docs/design-ticket-lifecycle-workflows.md
+# "Ticket body schema") and computes the dedup fingerprint — the
+# CONTENT half of the ticket-lifecycle's dedup poka-yoke (the SEARCH half
+# is search.github.issue-search / run.github.issue-upsert).
+#
+#   fingerprint = sha256(repo | area | route | normalized(finding.title))
+#   embedded verbatim as `<!-- qa-fingerprint: <64-hex> -->` at the body's
+#   tail — re-running research on the SAME defect (same repo/area/route/
+#   title) always reproduces the SAME fingerprint, so issue-upsert finds
+#   and reuses the existing ticket instead of filing a duplicate.
+#
+# Also does the severity -> Priority/Size NAME mapping (critical/high ->
+# P0, medium -> P1, low -> P2 default; Size passed through from
+# enrichment.size when it is one of XS/S/M/L/XL, else "M"). These are
+# option NAMES, not GraphQL ids — run.github.issue-upsert resolves names
+# to ids against the caller's `resolved` project-fields object. Folding
+# the mapping in here (rather than a separate script) keeps Task 3 to its
+# named two files; issue-upsert is where the name actually becomes an id.
+#
+# The body is built entirely inside `jq` (string concatenation over
+# --arg-bound values), never via bash heredoc interpolation — a Finding's
+# `observed`/`expected` text is untrusted-ish free text from an agent and
+# could contain `$`, backticks, or other shell metacharacters that a
+# heredoc would re-interpret. jq treats every value as an opaque string.
+#
+# Verb `inspect`: pure derivation (Finding+enrichment -> ticket-shaped
+# object), no side effect — no `coordinate` verb exists in the
+# scripts-library's closed twelve (SPEC §22.3).
+#
+# Args (POSITIONAL, JSON envelope, exit 0 always). Owner/name are taken
+# SEPARATELY (not one "owner/name" string) because `kind: script` args are
+# plain JSONPath reads — there is no string-concatenation templating
+# available at the executor call site to join two context fields into one
+# arg; every other script in this family (resolve-project, issue-search,
+# issue-upsert) takes the same two positionals for the same reason.
+#   $1 / FINDING_JSON    — cap.diagnose.finding shape (required)
+#   $2 / ENRICHMENT_JSON — {area,persona,route,assertionSketch,
+#                          affectedFiles,layer,suggestedFix,size?}
+#   $3 / REPO_OWNER      — repo owner login (required)
+#   $4 / REPO_NAME       — repo name (required)
+# Emits: {title, body, labelsCsv, fingerprint, severity, priorityName,
+#         sizeName, error} read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  inspect.ticket.render-body:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      FINDING="${1:-}"
+      [ -z "$FINDING" ] && FINDING='{}'
+      ENRICH="${2:-}"
+      [ -z "$ENRICH" ] && ENRICH='{}'
+      REPO_OWNER="${3:-${REPO_OWNER:-}}"
+      REPO_NAME="${4:-${REPO_NAME:-}}"
+
+      fail() { jq -n --arg e "$1" \
+                 '{title: "", body: "", labelsCsv: "", fingerprint: "",
+                   severity: "", priorityName: "", sizeName: "", error: $e}'; exit 0; }
+
+      command -v jq >/dev/null 2>&1        || fail "jq not on PATH"
+      command -v sha256sum >/dev/null 2>&1 || fail "sha256sum not on PATH"
+      printf '%s' "$FINDING" | jq -e 'type == "object"' >/dev/null 2>&1 \
+        || fail "finding is not a JSON object"
+      printf '%s' "$ENRICH" | jq -e 'type == "object"' >/dev/null 2>&1 \
+        || fail "enrichment is not a JSON object"
+      [ -z "${REPO_OWNER// /}" ] && fail "empty repo owner"
+      [ -z "${REPO_NAME// /}" ]  && fail "empty repo name"
+      REPO="${REPO_OWNER}/${REPO_NAME}"
+
+      TITLE="$(printf '%s' "$FINDING" | jq -r '.title // "Untitled finding"')"
+      SEVERITY="$(printf '%s' "$FINDING" | jq -r '.severity // "medium"')"
+      OBSERVED="$(printf '%s' "$FINDING" | jq -r '.observed // ""')"
+      EXPECTED="$(printf '%s' "$FINDING" | jq -r '.expected // ""')"
+      EXP_KIND="$(printf '%s' "$FINDING" | jq -r '.expectedSource.kind // ""')"
+      EXP_REF="$(printf '%s' "$FINDING" | jq -r '.expectedSource.reference // ""')"
+      PROBE_REF="$(printf '%s' "$FINDING" | jq -r '.probe_ref // ""')"
+      ATTEMPTS="$(printf '%s' "$FINDING" | jq -r '.reproduction.attempts // 0')"
+      SUCCESS="$(printf '%s' "$FINDING" | jq -r '.reproduction.successfulAttempts // 0')"
+      TRACE="$(printf '%s' "$FINDING" | jq -r '.evidence.traceRef // ""')"
+      SCREEN="$(printf '%s' "$FINDING" | jq -r '.evidence.screenshotRef // ""')"
+      CONSOLE="$(printf '%s' "$FINDING" | jq -c '.evidence.consoleErrors // []')"
+      FAILED_REQ="$(printf '%s' "$FINDING" | jq -c '.evidence.failedRequests // []')"
+
+      AREA="$(printf '%s' "$ENRICH" | jq -r '.area // ""')"
+      PERSONA="$(printf '%s' "$ENRICH" | jq -r '.persona // ""')"
+      ROUTE="$(printf '%s' "$ENRICH" | jq -r '.route // ""')"
+      ASSERTION="$(printf '%s' "$ENRICH" | jq -r '.assertionSketch // ""')"
+      AFFECTED="$(printf '%s' "$ENRICH" | jq -c '.affectedFiles // []')"
+      LAYER="$(printf '%s' "$ENRICH" | jq -r '.layer // ""')"
+      SUGGESTED="$(printf '%s' "$ENRICH" | jq -r '.suggestedFix // ""')"
+      SIZE_IN="$(printf '%s' "$ENRICH" | jq -r '.size // ""')"
+
+      case "$SEVERITY" in
+        critical|high) PRIORITY_NAME="P0" ;;
+        medium)        PRIORITY_NAME="P1" ;;
+        low)            PRIORITY_NAME="P2" ;;
+        *)              PRIORITY_NAME="P2" ;;
+      esac
+      case "$SIZE_IN" in
+        XS|S|M|L|XL) SIZE_NAME="$SIZE_IN" ;;
+        *)           SIZE_NAME="M" ;;
+      esac
+
+      LABELS="qa-ticket"
+      if [ -n "${AREA// /}" ]; then
+        slug="$(printf '%s' "$AREA" | tr '[:upper:]' '[:lower:]' \
+                 | tr -s '[:space:]/_' '-' | tr -cd 'a-z0-9-')"
+        [ -n "$slug" ] && LABELS="${LABELS},area-${slug}"
+      fi
+
+      # Fingerprint input is repo|area|route|normalized(title) — whitespace
+      # collapsed, lower-cased, trimmed. Same defect on a re-run yields the
+      # identical hash regardless of incidental capitalization/spacing.
+      SYMPTOM_NORM="$(printf '%s' "$TITLE" | tr '[:upper:]' '[:lower:]' \
+                        | tr -s '[:space:]' ' ' | sed 's/^ *//;s/ *$//')"
+      FINGERPRINT="$(printf '%s' "${REPO}|${AREA}|${ROUTE}|${SYMPTOM_NORM}" \
+                        | sha256sum | awk '{print $1}')"
+
+      jq -n \
+        --arg title "$TITLE" --arg area "$AREA" --arg persona "$PERSONA" --arg route "$ROUTE" \
+        --arg observed "$OBSERVED" --arg expected "$EXPECTED" --arg assertion "$ASSERTION" \
+        --arg expKind "$EXP_KIND" --arg expRef "$EXP_REF" --arg probeRef "$PROBE_REF" \
+        --argjson attempts "${ATTEMPTS:-0}" --argjson success "${SUCCESS:-0}" \
+        --arg trace "$TRACE" --arg screen "$SCREEN" \
+        --argjson consoleErrors "$CONSOLE" --argjson failedRequests "$FAILED_REQ" \
+        --argjson affected "$AFFECTED" --arg layer "$LAYER" \
+        --arg severity "$SEVERITY" --arg priorityName "$PRIORITY_NAME" --arg sizeName "$SIZE_NAME" \
+        --arg suggested "$SUGGESTED" --arg fingerprint "$FINGERPRINT" --arg labels "$LABELS" '
+        def dash: if (. // "" | length) == 0 then "—" else . end;
+        {
+          title:       $title,
+          labelsCsv:   $labels,
+          fingerprint: $fingerprint,
+          severity:    $severity,
+          priorityName: $priorityName,
+          sizeName:     $sizeName,
+          body: (
+            "## " + $title + "\n\n"
+            + "**Area / tool · persona · route:** " + ($area|dash) + " · " + ($persona|dash) + " · " + ($route|dash) + "\n\n"
+            + "**Observed:** " + ($observed|dash) + "\n\n"
+            + "**Expected:** " + ($expected|dash) + "\n\n"
+            + "**Red→green assertion sketch:**\n" + ($assertion|dash) + "\n\n"
+            + "**Expected-source citation:** " + ($expKind|dash) + ": " + ($expRef|dash) + "\n\n"
+            + "**Reproduction:** probe_ref=" + ($probeRef|dash) + "; successfulAttempts=" + ($success|tostring) + "/" + ($attempts|tostring) + "\n\n"
+            + "**Evidence:** traceRef=" + ($trace|dash) + "; screenshotRef=" + ($screen|dash)
+              + "; consoleErrors=" + ($consoleErrors|tojson) + "; failedRequests=" + ($failedRequests|tojson) + "\n\n"
+            + "**Affected files:** " + ($affected|tojson) + "\n"
+            + "**Layer:** " + ($layer|dash) + "\n\n"
+            + "**Severity → Priority / Size:** " + $severity + " → " + $priorityName + " / " + $sizeName + "\n\n"
+            + "**Suggested fix approach:** " + ($suggested|dash) + "\n\n"
+            + "<!-- qa-fingerprint: " + $fingerprint + " -->"
+          ),
+          error: null
+        }'

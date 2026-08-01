@@ -1,0 +1,135 @@
+# capabilities/cap.run.ticket-upsert.yaml
+#
+# THE filing cap of the ticket-lifecycle flow family
+# (docs/design-ticket-lifecycle-workflows.md): Finding + fix-context
+# enrichment -> a well-formed, deduplicated ticket on the operator's
+# GitHub Projects-v2 board. Fully deterministic (`kind: script` chain —
+# no agent judgment; the judgment already happened upstream in
+# cap.diagnose.finding).
+#
+# NAMING DEVIATION FROM THE PLAN (documented, not silent): the plan names
+# this `cap.coordinate.ticket-upsert`, mirroring cap.coordinate.pr-open's
+# shape. But V6 (SPEC §4.1) hard-requires verb `coordinate` capabilities to
+# have an MCP primary executor at their initial state — EVERY existing
+# cap.coordinate.* in this pack (acquire-cohort, cpm-*, label-and-route,
+# pr-open) is `kind: mcp` at state `ready`, zero exceptions, confirmed by
+# `praxec check` (INVALID_PRIMARY_EXECUTOR otherwise). This cap's substrate
+# is deliberately `gh api graphql` via scripts-library, not an MCP GitHub
+# connector (design doc: "connections/github-mcp.yaml stays available but
+# is NOT on the Projects-v2 path") — there is no legitimate MCP call to
+# put first. `cap.run.fix-scope` is the pack's exact precedent for "a
+# deterministic multi-script chain with no agent step and no MCP call":
+# verb `run`, `kind: script`, inputs read via `$.workflow.input.*`. This
+# cap (and cap.run.ticket-read in a later task) follow that template
+# instead. Same applies to the analogous cap.coordinate.ticket-read ->
+# cap.run.ticket-read rename.
+#
+#   rendering  -> inspect.ticket.render-body: Finding+enrichment -> the
+#                 schema body, the qa-fingerprint, and the severity ->
+#                 Priority/Size NAME mapping.
+#   resolving  -> inspect.github.resolve-project: the target board's
+#                 field/option id maps (never hard-coded; re-resolved
+#                 every call so option ids never go stale across board
+#                 edits).
+#   filing     -> run.github.issue-upsert: dedup-search by fingerprint,
+#                 create/update/reopen, add to project, set
+#                 Status(default `defaultStatusName`, "Found")/Priority/
+#                 Size by name against the resolved ids.
+#
+# `project`/`repo` are cap inputs (never hard-coded scripts args) —
+# defaulted to the operator's board (outboundlabs/3) and repo
+# (outboundlabs/autopilot-beta) per the plan's Global Constraints, but
+# every call site can override both.
+
+workflows:
+  cap.run.ticket-upsert:
+    verb: run
+    lifecycle: experimental
+    description: >
+      Render a Finding + fix-context enrichment into the ticket body
+      schema, compute its dedup fingerprint, resolve the target
+      Projects-v2 board's field/option ids, and create/update/reopen the
+      deduplicated ticket with Status/Priority/Size set.
+    snippet:
+      inputs:
+        # cap.diagnose.finding shape (id/title/severity/observed/expected/
+        # expectedSource/reproduction/probe_ref/evidence).
+        finding:     { type: object, required: true }
+        # {area,persona,route,assertionSketch,affectedFiles,layer,
+        # suggestedFix,size?} — the fix-context the ticket body carries.
+        enrichment:  { type: object, default: {} }
+        # ProjectV2 target — never hard-coded downstream.
+        project:     { type: object, default: { owner: outboundlabs, number: 3 } }
+        # Issue repo target — never hard-coded downstream.
+        repo:        { type: object, default: { owner: outboundlabs, name: autopilot-beta } }
+        # Status option name for a newly-filed (or re-opened) ticket.
+        defaultStatusName: { type: string, default: "Found" }
+      outputs:
+        number: { type: integer }
+        url:    { type: string }
+        action: { type: string }
+    initialState: rendering
+    states:
+      rendering:
+        goal: Render the ticket body, fingerprint, and severity mapping from the Finding.
+        transitions:
+          render:
+            target: resolving
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.ticket.render-body
+              args:
+                - "$.workflow.input.finding"
+                - "$.workflow.input.enrichment"
+                - "$.workflow.input.repo.owner"
+                - "$.workflow.input.repo.name"
+            output:
+              rendered_title: "$.output.json.title"
+              rendered_body:  "$.output.json.body"
+              labelsCsv:      "$.output.json.labelsCsv"
+              priorityName:   "$.output.json.priorityName"
+              sizeName:       "$.output.json.sizeName"
+              render_error:   "$.output.json.error"
+
+      resolving:
+        goal: Resolve the target board's field/option ids (never hard-coded).
+        transitions:
+          resolve:
+            target: filing
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.github.resolve-project
+              args:
+                - "$.workflow.input.project.owner"
+                - "$.workflow.input.project.number"
+            output:
+              resolved:      "$.output.json"
+              resolve_error: "$.output.json.error"
+
+      filing:
+        goal: Create-or-update the deduplicated ticket and set its board fields.
+        transitions:
+          file:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.github.issue-upsert
+              args:
+                - "$.workflow.input.repo.owner"
+                - "$.workflow.input.repo.name"
+                - "$.context.resolved"
+                - "$.context.rendered_title"
+                - "$.context.rendered_body"
+                - "$.context.labelsCsv"
+                - "$.workflow.input.defaultStatusName"
+                - "$.context.priorityName"
+                - "$.context.sizeName"
+            output:
+              number: "$.output.json.number"
+              url:    "$.output.json.url"
+              action: "$.output.json.action"
+
+      done: { terminal: true }
