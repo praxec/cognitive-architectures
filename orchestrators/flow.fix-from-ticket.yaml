@@ -39,6 +39,11 @@ workflows:
       charter:      { type: object, default: { src_glob: "src/**", test_glob: "tests/**" } }
       # PR base branch (flow.bugfix-from-error-log's same input pattern).
       base_ref:     { type: string, default: "main" }
+      # The board Status a ticket is moved to the MOMENT work is picked up, so it
+      # leaves the backlog and a second run won't grab it. CONFIGURABLE — never
+      # couple to one board's swim-lane naming (this repo's in-progress lane is
+      # "Hunting"; another board might call it "In Progress"/"Doing").
+      in_progress_status: { type: string, default: "Hunting" }
     outputs:
       test_path:   { type: string }
       fix_summary: { type: object }
@@ -95,7 +100,7 @@ workflows:
       # (the next triage-cleanup pass will still find and correct board
       # state independently — see status_error in the terminal report).
       marking_in_progress:
-        goal: Mark the ticket Hunting on the board while the fix is in flight.
+        goal: Claim the ticket — move it to the configured in-progress status (out of the backlog) so a concurrent run won't pick it up.
         transitions:
           mark:
             target: writing_red
@@ -108,7 +113,7 @@ workflows:
                 - "$.workflow.input.repo.name"
                 - "$.workflow.input.issue_number"
                 - "$.context.resolved"
-                - "Hunting"
+                - "$.workflow.input.in_progress_status"
             output:
               status_error: "$.output.json.error"
 

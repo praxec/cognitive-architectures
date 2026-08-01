@@ -47,6 +47,9 @@ workflows:
       # The ONE shared branch every ticket's fix commits onto.
       batch_branch:  { type: string, required: true }
       base_ref:      { type: string, default: "main" }
+      # Configurable in-progress swim-lane (default "Hunting") — threaded to each
+      # item so pickup claims the ticket out of the backlog (no double-pickup).
+      in_progress_status: { type: string, default: "Hunting" }
     outputs:
       succeeded: { type: array }
       failed:    { type: array }
@@ -115,6 +118,7 @@ workflows:
                     project:      "$.context.project"
                     issue_number: "$.branch.value"
                     charter:      "$.context.charter"
+                    in_progress_status: "$.context.in_progress_status"
               join: all
               max_concurrency: 1
               on_branch_failure: continue

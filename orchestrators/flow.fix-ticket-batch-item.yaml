@@ -33,6 +33,9 @@ workflows:
       repo:         { type: object,  default: { owner: outboundlabs, name: autopilot-beta } }
       project:      { type: object,  default: { owner: outboundlabs, number: 3 } }
       issue_number: { type: integer, required: true }
+      # Configurable in-progress swim-lane (default "Hunting") — threaded from
+      # flow.fix-ticket-batch so pickup moves the ticket out of the backlog.
+      in_progress_status: { type: string, default: "Hunting" }
       charter:      { type: object, default: { src_glob: "src/**", test_glob: "tests/**" } }
     outputs:
       issue_number: { type: integer }
@@ -88,7 +91,7 @@ workflows:
               resolved: "$.output.json"
 
       marking_in_progress:
-        goal: Mark the ticket Hunting on the board while the fix is in flight.
+        goal: Claim the ticket — move it to the configured in-progress status (out of the backlog) so a concurrent run won't pick it up.
         transitions:
           mark:
             target: writing_red
@@ -101,7 +104,7 @@ workflows:
                 - "$.workflow.input.repo.name"
                 - "$.workflow.input.issue_number"
                 - "$.context.resolved"
-                - "Hunting"
+                - "$.workflow.input.in_progress_status"
             output:
               status_error: "$.output.json.error"
 
