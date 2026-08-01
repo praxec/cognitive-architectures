@@ -1,0 +1,58 @@
+# scripts-library/inspect.ticket.rollup-upserts.yaml
+#
+# ADDITION BEYOND THE PLAN'S LITERAL TASK 5 FILE LIST (documented, not
+# silent — same rationale as inspect.ticket.partition-dispositions in
+# Task 4): flow.findings-to-tickets fans cap.run.ticket-upsert out over
+# every finding in parallel and must roll the per-finding
+# {number,url,action,error} results up into
+# {filed[],updated[],rollup:{created,updated,reopened}} (the plan's own
+# Interfaces section). No `[?(@...)]` JSONPath-filter idiom is used
+# anywhere else in this pack to partition an array inline in an `output:`
+# mapping, so this is a tiny deterministic jq script instead — the same
+# shape/rationale as Task 4's partition script.
+#
+# Verb `inspect`: pure derivation, no I/O.
+#
+# Args (POSITIONAL, JSON envelope, exit 0 always):
+#   $1 / RESULTS_JSON — array of cap.run.ticket-upsert outputs
+#                       ({number,url,action,error}), one per finding
+#                       (required)
+# Emits: {filed: [...], updated: [...], failed: [...],
+#         rollup: {created,updated,reopened,failed}, error}
+# read at $.output.json.*. `filed` = action == "created"; `updated` =
+# action in {"updated","reopened"} (both are "the same fingerprint
+# resolved to an existing ticket" — the dedup poka-yoke's proof); `failed`
+# = entries with no issue number at all (the upsert itself errored).
+version: "1.0.0"
+scripts:
+  inspect.ticket.rollup-upserts:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      RESULTS="${1:-[]}"
+
+      fail() { jq -n --arg e "$1" \
+                 '{filed: [], updated: [], failed: [],
+                   rollup: {created: 0, updated: 0, reopened: 0, failed: 0}, error: $e}'; exit 0; }
+
+      command -v jq >/dev/null 2>&1 || fail "jq not on PATH"
+      printf '%s' "$RESULTS" | jq -e 'type == "array"' >/dev/null 2>&1 \
+        || fail "results is not a JSON array"
+
+      printf '%s' "$RESULTS" | jq '
+        {
+          filed:   (map(select(.action == "created"))),
+          updated: (map(select(.action == "updated" or .action == "reopened"))),
+          failed:  (map(select((.number // null) == null))),
+          rollup: {
+            created:  (map(select(.action == "created"))  | length),
+            updated:  (map(select(.action == "updated"))  | length),
+            reopened: (map(select(.action == "reopened")) | length),
+            failed:   (map(select((.number // null) == null)) | length)
+          },
+          error: null
+        }'

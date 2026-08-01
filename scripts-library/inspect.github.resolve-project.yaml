@@ -1,0 +1,60 @@
+# scripts-library/inspect.github.resolve-project.yaml
+#
+# Read-only ProjectV2 substrate query for the ticket-lifecycle flow family
+# (design: docs/design-ticket-lifecycle-workflows.md). Resolves an
+# organization Projects-v2 board's node id plus its single-select fields
+# (Status/Priority/Size/...) and their option-name -> option-id maps, via
+# `gh api graphql`. Every downstream script (issue-upsert, issue-close,
+# ticket-disposition) reads field/option ids from THIS script's output —
+# never hard-coded (docs/proven-projectv2-contract.md is the reference
+# fixture, not a source of runtime truth).
+#
+# Verb `inspect`: a read-only derivation, no mutation, no side effect —
+# matches inspect.deliverable-route's "given input, compute output" shape.
+#
+# Args (POSITIONAL, JSON envelope on stdout, exit 0 always — failures are
+# DATA, never a bare non-zero exit a workflow gate can't branch on):
+#   $1 / PROJECT_OWNER  — org login, e.g. "outboundlabs" (required)
+#   $2 / PROJECT_NUMBER — ProjectV2 number, e.g. 3 (required)
+# Emits: {projectId, fields: {<FieldName>: {fieldId, options: {<OptionName>: optionId}}}, error}
+# read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  inspect.github.resolve-project:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      OWNER="${1:-${PROJECT_OWNER:-}}"
+      NUMBER="${2:-${PROJECT_NUMBER:-}}"
+
+      fail() { jq -n --arg e "$1" '{projectId: null, fields: {}, error: $e}'; exit 0; }
+
+      [ -z "${OWNER// /}" ]  && fail "empty project owner"
+      [ -z "${NUMBER// /}" ] && fail "empty project number"
+      command -v gh >/dev/null 2>&1 || fail "gh CLI not on PATH"
+      command -v jq >/dev/null 2>&1 || fail "jq not on PATH"
+
+      raw="$(gh api graphql -f query='
+        query($o:String!,$n:Int!){ organization(login:$o){ projectV2(number:$n){
+          id
+          fields(first:30){ nodes{ __typename
+            ... on ProjectV2SingleSelectField{ id name options{ id name } } } } } } }
+      ' -f o="$OWNER" -F n="$NUMBER" 2>&1)" \
+        || fail "gh api graphql failed: $(printf '%s' "$raw" | tail -1)"
+
+      printf '%s' "$raw" | jq -e '.data.organization.projectV2 != null' >/dev/null 2>&1 \
+        || fail "project not found for org=$OWNER number=$NUMBER"
+
+      printf '%s' "$raw" | jq '
+        .data.organization.projectV2 as $p
+        | { projectId: $p.id,
+            fields: ($p.fields.nodes
+              | map(select(.__typename=="ProjectV2SingleSelectField"))
+              | map({ (.name): { fieldId: .id,
+                                  options: (.options | map({(.name): .id}) | add // {}) } })
+              | add // {}),
+            error: null }'

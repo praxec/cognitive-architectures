@@ -1,0 +1,60 @@
+# scripts-library/inspect.ticket.rollup-batch-fixes.yaml
+#
+# ADDITION BEYOND THE PLAN'S LITERAL TASK 6 FILE LIST (documented, not
+# silent — same rationale as the Task 4/5 rollup/partition scripts):
+# flow.fix-ticket-batch fans flow.fix-ticket-batch-item out over every
+# ticket in the batch and must (a) partition the per-ticket results into
+# succeeded/failed and (b) compose the ONE shared PR's title/body —
+# "Fixes #a, #b, ..." for every ticket that actually committed, per the
+# plan's own words ("one pr-open linking all (Fixes #a, #b, ...)"). No
+# string-concatenation-over-an-array idiom exists anywhere else in this
+# pack's `output:`/`input:` mappings, so this is a small deterministic jq
+# script instead.
+#
+# Verb `inspect`: pure derivation, no I/O.
+#
+# Args (POSITIONAL, JSON envelope, exit 0 always):
+#   $1 / ITEM_RESULTS_JSON — array of flow.fix-ticket-batch-item outputs
+#                            ({issue_number, ok, test_path, fix_summary,
+#                            committed_sha, error}), one per ticket in the
+#                            batch (required)
+# Emits: {succeeded: [...], failed: [...], succeededCount, failedCount,
+#         prTitle, prBody, error} read at $.output.json.*. `prBody` is ""
+#         when nothing succeeded (the caller gates on succeededCount > 0
+#         before ever pushing/opening a PR — never an empty-handed PR).
+version: "1.0.0"
+scripts:
+  inspect.ticket.rollup-batch-fixes:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      RESULTS="${1:-[]}"
+
+      fail() { jq -n --arg e "$1" \
+                 '{succeeded: [], failed: [], succeededCount: 0, failedCount: 0,
+                   prTitle: "", prBody: "", error: $e}'; exit 0; }
+
+      command -v jq >/dev/null 2>&1 || fail "jq not on PATH"
+      printf '%s' "$RESULTS" | jq -e 'type == "array"' >/dev/null 2>&1 \
+        || fail "item results is not a JSON array"
+
+      printf '%s' "$RESULTS" | jq '
+        (map(select(.ok == true)))  as $ok
+        | (map(select(.ok != true))) as $bad
+        | {
+            succeeded: $ok,
+            failed:    $bad,
+            succeededCount: ($ok | length),
+            failedCount:    ($bad | length),
+            prTitle: (if ($ok | length) > 0
+                      then "Batch fix: " + ($ok | length | tostring) + " ticket(s)"
+                      else "" end),
+            prBody: (if ($ok | length) > 0
+                     then "Fixes " + ($ok | map("#" + (.issue_number | tostring)) | join(", "))
+                     else "" end),
+            error: null
+          }'

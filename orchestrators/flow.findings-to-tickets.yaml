@@ -1,0 +1,100 @@
+# orchestrators/flow.findings-to-tickets.yaml
+#
+# The RESEARCH -> TICKET hand-off of the ticket-lifecycle flow family
+# (docs/design-ticket-lifecycle-workflows.md): given a batch of
+# {finding, enrichment} pairs (any finding-emitting flow's output —
+# flow.qa.explore via flow.qa.explore-and-file, an audit pass, or a
+# hand-authored back-fill of prior-session findings), file/update ONE
+# deduplicated ticket per finding via cap.run.ticket-upsert, fanned out in
+# parallel, and roll the results up.
+#
+# THIS is also the back-fill vehicle (plan Task 5): existing findings from
+# a prior session convert to the same {finding, enrichment} shape and flow
+# through completely unchanged — see examples/backfill-session-findings.yaml.
+#
+# Fan-out shape mirrors flow.tickets-triage-cleanup's `disposing` state
+# (SPEC §24 dynamic for_each, `kind: workflow` branches, `join: all`,
+# `on_branch_failure: continue` — one bad finding must not sink the whole
+# batch).
+
+workflows:
+  flow.findings-to-tickets:
+    description: |
+      File or update ONE deduplicated ticket per {finding, enrichment}
+      pair, in parallel, via cap.run.ticket-upsert — then roll the
+      per-finding results up into filed[]/updated[]/rollup.
+    inputs:
+      # Array of { finding: <cap.diagnose.finding shape>, enrichment:
+      # <{area,persona,route,assertionSketch,affectedFiles,layer,
+      # suggestedFix,size?}> } pairs.
+      findings: { type: array, required: true }
+      # ProjectV2 target — never hard-coded downstream.
+      project:  { type: object, default: { owner: outboundlabs, number: 3 } }
+      # Issue repo target.
+      repo:     { type: object, default: { owner: outboundlabs, name: autopilot-beta } }
+      # Status option name for a newly-filed (or reopened) ticket.
+      defaultStatusName: { type: string, default: "Found" }
+    # Top-level outputs (flows have no `snippet:`) — terminal context
+    # slots a `kind: workflow` parent (flow.qa.explore-and-file) reads via
+    # `use.outputs`. All 4 are written on the flow's one linear path to
+    # its one terminal state (`done`, via `aggregating`), so no
+    # initialContext seeding is needed (V24).
+    outputs:
+      filed:   { type: array }
+      updated: { type: array }
+      failed:  { type: array }
+      rollup:  { type: object }
+    initialState: filing
+    states:
+
+      # Fan out ONE cap.run.ticket-upsert per finding. on_branch_failure:
+      # continue — one malformed finding must not abort the whole batch
+      # (its per-item error surfaces in the rollup's `failed` bucket
+      # instead).
+      filing:
+        goal: File or update a deduplicated ticket per finding, in parallel.
+        transitions:
+          file_all:
+            target: aggregating
+            actor: deterministic
+            executor:
+              kind: parallel
+              branches:
+                for_each: "$.context.findings"
+                do:
+                  kind: workflow
+                  definitionId: cap.run.ticket-upsert
+                  input:
+                    finding:           "$.branch.value.finding"
+                    enrichment:        "$.branch.value.enrichment"
+                    project:           "$.context.project"
+                    repo:              "$.context.repo"
+                    defaultStatusName: "$.context.defaultStatusName"
+              join: all
+              max_concurrency: 4
+              on_branch_failure: continue
+              total_timeout_ms: 600000
+            output:
+              upsert_results: "$.output.branches[*].output"
+
+      # DETERMINISTIC rollup (code, not the agent's say-so) — see
+      # inspect.ticket.rollup-upserts.yaml.
+      aggregating:
+        goal: Roll the per-finding upsert results up into filed/updated/rollup.
+        transitions:
+          aggregate:
+            target: done
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.ticket.rollup-upserts
+              args:
+                - "$.context.upsert_results"
+            output:
+              filed:          "$.output.json.filed"
+              updated:        "$.output.json.updated"
+              failed:         "$.output.json.failed"
+              rollup:         "$.output.json.rollup"
+              rollup_error:   "$.output.json.error"
+
+      done: { terminal: true }

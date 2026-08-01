@@ -1,0 +1,108 @@
+# scripts-library/inspect.github.issue-read.yaml
+#
+# Read-only fetch + parse of a filed ticket, for flow.fix-from-ticket: the
+# EXACT INVERSE of inspect.ticket.render-body's markdown schema. Every
+# section this script extracts is a section render-body wrote — a ticket
+# this script cannot parse a layer/assertion sketch out of is a defect in
+# render-body's body schema, not a judgment call downstream (design doc
+# "A ticket the fix flow cannot act on... is a defect in the upsert cap").
+#
+# Verb `inspect`: read-only derivation.
+#
+# Args (POSITIONAL, JSON envelope, exit 0 always):
+#   $1 / REPO_OWNER — repo owner login (required)
+#   $2 / REPO_NAME  — repo name (required)
+#   $3 / NUMBER     — issue number (required)
+# Emits: {title, area, assertionSketch, affectedFiles, layer, severity,
+#         body, finding: {id,title,severity,observed,expected,
+#         expectedSource,probe_ref}, error} read at $.output.json.*.
+version: "1.0.0"
+scripts:
+  inspect.github.issue-read:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      OWNER="${1:-${REPO_OWNER:-}}"
+      NAME="${2:-${REPO_NAME:-}}"
+      NUM="${3:-${NUMBER:-}}"
+
+      fail() { jq -n --arg e "${1:-unknown error}" \
+                 '{title: "", area: "", assertionSketch: "", affectedFiles: [],
+                   layer: "", severity: "", body: "", error: $e}'; exit 0; }
+
+      [ -z "${OWNER// /}" ] && fail "empty repo owner"
+      [ -z "${NAME// /}" ]  && fail "empty repo name"
+      [ -z "${NUM// /}" ]   && fail "empty issue number"
+      command -v gh >/dev/null 2>&1 || fail "gh CLI not on PATH"
+      command -v jq >/dev/null 2>&1 || fail "jq not on PATH"
+
+      view_raw="$(gh issue view "$NUM" --repo "$OWNER/$NAME" --json title,body 2>&1)" \
+        || fail "gh issue view failed: $(printf '%s' "$view_raw" | tail -1)"
+      TITLE="$(printf '%s' "$view_raw" | jq -r '.title // ""')"
+      BODY="$(printf '%s' "$view_raw" | jq -r '.body // ""')"
+
+      # ---- parse render-body's markdown sections (its exact inverse) ----
+      AREA="$(printf '%s' "$BODY" \
+        | grep -m1 '^\*\*Area / tool' \
+        | sed -E 's/^\*\*Area \/ tool · persona · route:\*\* *//' \
+        | awk -F' · ' '{print $1}')"
+
+      ASSERTION="$(printf '%s' "$BODY" \
+        | awk '/^\*\*Red→green assertion sketch:\*\*$/{getline; print; exit}')"
+
+      AFFECTED_RAW="$(printf '%s' "$BODY" \
+        | grep -m1 '^\*\*Affected files:\*\*' \
+        | sed -E 's/^\*\*Affected files:\*\* *//')"
+      if ! printf '%s' "$AFFECTED_RAW" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        AFFECTED_RAW='[]'
+      fi
+
+      LAYER="$(printf '%s' "$BODY" \
+        | grep -m1 '^\*\*Layer:\*\*' \
+        | sed -E 's/^\*\*Layer:\*\* *//')"
+
+      SEVERITY="$(printf '%s' "$BODY" \
+        | grep -m1 '^\*\*Severity' \
+        | sed -E 's/^\*\*Severity → Priority \/ Size:\*\* *//' \
+        | awk -F' → ' '{print $1}')"
+
+      jq -n --arg title "$TITLE" --arg area "${AREA:-}" --arg assertion "${ASSERTION:-}" \
+            --argjson affected "$AFFECTED_RAW" --arg layer "${LAYER:-}" \
+            --arg severity "${SEVERITY:-}" --arg body "$BODY" --argjson num "${NUM:-0}" \
+        '{ title: $title, area: $area, assertionSketch: $assertion,
+           affectedFiles: $affected, layer: $layer, severity: $severity,
+           body: $body,
+           # A ready-made cap.diagnose.finding-SHAPED object (id/title/
+           # severity/observed/expected/expectedSource/probe_ref) for
+           # flow.fix-from-ticket to feed straight into
+           # cap.implement.regression-test — no `output:` mapping anywhere
+           # in this pack builds a compound object from mixed literal +
+           # dynamic fields, so that reshape happens HERE (once, in the
+           # script that already parsed every piece) instead of being
+           # invented at the flow layer. `expected` is the assertion
+           # sketch itself — render-body derived it FROM the original
+           # Finding.expected in the first place (design doc "Red→green
+           # assertion sketch (the exact test to write)"), so round-
+           # tripping it back as `expected` is exact, not a lossy guess.
+           finding: {
+             id:       ("ticket-" + ($num | tostring)),
+             title:    $title,
+             severity: $severity,
+             observed: ("See ticket #" + ($num | tostring) + ": " + $title),
+             expected: $assertion,
+             expectedSource: { kind: "spec", reference: ("issue #" + ($num | tostring)) },
+             probe_ref: ""
+           },
+           # Pre-composed PR title/body for cap.coordinate.pr-open (same
+           # "single already-composed field, no concatenation at the flow
+           # layer" pattern flow.bugfix-from-error-log uses for its own
+           # opening_pr state). "Fixes #<N>" is what makes GitHub
+           # auto-close the ticket on merge — composed here, once, where
+           # $num is already in scope.
+           prTitle: ("Fix: " + $title),
+           prBody:  ("Fixes #" + ($num | tostring) + "\n\n" + $assertion),
+           error: null }'

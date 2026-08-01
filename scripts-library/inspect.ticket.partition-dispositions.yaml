@@ -1,0 +1,69 @@
+# scripts-library/inspect.ticket.partition-dispositions.yaml
+#
+# ADDITION BEYOND THE PLAN'S LITERAL TASK 4 FILE LIST (documented, not
+# silent): the plan names 3 files for Task 4 (cap.diagnose.ticket-
+# disposition, run.github.issue-close, flow.tickets-triage-cleanup) and
+# its Step 3 describes an "applying" state that is "deterministic: only
+# close_fixed+evidence -> issue-close; else collect". Turning a fanned-out
+# array of {item, disposition, evidence, rationale} verdicts into the
+# closable-vs-collected partition that state needs requires either (a) a
+# JSONPath filter-predicate in an `output:` mapping (no `[?(@...)]` syntax
+# is used anywhere else in this pack — not a safe bet to invent one) or
+# (b) a tiny deterministic script. This is (b): pure jq, no I/O, no
+# GitHub call.
+#
+# DEFENSE IN DEPTH, same stance as audit.findings.aggregate's unevidenced
+# recount: `close_fixed` should be unrepresentable without valid evidence
+# (cap.diagnose.ticket-disposition's own inputSchema poka-yoke enforces
+# that), but this script re-validates independently in CODE rather than
+# trusting the upstream shape — a close_fixed that somehow arrives without
+# a well-formed evidence object is routed to `needs_human`, never silently
+# dropped and never force-closed.
+#
+# Verb `inspect`: pure derivation.
+#
+# Args (POSITIONAL, JSON envelope, exit 0 always):
+#   $1 / DISPOSITIONS_JSON — array of {item, disposition, evidence,
+#                            rationale} (cap.diagnose.ticket-disposition's
+#                            per-branch output, fanned out over every
+#                            board item) (required)
+# Emits: {closable: [...], needs_human: [...], kept: [...], stale: [...], error}
+# read at $.output.json.*. `closable` is exactly the set
+# flow.tickets-triage-cleanup's applying state fans `run.github.issue-close`
+# out over.
+version: "1.0.0"
+scripts:
+  inspect.ticket.partition-dispositions:
+    verb: inspect
+    lifecycle: experimental
+    source: cognitive-architectures
+    body: |
+      #!/usr/bin/env bash
+      # No `set -e`: every failure is reported as JSON data, exit 0.
+      set -uo pipefail
+      DISPOSITIONS="${1:-[]}"
+
+      fail() { jq -n --arg e "$1" \
+                 '{closable: [], needs_human: [], kept: [], stale: [], error: $e}'; exit 0; }
+
+      command -v jq >/dev/null 2>&1 || fail "jq not on PATH"
+      printf '%s' "$DISPOSITIONS" | jq -e 'type == "array"' >/dev/null 2>&1 \
+        || fail "dispositions is not a JSON array"
+
+      printf '%s' "$DISPOSITIONS" | jq '
+        def valid_evidence:
+          (.evidence // null) != null
+          and ((.evidence.kind // "") | IN("merged_pr", "code_ref"))
+          and ((.evidence.reference // "") | length) > 0;
+        {
+          closable:    (map(select(.disposition == "close_fixed" and valid_evidence))),
+          # Independent recount: a close_fixed that arrives WITHOUT valid
+          # evidence never gets force-closed — it falls through to
+          # needs_human alongside the honestly-uncertain verdicts.
+          needs_human: (map(select(
+            .disposition == "needs_human"
+            or (.disposition == "close_fixed" and (valid_evidence | not))))),
+          kept:        (map(select(.disposition == "keep"))),
+          stale:       (map(select(.disposition == "close_stale"))),
+          error: null
+        }'

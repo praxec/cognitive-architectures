@@ -1,0 +1,250 @@
+# orchestrators/flow.fix-from-ticket.yaml
+#
+# The FIX side of the ticket-lifecycle flow family
+# (docs/design-ticket-lifecycle-workflows.md): one issue number -> a
+# red-proved regression test -> a scope-bounded fix -> a deterministic
+# green verification -> a `Fixes #N` PR. Deliberately a SIMPLER chain than
+# flow.qa.promote-finding's full TDD-promotion loop (no separability
+# fail-fast, no triage/layer-budget ambiguity gate, no assertion-quality
+# review, no human approval, no test-pin/immutability tamper-check, no
+# flake scan): the ticket's `layer` is already fixed by whoever filed it,
+# and this is a single-shot fix — RED-verify -> fix -> GREEN-verify -> PR,
+# reusing the exact same caps (cap.implement.regression-test,
+# cap.verify.test-red, cap.implement.fix-under-scope, cap.verify.repro-
+# rate, cap.coordinate.pr-open) at their proven wiring.
+#
+# Status lifecycle (coordinator brief: "'Cleared' = closed on the board"):
+# Status=Hunting the moment work starts. This board's Status enum (Found/
+# Hunting/Killed/Buried — docs/proven-projectv2-contract.md) has no
+# "In-Review" option, so a PR opening does NOT change Status again here —
+# a merged-but-unverified PR is not yet "cleared" (design doc); only
+# flow.tickets-triage-cleanup's evidence-gated close ever sets Killed.
+
+workflows:
+  flow.fix-from-ticket:
+    description: |
+      Fix ONE ticket end to end: read its fix context, mark it Hunting on
+      the board, red-proof a regression test from its assertion sketch,
+      fix the defect under src/ only, deterministically verify green, and
+      open a `Fixes #N` PR (never auto-merged).
+    inputs:
+      # Issue + board target — never hard-coded downstream.
+      repo:         { type: object,  default: { owner: outboundlabs, name: autopilot-beta } }
+      project:      { type: object,  default: { owner: outboundlabs, number: 3 } }
+      issue_number: { type: integer, required: true }
+      # Promotion charter (test_glob/src_glob conventions) —
+      # cap.implement.regression-test / cap.implement.fix-under-scope's
+      # write-scopes are the structural enforcement (tests/ vs src/ file
+      # tools), this is descriptive convention only.
+      charter:      { type: object, default: { src_glob: "src/**", test_glob: "tests/**" } }
+      # PR base branch (flow.bugfix-from-error-log's same input pattern).
+      base_ref:     { type: string, default: "main" }
+      # The board Status a ticket is moved to the MOMENT work is picked up, so it
+      # leaves the backlog and a second run won't grab it. CONFIGURABLE — never
+      # couple to one board's swim-lane naming (this repo's in-progress lane is
+      # "Hunting"; another board might call it "In Progress"/"Doing").
+      in_progress_status: { type: string, default: "Hunting" }
+    outputs:
+      test_path:   { type: string }
+      fix_summary: { type: object }
+      pr_url:      { type: string }
+      pr_number:   { type: integer }
+    # V24: every declared output must be WRITTEN on every path to a
+    # terminal state — fix_summary/pr_url/pr_number are only set on the
+    # success path (opening_pr), so the `failed` terminal (reached from
+    # red_gate/green_gate) needs them seeded here (same pattern
+    # flow.qa.promote-finding uses for its own honest-floor slots).
+    initialContext:
+      fix_summary: {}
+      pr_url:      ""
+      pr_number:   0
+    initialState: reading
+    states:
+
+      reading:
+        goal: Fetch and parse the ticket's fix context.
+        transitions:
+          read:
+            target: resolving
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.run.ticket-read
+              use:
+                inputs:
+                  repo:   "$.context.repo"
+                  number: "$.workflow.input.issue_number"
+                outputs:
+                  "$.context.layer":   layer
+                  "$.context.finding": finding
+                  "$.context.pr_title": prTitle
+                  "$.context.pr_body":  prBody
+
+      resolving:
+        goal: Resolve the board's field/option ids (needed to mark Status=Hunting).
+        transitions:
+          resolve:
+            target: marking_in_progress
+            actor: deterministic
+            executor:
+              kind: script
+              subject: inspect.github.resolve-project
+              args:
+                - "$.workflow.input.project.owner"
+                - "$.workflow.input.project.number"
+            output:
+              resolved:      "$.output.json"
+              resolve_error: "$.output.json.error"
+
+      # Non-fatal: a Status-mark failure must not block the fix itself
+      # (the next triage-cleanup pass will still find and correct board
+      # state independently — see status_error in the terminal report).
+      marking_in_progress:
+        goal: Claim the ticket — move it to the configured in-progress status (out of the backlog) so a concurrent run won't pick it up.
+        transitions:
+          mark:
+            target: writing_red
+            actor: deterministic
+            executor:
+              kind: script
+              subject: run.github.issue-set-status
+              args:
+                - "$.workflow.input.repo.owner"
+                - "$.workflow.input.repo.name"
+                - "$.workflow.input.issue_number"
+                - "$.context.resolved"
+                - "$.workflow.input.in_progress_status"
+            output:
+              status_error: "$.output.json.error"
+
+      # ONE failing test, written under tests/ ONLY (cap.implement.
+      # regression-test's own write-scope enforcement).
+      writing_red:
+        goal: Write one failing regression test from the ticket's assertion sketch.
+        transitions:
+          write:
+            target: proving_red
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.implement.regression-test
+              use:
+                inputs:
+                  finding:       "$.context.finding"
+                  charter:       "$.workflow.input.charter"
+                  layer:         "$.context.layer"
+                  justification: "layer taken from the ticket's own Layer field"
+                outputs:
+                  "$.context.test_path": test_path
+
+      # THE red proof — code runs the test, code classifies the failure.
+      proving_red:
+        goal: Prove the new test fails NOW on an assertion (real red).
+        transitions:
+          prove:
+            target: red_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.verify.test-red
+              use:
+                inputs:
+                  test_path:  "$.context.test_path"
+                  finding_id: "$.context.finding.id"
+                outputs:
+                  "$.context.red_reason": red_reason
+                  "$.context.red_proof":  red_report
+                  "$.context.replay_obs": replay_obs
+
+      # ONLY assertion_failed advances — same gate flow.qa.promote-finding
+      # uses (tautology / infra_error / not_found / not_evaluated all fall
+      # through to failed).
+      red_gate:
+        transitions:
+          red:
+            target: fixing
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.red_reason == 'assertion_failed'" }
+          not_red:
+            target: failed
+            actor: deterministic
+
+      # The fix, under src/ ONLY (cap.implement.fix-under-scope's write-
+      # scope enforcement).
+      fixing:
+        goal: Fix the defect under src/ so the red-proved test goes green.
+        transitions:
+          fix:
+            target: verifying
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.implement.fix-under-scope
+              use:
+                inputs:
+                  finding:   "$.context.finding"
+                  test_path: "$.context.test_path"
+                  red_proof: "$.context.red_proof"
+                outputs:
+                  "$.context.fix_summary": fix_summary
+
+      # DIRECT deterministic verify (never hop_slot — same stance as
+      # flow.qa.promote-finding's verifying_fix). attempts=2 is the
+      # script's proof floor: the test must pass twice to count green.
+      verifying:
+        goal: Deterministically verify the fix makes the test pass.
+        transitions:
+          verify:
+            target: green_gate
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.verify.repro-rate
+              use:
+                inputs:
+                  observations: "$.context.replay_obs"
+                  attempts:     2
+                outputs:
+                  "$.context.green_count":   reproduced_count
+                  "$.context.replay_report": repro_report
+
+      green_gate:
+        transitions:
+          green:
+            target: opening_pr
+            actor: deterministic
+            guards:
+              - { kind: expr, expr: "$.context.green_count == 1" }
+          not_green:
+            target: failed
+            actor: deterministic
+
+      # `Fixes #<N>` in the body is what makes GitHub auto-close the
+      # ticket on merge — never auto-merged by this flow (design doc: a
+      # merged PR alone is not yet "cleared"; only the evidence-gated
+      # cleanup pass sets Killed).
+      opening_pr:
+        goal: Open the fix PR referencing the ticket.
+        transitions:
+          open:
+            target: done
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cap.coordinate.pr-open
+              use:
+                inputs:
+                  title: "$.context.pr_title"
+                  body:  "$.context.pr_body"
+                  base:  "$.workflow.input.base_ref"
+                outputs:
+                  "$.context.pr_url":    url
+                  "$.context.pr_number": pr_number
+
+      done:
+        terminal: true
+
+      failed:
+        terminal: true
+        outcome: failure
