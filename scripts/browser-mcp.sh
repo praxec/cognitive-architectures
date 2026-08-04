@@ -45,6 +45,10 @@
 
 set -eu
 
+# Scratch space for the launch probe's stderr, cleaned up on exit.
+TMPDIR_LAUNCH=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_LAUNCH"' EXIT INT TERM
+
 if [ "${BROWSER_MCP_SKIP_LOCAL:-0}" != "1" ]; then
   # ---------------------------------------------------------------------
   # Step 1 — bootstrap: idempotent install (fast no-op when present).
@@ -115,7 +119,61 @@ if [ "${BROWSER_MCP_SKIP_LOCAL:-0}" != "1" ]; then
     echo "  nothing', not a launch error." >&2
     exit 1
   fi
-  echo "browser-mcp.sh: resolved Chromium -> $CHROME" >&2
+
+  # A resolved, executable path is NOT a launchable browser. `playwright install
+  # chromium` downloads the binary but NOT the OS packages it dynamically links
+  # against, and a minimal Linux image (WSL's Ubuntu, most containers) ships none
+  # of them. The binary is then present, 290 MB, and `-x` true — and dies
+  # instantly:
+  #
+  #   error while loading shared libraries: libnspr4.so: cannot open shared
+  #   object file   →   exitCode=127
+  #
+  # Observed cost of not checking: the bootstrap above reported success, the MCP
+  # server started, it accepted the run'"'"'s browser lease, and the failure
+  # surfaced ~900 SECONDS LATER inside an agent turn as
+  # AGENT_STEP_BUDGET_EXHAUSTED — after two models had each burned a full-length
+  # attempt trying to drive a browser that could never start. The engine'"'"'s own
+  # note was "this step needs a human", which was true and unactionable.
+  #
+  # So: actually launch it. `--dump-dom about:blank` is the cheapest complete
+  # round-trip — it loads a page and prints the DOM, exercising the dynamic
+  # linker, the sandbox flags and the renderer, in well under a second.
+  # An operator may point at a Chromium this script would not have resolved (a
+  # system package, a pinned build). It is also what makes the FAILURE path
+  # testable: a preflight whose error branch nobody can exercise is a preflight
+  # nobody can trust.
+  if [ -n "${BROWSER_MCP_CHROME:-}" ]; then
+    echo "browser-mcp.sh: BROWSER_MCP_CHROME override -> $BROWSER_MCP_CHROME" >&2
+    CHROME="$BROWSER_MCP_CHROME"
+  fi
+
+  echo "browser-mcp.sh: verifying Chromium can launch..." >&2
+  if ! "$CHROME" --headless --disable-gpu --no-sandbox --dump-dom about:blank >/dev/null 2>"$TMPDIR_LAUNCH/err"; then
+    echo "browser-mcp.sh: FATAL - Chromium is installed but CANNOT LAUNCH." >&2
+    echo "  path: $CHROME" >&2
+    sed "s/^/  | /" "$TMPDIR_LAUNCH/err" >&2 || true
+    # The overwhelmingly common cause, and the one worth naming precisely.
+    if command -v ldd >/dev/null 2>&1; then
+      MISSING=$(ldd "$CHROME" 2>/dev/null | awk "/not found/ {print \$1}" | sort -u | tr "\n" " ")
+      if [ -n "$MISSING" ]; then
+        echo "  MISSING SHARED LIBRARIES: $MISSING" >&2
+        echo "  Playwright downloads the browser, not the OS packages it links" >&2
+        echo "  against. Install them:" >&2
+        echo "    sudo npx playwright install-deps chromium" >&2
+        echo "  or, on Debian/Ubuntu, the direct equivalent:" >&2
+        echo "    sudo apt-get install -y libnspr4 libnss3 libasound2t64" >&2
+        echo "  Without root, they can be fetched user-locally:" >&2
+        echo "    apt-get download libnspr4 libnss3 libasound2t64" >&2
+        echo "    dpkg -x <each>.deb ~/.local/chromium-deps" >&2
+        echo "    export LD_LIBRARY_PATH=~/.local/chromium-deps/usr/lib/x86_64-linux-gnu" >&2
+      fi
+    fi
+    echo "  Failing HERE, in one second, rather than 900 seconds into an agent" >&2
+    echo "  turn that has already spent two model attempts on it." >&2
+    exit 1
+  fi
+  echo "browser-mcp.sh: resolved Chromium -> $CHROME (launches OK)" >&2
 fi
 
 # ---------------------------------------------------------------------------
