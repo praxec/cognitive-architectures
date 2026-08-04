@@ -41,3 +41,32 @@ layout:
   # REFERENCE connection definitions operators copy into their config
   # rather than loading wholesale.
   connections:   ._unused_v02_connections
+
+# The `connections/` default dir holds reference templates this manifest remaps
+# away (above) and never loads. Declare it reference-only so `check`/`serve` don't
+# warn UNSCANNED_DEFINITION_DIR on the by-design layout.
+reference_only:
+  - connections
+
+# The model requirement TRAVELS with the pack (praxec 0.0.48+): these OPEN
+# affinity keys have no default-chain fallback, so an operator who mounts this
+# pack must bind them in their models.yaml `activity:` block. `check`/`doctor`
+# read this block to surface the recommendation + `praxec models bind <affinity>`
+# instead of silently falling back to the commodity default. Recommendations are
+# swappable (the operator's key/cost stays authoritative), not hard pins. Both
+# review affinities are COMMODITY by standing owner directive — nothing in the
+# review chain may be pegged to a frontier model.
+affinities:
+  review:
+    tier: commodity
+    capability: >-
+      Senior structured-findings review with producer≠evaluator separation
+      (assertion quality, plan vetting). Commodity-only by directive; deepseek-v4-pro
+      leads as the reliable structured-findings converger.
+    recommended: openrouter/deepseek/deepseek-v4-pro
+  react-review:
+    tier: commodity
+    capability: >-
+      The React anti-pattern review gate, split from `review` so `review` can run
+      effort-safe (glm→kimi) while this gate stays on a converging deepseek lead.
+    recommended: openrouter/deepseek/deepseek-v4-pro
