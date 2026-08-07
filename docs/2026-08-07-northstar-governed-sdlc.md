@@ -68,13 +68,15 @@ are enforced, not hoped.
 | **Consumer** (uses the system) | idea → reviewing an executor's output in minutes, **zero YAML**, chat/CLI-native | % consumer actions needing YAML = **0**; time-to-review |
 | **Author** (builds an executor) | `praxec new executor <type>` scaffolds a **V-rule-clean, contract-conforming skeleton**; `check` **teaches** (explains + offers the fix) | **author-error-rate** (failed `check`s before green) trending down; zero hand-authored machinery |
 | **Operator** (runs praxec) | `praxec init` → one working config + bind models → go — **no four-file assembly** | **time-to-first-governed-run** (clone→run) in minutes |
+| **Worktree / any checkout** | praxec is **worktree-native**: `repo_root` is auto-detected from the CWD's git root, all paths are repo-relative, config carries **no absolute paths** (poka-yoke: `check` refuses them), and run state is worktree-local while the governance store is repo-shared via the git common dir. `git worktree add …` **needs zero reconfiguration** (praxec/praxec#206) | config-edits-per-worktree = **0**; absolute paths in config/inputs = **0** |
 | **Anyone** (a run dies) | termination reason surfaces **prominently** + `praxec why <run>` | MTTR on a dead run |
 
 Rationale is grounded in lived friction: config sprawl (recreated the focused config
 repeatedly), mandatory `praxec.repo.yaml` on plain repos (blocked config load twice),
 V-rule landmines (V6/V12/V13/V30, parallel fan-in, `use:` vs `input:`, `missionDeadlineSecs`,
 `max_turns` not YAML-configurable), and cryptic kills (30-min deadline surfaced only in
-the log). Simpler core + these four bars = the whole DX story.
+the log), and the worktree pain (absolute paths in config break every new worktree).
+Simpler core + these bars = the whole DX story.
 
 ## 5. Governance observability — instrument from Inc 0
 
