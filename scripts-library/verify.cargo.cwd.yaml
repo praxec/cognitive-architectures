@@ -2,7 +2,7 @@
 #
 # Package-SCOPED soft cargo verify for driving a fix into ONE member of a large
 # workspace. Identical contract to verify.cargo.soft ({passed, issues, summary},
-# always exit 0) but scoped to the package in the working directory — it drops
+# exit 0 for completed checks; nonzero for an unusable verifier) but scoped to the package in the working directory — it drops
 # `--workspace` / `--all`, so cargo (run from a member's directory) builds, lints,
 # and tests ONLY that package, not the whole workspace.
 #
@@ -20,6 +20,11 @@ scripts:
     body: |
       #!/usr/bin/env bash
       # No `set -e`: a failing cargo must NOT abort — report as data.
+      # A missing encoder is a verifier failure, never an empty success payload.
+      if ! command -v jq >/dev/null 2>&1; then
+        printf '{"error":"VERIFIER_DEPENDENCY_MISSING","dependency":"jq"}\n'
+        exit 2
+      fi
       # cwd is a workspace MEMBER dir; without --workspace/--all cargo scopes to it.
       fmt_out=$(cargo fmt -- --check 2>&1);                          fmt_rc=$?
       clippy_out=$(cargo clippy --lib --bins -- -D warnings 2>&1);   clippy_rc=$?
@@ -32,5 +37,16 @@ scripts:
       issues=$(printf '%s\n' "$log" \
         | grep -nE 'error(\[|:)|^[[:space:]]*warning:|panicked|test result: FAILED|\.\.\. FAILED|cannot find|mismatched types|unresolved import' \
         | head -300 | jq -Rs . 2>/dev/null || printf '""')
+      # Formatting diffs and tool-launch failures need not match compiler regexes.
+      # Preserve a bounded raw diagnostic fallback; disclose truly missing logs.
+      diagnostics_available=true
+      if [ "$passed" = false ] && ! printf '%s' "$issues" | jq -e 'test("\\S")' >/dev/null; then
+        if printf '%s' "$log" | grep -q '[^[:space:]]'; then
+          issues=$(printf '%s' "$log" | tail -c 16000 | jq -Rs .) || exit 2
+        else
+          diagnostics_available=false
+          issues=$(printf 'Verifier failed without diagnostics (fmt=%s clippy=%s test=%s).' "$fmt_rc" "$clippy_rc" "$test_rc" | jq -Rs .) || exit 2
+        fi
+      fi
       summary=$(printf '%s' "$log" | tail -c 2000 | jq -Rs . 2>/dev/null || printf '""')
-      printf '{"passed": %s, "issues": %s, "summary": %s}\n' "$passed" "$issues" "$summary"
+      printf '{"passed": %s, "issues": %s, "summary": %s, "diagnostics_available": %s}\n' "$passed" "$issues" "$summary" "$diagnostics_available"
