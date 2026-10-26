@@ -30,6 +30,9 @@ workflows:
     snippet:
       inputs:
         brief: { type: string, required: true }
+        # Set only on a path-grounding retry. It carries deterministic missing
+        # paths from the target repository, not an advisory model judgment.
+        grounding_report: { type: object }
       outputs:
         graph:               { type: object }
         acceptance_criteria: { type: array }
@@ -52,6 +55,11 @@ workflows:
           `acceptance_criteria` (a testable list the built code must satisfy —
           the downstream deliverable-gap + acceptance gates check against it)
           and `risk` (low|medium|high|critical) + `blast_radius`.
+          When `grounding_report` is supplied, it is a deterministic record of
+          paths from the previous graph that do not exist in the target repo.
+          Correct those paths before submitting a replacement graph; do not
+          reproduce them or schedule them as new files unless their parent
+          directory exists.
           TWO-PLAN STRUCTURE (docs/plan-types.develop-vs-execute.md): this cap
           authors ONLY the DevelopmentPlan — real code deliverables with real
           file-disjoint dependencies. Tag each with

@@ -30,6 +30,20 @@ workflows:
       driven-to-completion build, in one mission via nested flows.
     inputs:
       brief:     { type: string, required: true }
+    # Retain the deterministic grounding verdict in the orchestration context.
+    # A failed verdict is never allowed to reach FMECA or CPM scheduling.
+    blackboard:
+      brief:            { type: string }
+      design:           { type: object }
+      design_risk:      { type: object }
+      graph:            { type: object }
+      acceptance:       { type: array }
+      grounded:         { type: boolean }
+      grounding_missing: {}
+      grounding_report:  { type: object }
+      plan_ready:       { type: boolean }
+      plan_risk:        { type: object }
+      schedule:         { type: object }
     initialState: deriving
     states:
 
@@ -55,7 +69,7 @@ workflows:
         goal: Build the deliverable graph + acceptance criteria.
         transitions:
           build_graph:
-            target: plan_qa
+            target: grounding_graph
             actor: deterministic
             executor:
               kind: workflow
@@ -66,6 +80,58 @@ workflows:
                 outputs:
                   "$.context.graph":      graph
                   "$.context.acceptance": acceptance_criteria
+
+      # A graph accepted by its authoring schema can still contain invented
+      # repo paths. Ground it deterministically before any advisory planning
+      # or scheduling workflow consumes it.
+      grounding_graph:
+        goal: Verify every graph path against the run's repository.
+        transitions:
+          ground:
+            target: grounded_graph
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.verify.path-grounding
+              use:
+                inputs:
+                  plan: "$.context.graph"
+                outputs:
+                  "$.context.grounded":          grounded
+                  "$.context.grounding_missing": missing
+                  "$.context.grounding_report":  report
+
+      # Only a grounded graph proceeds. On a false verdict, retain the report
+      # for the run record and return to the authoring state; a hallucinated
+      # tree can therefore never be committed to a CPM schedule.
+      grounded_graph:
+        goal: Admit only a graph grounded in the target repository.
+        transitions:
+          advance:
+            target: plan_qa
+            actor: deterministic
+            guards:
+              - kind: expr
+                expr: "$.context.grounded == true"
+          repair:
+            target: grounding_graph
+            actor: deterministic
+            executor:
+              kind: workflow
+              definitionId: cognitive/cap.plan.build-graph
+              use:
+                inputs:
+                  brief:            "$.workflow.input.brief"
+                  grounding_report: "$.context.grounding_report"
+                outputs:
+                  "$.context.graph":      graph
+                  "$.context.acceptance": acceptance_criteria
+            guards:
+              - kind: expr
+                expr: "$.context.grounded == false"
+          unexpected:
+            target: failed
+            actor: deterministic
 
       # PLAN-QA: harden the deliverable graph via the FMECA CONVERGENCE loop
       # before committing to a schedule, so the plan_id is computed over a vetted
@@ -138,4 +204,7 @@ workflows:
                   stack:        ""
 
       done:
+        terminal: true
+
+      failed:
         terminal: true
