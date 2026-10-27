@@ -35,14 +35,16 @@ workflows:
     blackboard:
       brief:            { type: string }
       design:           { type: object }
-      design_risk:      { type: object }
+      design_risk:      { type: array }
       graph:            { type: object }
       acceptance:       { type: array }
       grounded:         { type: boolean }
       grounding_missing: {}
       grounding_report:  { type: object }
       plan_ready:       { type: boolean }
-      plan_risk:        { type: object }
+      # flow.harden.fmeca-converge projects its `risk_ranking` output here;
+      # that contract is an ordered array, not an object.
+      plan_risk:        { type: array }
       schedule:         { type: object }
     initialState: deriving
     states:

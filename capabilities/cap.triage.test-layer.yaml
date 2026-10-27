@@ -72,8 +72,10 @@ workflows:
                   default: []
                   items:
                     type: object
-                    required: [layer]
+                    required: [id, name, layer]
                     properties:
+                      id: { type: string }
+                      name: { type: string }
                       layer:
                         type: string
                         enum: [unit, component, integration, contract, e2e]
