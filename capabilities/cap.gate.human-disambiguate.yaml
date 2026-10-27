@@ -16,10 +16,30 @@ workflows:
       when a deterministic classifier returns is_ambiguous=true.
     snippet:
       inputs:
-        candidates: { type: array,  required: true }
+        candidates:
+          type: array
+          minItems: 1
+          required: true
+          items:
+            type: object
+            required: [id, name, layer]
+            properties:
+              id: { type: string }
+              name: { type: string }
+              layer: { type: string, enum: [unit, component, integration, contract, e2e] }
+              justification: { type: string, default: "" }
         prompt:     { type: string, default: "Pick one" }
       outputs:
-        chosen:    { type: object }
+        # The sole current caller selects a test-layer candidate, then projects
+        # this object into its declared terminal `layer` output. Make that
+        # contract explicit so an incomplete human/capability result cannot
+        # silently become a null terminal scalar.
+        chosen:
+          type: object
+          required: [layer]
+          properties:
+            layer: { type: string, enum: [unit, component, integration, contract, e2e] }
+            justification: { type: string, default: "" }
         rationale: { type: string }
     initialState: awaiting_human
     states:
