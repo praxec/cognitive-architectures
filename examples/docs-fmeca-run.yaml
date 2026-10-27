@@ -72,7 +72,7 @@ gateway:
   # An effort-safe chain (see docs/docs-fmeca.models.yaml). ADJUST to your
   # checkout's absolute path, or merge that file's `review` chain into
   # your own models_yaml.
-  models_yaml: docs/docs-fmeca.models.yaml
+  models_yaml: ../docs/docs-fmeca.models.yaml
 
 praxec:
   embeddings:
