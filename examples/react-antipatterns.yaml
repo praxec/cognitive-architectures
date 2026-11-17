@@ -71,4 +71,4 @@ store:
 # cap.implement.scope-bounded [existing, reused]), its scripts-library
 # entries, and its skills.
 repos:
-  - path: /home/mc/working/cognitive-architectures
+  - path: ..

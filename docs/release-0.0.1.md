@@ -20,6 +20,12 @@ bash scripts/validate.sh
 That command requires Praxec 0.0.22 or later, matching the manifest's stated
 compatibility floor.
 
+## Fuzz verification (#97)
+
+`bash scripts/fuzz.sh` (the behavioural fuzz that `validate.sh` runs) is clean on this release: all 13 example configs exit 0, with 0 transition-coverage failures and every smoke definition ok (126 definitions for the full-pack configs). This was measured on 2026-11-17 with Praxec built from staging at `b3a613d`, which carries praxec/praxec#310 (deterministic chained output contracts, and repo-lock plus exclusive-pool wiring in the fuzz harness).
+
+Praxec 0.0.53 lacks #310. With it, the same fuzz reports harness findings that are not pack defects: `POOL_LEASE_UNAVAILABLE` for the browser-exclusive definitions, and mock-seeding `INPUT_SCHEMA_VIOLATION` and `GUARD_UNSET_SLOT` errors. `validate.sh` treats fuzz as informational, so it still exits 0 on 0.0.53. A clean fuzz needs the first Praxec release that contains #310.
+
 ## Rollback
 
 Because this is the first public pack release, there is no earlier public tag
