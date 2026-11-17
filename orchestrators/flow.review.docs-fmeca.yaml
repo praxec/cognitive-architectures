@@ -245,6 +245,12 @@ workflows:
     # must not read as "0 failure modes / all probes evaluated".
     initialContext:
       items_reviewed: 0
+      # Conservative route floor for a direct/fuzzed entry at kind_gate. The
+      # normal `advancing` transition overwrites both values from the queue-pop
+      # script; without these floors an isolated guard reads an unset slot and
+      # becomes an engine error instead of taking the explicit halted path.
+      queue_exhausted: true
+      current_item: { id: "", kind: "invalid", path: "", abs_path: "" }
       fmeca_log: ""
       probe_log: ""
       script_org_log: ""

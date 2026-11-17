@@ -71,4 +71,4 @@ connections:
 # The cognitive-architectures resource repo: flow.audit-docs + its caps, the
 # audit.drift.aggregate script, and the review.doc-drift.critic skill.
 repos:
-  - path: /home/mc/working/cognitive-architectures
+  - path: ..

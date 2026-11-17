@@ -4,9 +4,13 @@ All notable changes to this repository are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-The library is pre-1.0 (`0.0.x`) and not yet publicly released.
+The library is pre-1.0 (`0.0.x`).
 
-## [Unreleased]
+## [0.0.1] - 2026-11-17
+
+### Fixed
+
+- `examples/audit-docs-run.yaml` and `examples/react-antipatterns.yaml` load the pack from `..` instead of an absolute checkout path, so validation fuzzes the checked-out tree rather than whatever branch a local clone is on (#97).
 
 ### Added
 
